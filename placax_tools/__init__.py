@@ -1,0 +1,1 @@
+from placax import _device  # noqa: F401  must run before any `import jax`, anywhere in this package

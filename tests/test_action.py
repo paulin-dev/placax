@@ -1,0 +1,68 @@
+from placax.extras.render import render  # noqa: F401  must precede jax imports
+from placax.types import EnvParams  # noqa: F401
+from placax_agents.policy.action import legal_action_logits, sample_action  # noqa: F401
+
+import jax
+import jax.numpy as jnp
+from jax import random
+
+
+def test_legal_action_logits_masks_occupied_and_out_of_bounds() -> None:
+    params = EnvParams(grid=4, n_macros=2)
+    positions = jnp.array([[0, 0], [-1, -1]])
+    sizes_array = jnp.array([[1.0, 1.0], [1.0, 1.0]])
+    occupied = render(positions, sizes_array, params.grid)
+    logits = jnp.zeros((4, 4))
+
+    masked = legal_action_logits(logits, occupied, params, macro_size=(1, 1))
+    assert masked[0, 0] == -jnp.inf  # occupied
+    assert masked[1, 1] == 0.0  # legal, unmasked
+
+
+def test_legal_action_logits_masks_footprint_that_would_overflow() -> None:
+    params = EnvParams(grid=4, n_macros=1)
+    occupied = jnp.zeros((4, 4), dtype=bool)
+    logits = jnp.zeros((4, 4))
+
+    masked = legal_action_logits(logits, occupied, params, macro_size=(2, 2))
+    assert masked[3, 3] == -jnp.inf  # a 2x2 macro can't start at the last row/col
+    assert masked[0, 0] == 0.0  # fits fine
+
+
+def test_legal_action_logits_protects_a_large_macros_full_footprint() -> None:
+    # Regression test: an earlier version derived occupancy from
+    # compute_occupied(), which only marks each placed macro's single
+    # reference cell, not its real size - a 5x5 macro's own interior was
+    # left completely unmasked, a real, confirmed overlap bug.
+    params = EnvParams(grid=8, n_macros=2)
+    positions = jnp.array([[1, 1], [-1, -1]])
+    sizes_array = jnp.array([[5.0, 5.0], [1.0, 1.0]])  # macro 0 is a real 5x5, occupies [1:6,1:6]
+    occupied = render(positions, sizes_array, params.grid)
+    logits = jnp.zeros((8, 8))
+
+    masked = legal_action_logits(logits, occupied, params, macro_size=(1, 1))
+    assert masked[4, 4] == -jnp.inf  # inside macro 0's real footprint, not just its corner
+    assert masked[7, 7] == 0.0  # genuinely outside the footprint, still legal
+
+
+def test_legal_action_logits_falls_back_when_genuinely_no_room() -> None:
+    # Regression test: a real 543-macro rollout on a 64x64 grid hit a
+    # macro with zero legal cells anywhere - masking then produced
+    # all -inf logits, and log_softmax(all -inf) is NaN. Masking must
+    # be skipped entirely in this case, not applied and left broken.
+    params = EnvParams(grid=4)
+    occupied = jnp.ones((4, 4), dtype=bool)  # every cell occupied, genuinely no room
+    logits = jnp.zeros((4, 4))
+
+    masked = legal_action_logits(logits, occupied, params, macro_size=(1, 1))
+    assert not (masked == -jnp.inf).any()
+    assert jnp.isfinite(jax.nn.log_softmax(masked.ravel())).all()
+
+
+def test_sample_action_only_picks_legal_cells() -> None:
+    logits = jnp.full((4, 4), -jnp.inf)
+    logits = logits.at[2, 3].set(0.0)  # exactly one legal cell
+
+    for seed in range(10):
+        action = sample_action(random.PRNGKey(seed), logits)
+        assert action.tolist() == [2, 3]

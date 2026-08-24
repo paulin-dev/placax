@@ -1,0 +1,23 @@
+[project]
+name = "placax"
+version = "0.0.1"
+description = "A fast, shared JAX environment for chip macro placement research"
+requires-python = ">=3.12"
+dependencies = [
+    "jax",
+    "flax",
+    "optax",
+    "numpy",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+cuda = ["jax[cuda13]"]
+cuda12 = ["jax[cuda12]"]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["placax*", "placax_agents*", "placax_tools*"]

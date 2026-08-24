@@ -1,0 +1,9 @@
+UCLA nodes 1.0
+
+NumNodes : 5
+NumTerminals : 3
+	c1	5	5
+	m1	100	200	terminal
+	m2	150	250	terminal
+	m3	80	80	terminal
+	c2	5	5

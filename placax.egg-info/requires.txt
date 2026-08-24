@@ -1,0 +1,13 @@
+jax
+flax
+optax
+numpy
+
+[cuda]
+jax[cuda13]
+
+[cuda12]
+jax[cuda12]
+
+[dev]
+pytest

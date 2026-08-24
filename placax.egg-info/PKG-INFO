@@ -1,0 +1,15 @@
+Metadata-Version: 2.4
+Name: placax
+Version: 0.0.1
+Summary: A fast, shared JAX environment for chip macro placement research
+Requires-Python: >=3.12
+Requires-Dist: jax
+Requires-Dist: flax
+Requires-Dist: optax
+Requires-Dist: numpy
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Provides-Extra: cuda
+Requires-Dist: jax[cuda13]; extra == "cuda"
+Provides-Extra: cuda12
+Requires-Dist: jax[cuda12]; extra == "cuda12"

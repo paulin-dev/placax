@@ -1,0 +1,169 @@
+node {
+  name: "macroA"
+  attr {
+    key: "height"
+    value {
+      f: 19.26
+    }
+  }
+  attr {
+    key: "type"
+    value {
+      placeholder: "MACRO"
+    }
+  }
+  attr {
+    key: "width"
+    value {
+      f: 29.355
+    }
+  }
+  attr {
+    key: "x"
+    value {
+      f: 100.0
+    }
+  }
+  attr {
+    key: "y"
+    value {
+      f: 200.0
+    }
+  }
+}
+node {
+  name: "macroB"
+  attr {
+    key: "height"
+    value {
+      f: 19.26
+    }
+  }
+  attr {
+    key: "type"
+    value {
+      placeholder: "MACRO"
+    }
+  }
+  attr {
+    key: "width"
+    value {
+      f: 29.355
+    }
+  }
+  attr {
+    key: "x"
+    value {
+      f: 300.0
+    }
+  }
+  attr {
+    key: "y"
+    value {
+      f: 200.0
+    }
+  }
+}
+node {
+  name: "macroA/ADR[0]"
+  attr {
+    key: "macro_name"
+    value {
+      placeholder: "macroA"
+    }
+  }
+  attr {
+    key: "type"
+    value {
+      placeholder: "MACRO_PIN"
+    }
+  }
+  attr {
+    key: "x_offset"
+    value {
+      f: -14.3355
+    }
+  }
+  attr {
+    key: "y_offset"
+    value {
+      f: 5.53
+    }
+  }
+}
+node {
+  name: "macroB/ADR[0]"
+  attr {
+    key: "macro_name"
+    value {
+      placeholder: "macroB"
+    }
+  }
+  attr {
+    key: "type"
+    value {
+      placeholder: "MACRO_PIN"
+    }
+  }
+  attr {
+    key: "x_offset"
+    value {
+      f: 2.5
+    }
+  }
+  attr {
+    key: "y_offset"
+    value {
+      f: -1.1
+    }
+  }
+}
+node {
+  name: "macroA/ADR[1]"
+  attr {
+    key: "macro_name"
+    value {
+      placeholder: "macroA"
+    }
+  }
+  attr {
+    key: "type"
+    value {
+      placeholder: "MACRO_PIN"
+    }
+  }
+  attr {
+    key: "x_offset"
+    value {
+      f: -14.5065
+    }
+  }
+  attr {
+    key: "y_offset"
+    value {
+      f: 6.21
+    }
+  }
+}
+node {
+  name: "Grp_10/Poutput_multi_6"
+  input: "macroA/ADR[0]"
+  input: "macroB/ADR[0]"
+  attr {
+    key: "type"
+    value {
+      placeholder: "Grp"
+    }
+  }
+}
+node {
+  name: "Grp_11/Poutput_multi_7"
+  input: "macroA/ADR[0]"
+  input: "macroA/ADR[1]"
+  attr {
+    key: "type"
+    value {
+      placeholder: "Grp"
+    }
+  }
+}

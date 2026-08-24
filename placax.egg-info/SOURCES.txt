@@ -1,0 +1,12 @@
+README.md
+pyproject.toml
+placax/__init__.py
+placax/_device.py
+placax/core.py
+placax.egg-info/PKG-INFO
+placax.egg-info/SOURCES.txt
+placax.egg-info/dependency_links.txt
+placax.egg-info/requires.txt
+placax.egg-info/top_level.txt
+placax_agents/__init__.py
+tests/test_core.py

@@ -1,0 +1,16 @@
+VERSION 5.8 ;
+DESIGN sample ;
+UNITS DISTANCE MICRONS 2000 ;
+DIEAREA ( 0 0 ) ( 1000 1000 ) ;
+COMPONENTS 3 ;
+	- u1 INVD1BWP240H8P57PDSVT + PLACED ( 100 200 ) N ;
+	- u2 INVD1BWP240H8P57PDSVT + PLACED ( 300 200 ) N ;
+	- u3 INVD1BWP240H8P57PDSVT + PLACED ( 500 200 ) N ;
+END COMPONENTS
+NETS 4 ;
+	- net_a  ( PIN clk_i ) ( u1 I1 ) ( u2 I1 ) + USE SIGNAL ;
+	- buffered_net  ( u1 O1 ) ( u2 I1 ) + USE SIGNAL ;
+	- buffered_net  ( u2 O1 ) ( u3 I1 ) + USE SIGNAL ;
+	- floating_net  ( PIN unused_i ) ( u3 I1 ) + USE SIGNAL ;
+END NETS
+END DESIGN
