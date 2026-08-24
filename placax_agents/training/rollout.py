@@ -1,6 +1,5 @@
-"""Runs one full episode - one lax.scan, not a Python loop: we've learned
-twice already (wiremask, episode timing) that jitted pieces glued by an
-unjitted loop is far slower than one single scanned function."""
+"""Runs one full episode as a single lax.scan - one compiled function,
+not jitted pieces glued by an unjitted Python loop."""
 from placax.core import random_action, reset, step  # noqa: F401  must precede jax imports
 from placax.types import EnvParams, RewardFn  # noqa: F401
 from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action  # noqa: F401
@@ -9,7 +8,6 @@ from placax_agents.policy.scale import to_grid_units  # noqa: F401
 from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
 
 import jax
-import jax.numpy as jnp
 
 
 def collect_rollout(
@@ -21,16 +19,12 @@ def collect_rollout(
     sizes_array: jax.Array,
     cell_size: float,
     state_fn: StateFn = observation,
-) -> dict:
-    """Returns a dict of arrays (each with a leading n_macros dimension):
-    obs, action, reward, log_prob, value, done - one entry per macro
-    placed. reward is 0 everywhere except the last entry (sparse, matches
-    step()'s own reward_fn contract).
-
-    state_fn defaults to observation() - swap in a different one (e.g.
-    a graph-based state_fn for a GNN policy) without touching this
-    function at all, matching the same pattern reward_fn/policy_apply_fn
-    already use."""
+):
+    """Samples one full episode with the current policy. Returns
+    (trajectory, final_state) where trajectory maps obs/action/reward/
+    log_prob/value/done to arrays with a leading n_macros dimension;
+    reward is sparse (0 until the final placement). state_fn defaults
+    to observation() and is swappable like policy_apply_fn."""
     initial_state = reset(params)
 
     def scan_step(state, step_key):

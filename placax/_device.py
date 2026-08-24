@@ -1,4 +1,5 @@
-"""Import first, before `import jax` anywhere - env vars are read once at first import."""
+"""Import first, before `import jax` anywhere - env vars are read once
+at JAX's first import."""
 import os
 import platform
 import subprocess
@@ -6,7 +7,7 @@ import warnings
 
 
 def _gpu_available() -> bool:
-    """True if nvidia-smi runs successfully, i.e. a GPU + driver are present."""
+    """True if nvidia-smi runs, i.e. a GPU + driver are present."""
     try:
         subprocess.run(
             ["nvidia-smi"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
@@ -17,7 +18,7 @@ def _gpu_available() -> bool:
 
 
 def _is_wsl() -> bool:
-    """True if running under WSL, detected via the kernel release string."""
+    """True under WSL, detected via the kernel release string."""
     return "microsoft" in platform.release().lower()
 
 
@@ -27,13 +28,11 @@ if not _GPU_PHYSICALLY_PRESENT:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 if _is_wsl():
-    # os.environ.setdefault("TF_FORCE_UNIFIED_MEMORY", "1")
-    # os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")
 
 
 def warn_if_gpu_unused() -> None:
-    """Warn if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""
+    """Warns if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""
     import jax
 
     if _GPU_PHYSICALLY_PRESENT and jax.default_backend() == "cpu":
@@ -46,11 +45,10 @@ def warn_if_gpu_unused() -> None:
 
 
 def recommended_parallelism_mode(override: str | None = None) -> str:
-    """Returns "sequential" or "parallel", auto-detected from the JAX
-    backend unless overridden. Measured, not guessed: vmap-across-episodes
-    is ~73x slower than sequential+jit on CPU, ~3.8x faster on a real GPU
-    (see scripts/compare_sequential_vs_parallel.py) - the right default
-    genuinely depends on the hardware running the code."""
+    """Returns "sequential" or "parallel", from `override` if given,
+    else auto-detected from the JAX backend. Measured, not guessed:
+    vmap-across-episodes is ~73x slower than sequential+jit on CPU,
+    ~3.8x faster on GPU (scripts/compare_sequential_vs_parallel.py)."""
     if override is not None:
         if override not in ("sequential", "parallel"):
             raise ValueError(f"mode must be 'sequential' or 'parallel', got {override!r}")

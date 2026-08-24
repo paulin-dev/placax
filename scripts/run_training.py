@@ -1,52 +1,20 @@
-"""Runs (or resumes) an extended training session on a real benchmark,
-checkpointing and evaluating real HPWL along the way. This is the
-script tying together everything built as library pieces - resumable_train,
-checkpointing, real evaluation, and autotuning - into one thing you can
-actually run.
+"""Runs (or resumes) extended training on a real benchmark, checkpointing
+and evaluating real HPWL along the way - the script tying the library
+pieces together into one thing you can actually run.
 
 Usage:
     python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]
 
-Example:
-    python scripts/run_training.py benchmarks/adaptec1 200          # auto-detects everything
-    python scripts/run_training.py benchmarks/adaptec1 200 32       # force n_envs=32 explicitly
+n_envs auto-detection runs real 1-step train_parallel() trials on the
+real benchmark in this process (no subprocess, no approximation), so
+what's measured is exactly what training will do. Tradeoff: a candidate
+that hangs hangs this script too - interrupt with Ctrl+C and re-run with
+a smaller max_candidate or explicit n_envs.
 
-n_envs, if not given, is genuinely auto-detected: recommended_parallelism_mode()
-first decides whether parallel is even worth trying on this hardware at
-all, and only if so does find_max_batch_size() search for the largest
-batch size that fits.
-
-That search calls train_parallel() directly - the exact same public
-function real training uses, with n_iterations=1 - on the exact same
-real benchmark data, in this process. No subprocess, no separate toy
-example, no hand-rolled approximation of what a real step does: each
-candidate genuinely IS one real training step at that batch size, using
-the real code path, so what the search measures is exactly what real
-training will actually do.
-
-This is a deliberate simplification over an earlier version that ran
-each candidate in an isolated subprocess with a hard timeout, to
-protect against XLA's own out-of-memory retry logic hanging
-indefinitely on a bad candidate (confirmed directly: 4+ minutes stuck,
-no exception, no progress). That protection is real, but so is the
-cost: subprocess spawning is slow, and testing via a hand-rolled
-approximation of a step - rather than the real train_parallel() call -
-risks measuring something subtly different from what real training
-actually does. This version trades the automatic-hang-protection for
-directness and simplicity: if a candidate genuinely hangs, this script
-will hang too, and you'll need to interrupt it (Ctrl+C) and re-run with
-a smaller max_candidate or an explicit n_envs. That tradeoff is
-deliberate, not an oversight.
-
-Safe to re-run: it automatically resumes from checkpoint.bin in the
-benchmark's own directory if one already exists, rather than starting
-over - point it at a GPU machine with the same checkpoint file copied
-over, and it picks up exactly where it left off. Every 50 iterations it
-also saves a permanent, never-overwritten snapshot (checkpoint_iter_N.bin
-in a snapshots/ subfolder), so you can roll back to an earlier point if
-a later run goes wrong - checkpoint.bin itself is always overwritten,
-so without a snapshot you'd have no way back once training moves past it.
-"""
+Safe to re-run: resumes from checkpoint.bin automatically; every 50
+iterations a permanent snapshot (never overwritten) is saved under
+snapshots/ for rollback."""
+import gc
 import pathlib
 import sys
 
@@ -63,48 +31,24 @@ from placax_agents.policy.scale import compute_grid_scale  # noqa: F401
 from placax_agents.training.loops.parallel_train import train_parallel  # noqa: F401
 from placax_agents.training.reward import make_scaled_hpwl_reward  # noqa: F401
 
-import gc
 import jax
 from jax import random
 
 
 def _jax_cleanup() -> None:
-    """Releases what's safe to release between candidates, without
-    touching anything still in use.
-
-    jax.clear_caches() only clears compiled-executable caches, never
-    data - always safe. gc.collect() only frees objects with zero
-    Python references - also always safe, since it can't touch
-    anything still referenced.
-
-    Deliberately does NOT call jax.live_arrays() + .delete(): an
-    earlier version did, copying a pattern from an isolated example
-    without checking it fit this use case - it deletes EVERY live JAX
-    array indiscriminately, with no way to tell "transient scratch from
-    this one attempt" from "a persistent input the next attempt still
-    needs". Confirmed as a real, severe bug: it deleted
-    valid_mask/padded_pin_idx/padded_pin_offset (closed over by
-    reward_fn, reused across every candidate) mid-search, crashing
-    training on the very next attempt with "Array has been deleted"."""
+    """Releases what's safe between autotune candidates: compiled-
+    executable caches and unreferenced objects. Deliberately does NOT
+    delete live arrays (jax.live_arrays + delete) - that would also kill
+    arrays closed over by reward_fn that later candidates still need."""
     jax.clear_caches()
     gc.collect()
 
 
 def _auto_detect_n_envs(
     key, variables, policy, params, reward_fn, sizes_array, cell_size, max_candidate: int = 64
-) -> tuple[str, int]:
-    """Returns (mode, n_envs). Only searches at all if
-    recommended_parallelism_mode() says parallel is worth trying on
-    this hardware - no point searching for a batch size we're not
-    going to use.
-
-    Each candidate is one real call to train_parallel(..., n_iterations=1)
-    on the real benchmark - not a synthetic approximation - so what
-    this measures is exactly what real training will do at that n_envs.
-    max_candidate defaults to 64, not 256: a real training step is far
-    more expensive to test than a bare forward pass, and a smaller
-    ceiling means less time spent testing genuinely oversized
-    candidates that were never going to work anyway."""
+):
+    """Returns (mode, n_envs). Only searches if parallel is worth trying
+    on this hardware at all."""
     mode = recommended_parallelism_mode()
     if mode == "sequential":
         return "sequential", 1

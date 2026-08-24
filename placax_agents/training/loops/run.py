@@ -1,9 +1,7 @@
 """The single entry point for training - dispatches to sequential or
 parallel based on recommended_parallelism_mode() (auto-detected from
-JAX backend, or overridden manually), rather than making every caller
-choose between two separate functions themselves. train_sequential and
-train_parallel (in train.py and parallel_train.py) remain directly
-callable if you want to force one specifically."""
+the JAX backend, or forced via mode=). train_sequential/train_parallel
+remain directly callable if you want to force one specifically."""
 import pathlib
 
 from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
@@ -14,17 +12,16 @@ from placax_agents.training.loops.parallel_train import train_parallel  # noqa: 
 from placax_agents.training.loops.train import train_sequential  # noqa: F401
 from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
 
-import jax
 import optax
 
 
 def train(
-    key: jax.Array,
+    key,
     variables,
     policy_apply_fn: AlgorithmFn,
     params: EnvParams,
     reward_fn: RewardFn,
-    sizes_array: jax.Array,
+    sizes_array,
     cell_size: float,
     n_iterations: int,
     n_envs: int = 1,
@@ -35,27 +32,13 @@ def train(
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
 ):
-    """Runs n_iterations of training, sequential or parallel depending
-    on `mode`:
-        mode=None (default): auto-detected via recommended_parallelism_mode()
-        mode="sequential" or "parallel": forced explicitly
-    n_envs only matters when the resolved mode is "parallel" - how many
-    episodes get collected at once per iteration. Returns
-    (final_variables, losses), same shape either way.
-
-    state_fn defaults to observation() - the same swappable axis as
-    reward_fn/policy_apply_fn, threaded all the way through. optimizer
-    defaults to optax.adam(learning_rate) if not given - any
-    optax.GradientTransformation works. ppo_config bundles
-    gamma/lam/clip_eps/value_coef/entropy_coef, also threaded all the
-    way through to compute_gae/ppo_loss.
-
-    checkpoint_path, if given, saves progress (weights, optimizer
-    state, running stats, PRNG key) after every iteration, and resumes
-    from it automatically next time you call train() with the same
-    path - "save every lap". For periodic (not every-iteration)
-    checkpointing, real-HPWL evaluation snapshots over the course of
-    training, or a persisted log, use ops.resumable_train instead."""
+    """Runs n_iterations of training, sequential or parallel depending on
+    mode (None = auto-detect; "sequential"/"parallel" = force). n_envs
+    only matters when the resolved mode is parallel. Returns
+    (final_variables, losses), same shape either way. optimizer defaults
+    to optax.adam(learning_rate). checkpoint_path, if given, saves the
+    full training state after every iteration and auto-resumes from it;
+    for periodic checkpointing / eval snapshots use ops.resumable_train."""
     resolved_mode = recommended_parallelism_mode(mode)
 
     if resolved_mode == "sequential" or n_envs <= 1:

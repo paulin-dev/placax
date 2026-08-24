@@ -1,28 +1,22 @@
-"""MST-based wirelength (Prim's algorithm, Manhattan distance) - a more
-accurate but much more expensive proxy than HPWL, particularly for
-high-fanout nets where a bounding box underestimates true routed length.
-
-Deliberately plain Python, not JAX/jit-compiled: this mirrors how
-MaskPlace's own prim_real is actually used - only for periodic
-reporting, never inside the training loop. Making this jit/vmap-fast
-would solve a harder problem than the one that exists: Prim's is an
-inherently sequential algorithm, and even a fixed-iteration version
-would cost O(max_pins^2) per net - genuinely expensive for real
-high-fanout nets."""
-from placax.types import Nets, SizeMap
+"""MST-based wirelength (Prim's, Manhattan distance) - more accurate
+than HPWL for high-fanout nets but far more expensive. Deliberately
+plain Python, not jit-compiled: like MaskPlace's prim_real, it's only
+for periodic reporting, never inside the training loop."""
+from placax.types import Nets
 
 
 def _prim_mst_length(points: list[tuple[float, float]]) -> float:
-    """Manhattan-distance MST length via Prim's algorithm, O(k^2) for k
-    points. Plain array-based (not a heap) - prioritizes obviously-correct
-    over fast, matching this module's occasional-use purpose."""
+    """Manhattan MST length via Prim's algorithm, O(k^2), plain arrays -
+    obviously-correct over fast."""
     n = len(points)
     if n < 2:
         return 0.0
 
     in_tree = [False] * n
     in_tree[0] = True
-    min_dist = [abs(points[0][0] - points[i][0]) + abs(points[0][1] - points[i][1]) for i in range(n)]
+    min_dist = [
+        abs(points[0][0] - points[i][0]) + abs(points[0][1] - points[i][1]) for i in range(n)
+    ]
 
     total = 0.0
     for _ in range(n - 1):
@@ -32,15 +26,13 @@ def _prim_mst_length(points: list[tuple[float, float]]) -> float:
         for j in range(n):
             if not in_tree[j]:
                 d = abs(points[best_j][0] - points[j][0]) + abs(points[best_j][1] - points[j][1])
-                if d < min_dist[j]:
-                    min_dist[j] = d
+                min_dist[j] = min(min_dist[j], d)
     return total
 
 
 def mst_wirelength(macro_positions: dict[str, tuple[float, float]], nets: Nets) -> float:
     """Sum of per-net MST wirelength. macro_positions maps macro name to
-    its real (x, y) center - same convention as everywhere else in
-    placax, pin position = macro center + offset."""
+    its real (x, y) center; pin position = center + offset."""
     total = 0.0
     for net in nets:
         points = [

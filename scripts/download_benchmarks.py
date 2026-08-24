@@ -1,6 +1,5 @@
-"""Fetches benchmarks into benchmarks/<name>/. Meant to run once, by hand -
-benchmarks likely get bundled into the repo directly rather than re-run
-in CI."""
+"""Fetches benchmarks into benchmarks/<name>/. Meant to run once, by hand
+- benchmarks get bundled into the repo rather than re-fetched in CI."""
 import enum
 import gzip
 import pathlib
@@ -24,8 +23,8 @@ class Benchmark:
     format: Format
 
 
-# URLs as published on ispd.cc - the /benchmarks/ subpath is genuinely
-# inconsistent between designs on the original site, not a typo here.
+# URLs as published on ispd.cc - the /benchmarks/ subpath genuinely
+# varies between designs on the original site, not a typo here.
 BENCHMARKS: dict[str, Benchmark] = {
     "adaptec1": Benchmark(
         "http://www.ispd.cc/contests/05/ispd05-contest/adaptec1.tar.gz", Format.ISPD05_NETLIST
@@ -57,12 +56,8 @@ BENCHMARKS: dict[str, Benchmark] = {
         "http://www.ispd.cc/contests/05/ispd05-contest/benchmarks/bigblue4.tar.gz",
         Format.ISPD05_NETLIST,
     ),
-    # ariane133, from AlphaChip/Circuit Training's own repo, not TILOS's
-    # DEF/LEF (which has zero real pin geometry - every RECT is a
-    # degenerate point, likely anonymized PDK data) or ORFS's RTL (needs
-    # synthesis we can't complete in reasonable time). This source has
-    # 100% real, nonzero pin offsets on every macro-to-macro net, and its
-    # own macro count (133) independently matches the published number.
+    # ariane133 from Circuit Training's own repo: 100% real, nonzero pin
+    # offsets, unlike TILOS's DEF/LEF (degenerate point RECTs).
     "ariane133": Benchmark(
         "https://raw.githubusercontent.com/google-research/circuit_training/"
         "main/circuit_training/environment/test_data/ariane/netlist.pb.txt",
@@ -91,6 +86,7 @@ def _degzip_all(out_dir: pathlib.Path) -> None:
 
 
 def _fetch_ispd05_netlist(url: str, out_dir: pathlib.Path, name: str) -> None:
+    """Downloads the tarball, extracts it, flattens and degzips in place."""
     tar_path = out_dir.parent / f"{name}.tar.gz"
     urllib.request.urlretrieve(url, tar_path)
     with tarfile.open(tar_path) as tar:
@@ -105,7 +101,7 @@ def _fetch_single_file(url: str, out_dir: pathlib.Path) -> None:
 
 
 def download_benchmark(name: str, dest_dir: pathlib.Path = BENCHMARKS_DIR) -> None:
-    """Fetch one benchmark, skipping if already present."""
+    """Fetches one benchmark, skipping if already present."""
     if name not in BENCHMARKS:
         raise ValueError(f"unknown benchmark {name!r}, available: {list(BENCHMARKS)}")
 

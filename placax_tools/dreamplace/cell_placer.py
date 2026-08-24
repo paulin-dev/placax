@@ -1,16 +1,8 @@
-"""DREAMPlace-specific CellPlacer implementation. Matches the
-architecture: placax's kernel only does macro placement; cell
-placement is a genuinely different problem (analytical optimization
-over potentially millions of cells, not RL) handed to an external,
-swappable tool.
-
-DREAMPlace's real config format confirmed directly from its own GitHub
-issues (actual parsed configs, not guessed): def_input/lef_input are
-real fields, invoked via `python dreamplace/Placer.py config.json`.
-Not verified end-to-end in this environment - DREAMPlace isn't
-installed here (a real, complex CUDA-optional build) - the config
-generation and subprocess invocation are built to the documented
-format, but only actually running DREAMPlace confirms they work."""
+"""DREAMPlace-specific CellPlacer. Macro placement is placax's job; cell
+placement (analytical optimization over millions of cells) is handed to
+an external, swappable tool. Config fields follow DREAMPlace's real
+parsed format (`python dreamplace/Placer.py config.json`). Not verified
+end-to-end here - DREAMPlace isn't installed in this environment."""
 import json
 import pathlib
 import subprocess
@@ -25,10 +17,8 @@ def build_dreamplace_config(
     gpu: bool = False,
     target_density: float = 1.0,
 ) -> dict:
-    """Real DREAMPlace config fields, confirmed against actual parsed
-    configs from DREAMPlace's own GitHub issues - not guessed. Kept as
-    a standalone, independently testable function - DREAMPlaceCellPlacer
-    just calls it."""
+    """Real DREAMPlace config fields; standalone so it's independently
+    testable - DREAMPlaceCellPlacer just calls it."""
     return {
         "def_input": str(def_path),
         "lef_input": ";".join(str(p) for p in lef_paths),
@@ -63,19 +53,10 @@ def build_dreamplace_config(
 
 
 class DREAMPlaceCellPlacer(CellPlacer):
-    """Default CellPlacer implementation. Requires a real DREAMPlace
-    install - dreamplace_root/gpu/target_density are DREAMPlace-specific
-    and live here in __init__, not in place()'s signature, so any other
-    CellPlacer subclass can have completely different construction
-    needs while still being called identically via place().
-
-    extra_config overrides/adds any other DREAMPlace config field (e.g.
-    num_bins_x, random_seed, density_weight) on top of the defaults in
-    build_dreamplace_config - more scalable than enumerating every real
-    DREAMPlace knob as its own constructor parameter, and stays correct
-    even for config fields added in a future DREAMPlace version this
-    code doesn't know about yet. python_executable defaults to "python",
-    but some installs need "python3" or a specific venv's interpreter."""
+    """Default CellPlacer implementation, requiring a real DREAMPlace
+    install. extra_config overrides/adds any other DREAMPlace config
+    field on top of the defaults - more scalable than enumerating every
+    knob as a constructor parameter."""
 
     def __init__(
         self,
@@ -94,6 +75,7 @@ class DREAMPlaceCellPlacer(CellPlacer):
     def place(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> pathlib.Path:
+        """Writes the config, runs DREAMPlace, returns the placed DEF."""
         output_dir.mkdir(parents=True, exist_ok=True)
         config = build_dreamplace_config(
             def_path, lef_paths, output_dir, gpu=self.gpu, target_density=self.target_density

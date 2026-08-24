@@ -1,20 +1,9 @@
-"""OpenROAD-specific Validator implementation.
-
-Honestly scoped, not a full PPA report: area/utilization are always
-computed (report_design_area, confirmed real - verified output format
-"Design area N u^2 M% utilization." across multiple real OpenROAD log
-excerpts). Timing is computed only if a liberty file and clock period
-are given - real timing needs a real technology library, not something
-placax has by default. Power is deliberately NOT included: a
-meaningful power number needs real switching activity data (SAIF/VCD),
-which nothing in this pipeline produces - faking a number would be
-worse than omitting it.
-
-Not verified end-to-end in this environment - OpenROAD isn't installed
-here. The TCL script generation follows OpenROAD's own documented
-command set exactly (read_lef, read_def, report_design_area,
-report_checks - all confirmed directly, not guessed), but only running
-OpenROAD confirms the full flow works."""
+"""OpenROAD-specific Validator. Honestly scoped: area/utilization always
+computed; timing only if liberty + clock are given (real timing needs a
+real technology library). Power deliberately omitted - a meaningful
+number needs switching-activity data nothing here produces. Not verified
+end-to-end here - OpenROAD isn't installed; TCL follows OpenROAD's own
+documented commands."""
 import pathlib
 import re
 import subprocess
@@ -30,14 +19,9 @@ def build_openroad_script(
     wire_rc_layer: str = "metal3",
     clock_name: str = "core_clock",
 ) -> str:
-    """Real OpenROAD TCL commands, confirmed against OpenROAD's own
-    documentation - not guessed. Timing lines only included if both
-    liberty_path and clock_period_ns are given. Kept as a standalone,
-    independently testable function - OpenROADValidator just calls it.
-
-    wire_rc_layer defaults to "metal3", a common but not universal
-    layer name - real PDKs vary (M3, metal2, etc.), so this must be
-    overridable, not hardcoded to one technology's convention."""
+    """OpenROAD TCL for area (+ optional timing) reports. Timing lines
+    appear only if both liberty_path and clock_period_ns are given.
+    wire_rc_layer must be overridable - real PDKs vary (M3, metal2...)."""
     lines = [f"read_lef {p}" for p in lef_paths]
     lines.append(f"read_def {def_path}")
     lines.append("report_design_area")
@@ -57,8 +41,8 @@ _SLACK_RE = re.compile(r"slack\s+\(?(?:MET|VIOLATED)?\)?\s*(-?[\d.]+)", re.IGNOR
 
 
 def parse_openroad_output(raw_output: str) -> PPAResult:
-    """Extracts what's actually there - area/utilization always,
-    timing slack only if a timing report was actually run."""
+    """Extracts what's actually there - area/utilization always, timing
+    slack only if a timing report ran."""
     area_match = _AREA_RE.search(raw_output)
     slack_match = _SLACK_RE.search(raw_output)
     return PPAResult(
@@ -70,12 +54,8 @@ def parse_openroad_output(raw_output: str) -> PPAResult:
 
 
 class OpenROADValidator(Validator):
-    """Default Validator implementation. Requires a real OpenROAD
-    install - liberty_path/clock_period_ns/wire_rc_layer/clock_name are
-    specific to how this particular validator does timing analysis and
-    live here in __init__, not in validate()'s signature, so any other
-    Validator subclass can have completely different construction
-    needs while still being called identically via validate()."""
+    """Default Validator implementation, requiring a real OpenROAD
+    install. Timing-related settings live in __init__, not validate()."""
 
     def __init__(
         self,
@@ -94,13 +74,15 @@ class OpenROADValidator(Validator):
     def validate(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> PPAResult:
+        """Writes the TCL script, runs OpenROAD, parses its output."""
         output_dir.mkdir(parents=True, exist_ok=True)
-        script = build_openroad_script(
-            def_path, lef_paths, self.liberty_path, self.clock_period_ns,
-            self.wire_rc_layer, self.clock_name,
-        )
         script_path = output_dir / "validate.tcl"
-        script_path.write_text(script)
+        script_path.write_text(
+            build_openroad_script(
+                def_path, lef_paths, self.liberty_path, self.clock_period_ns,
+                self.wire_rc_layer, self.clock_name,
+            )
+        )
 
         result = subprocess.run(
             [self.openroad_binary, "-exit", str(script_path)],

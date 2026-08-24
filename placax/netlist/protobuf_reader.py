@@ -1,8 +1,7 @@
 """Reads Circuit Training's .pb.txt netlist format (a TensorFlow GraphDef
-text representation), converging on the same shape as the other loaders.
-This is the canonical source for ariane's macro geometry - other public
-sources for this design have degenerate (zero-size) pin geometry, while
-this format carries real per-pin offsets."""
+text representation) into the same shape as the other loaders. This is
+the canonical source for ariane's macro geometry - other public sources
+carry degenerate (zero-size) pin geometry."""
 import pathlib
 import re
 
@@ -23,8 +22,7 @@ def _split_nodes(pb_text: str) -> list[str]:
 
 def parse_macros(pb_text: str) -> SizeMap:
     """Returns {macro_name: (width, height)} for MACRO-type nodes only -
-    matches the same hard-macro-only filter every other loader applies,
-    excluding standard-cell clusters (soft macros, named Grp_*) and ports."""
+    excludes standard-cell clusters (soft macros, Grp_*) and ports."""
     macros = {}
     for block in _split_nodes(pb_text):
         type_match = _TYPE_RE.search(block)
@@ -38,9 +36,8 @@ def parse_macros(pb_text: str) -> SizeMap:
 
 
 def _macro_pin_entries(pb_text: str) -> list[tuple[str, float, float, str]]:
-    """Yields (macro_name, x_offset, y_offset, pin_node_name) for every
-    MACRO_PIN node - the pin's own node name is needed to look it up when
-    some other node's input: list references it."""
+    """(macro_name, x_offset, y_offset, pin_node_name) per MACRO_PIN node
+    - the node name is what other nodes' input: lists reference."""
     entries = []
     for block in _split_nodes(pb_text):
         type_match = _TYPE_RE.search(block)
@@ -51,7 +48,9 @@ def _macro_pin_entries(pb_text: str) -> list[tuple[str, float, float, str]]:
         float_attrs = dict(_FLOAT_ATTR_RE.findall(block))
         macro_name = str_attrs.get("macro_name")
         if macro_name and "x_offset" in float_attrs and "y_offset" in float_attrs:
-            entries.append((macro_name, float(float_attrs["x_offset"]), float(float_attrs["y_offset"]), pin_name))
+            entries.append(
+                (macro_name, float(float_attrs["x_offset"]), float(float_attrs["y_offset"]), pin_name)
+            )
     return entries
 
 
@@ -61,13 +60,11 @@ def parse_macro_pins(pb_text: str) -> list[NetPin]:
 
 
 def parse_nets(pb_text: str) -> Nets:
-    """Returns a list of pins per net. Circuit Training expresses
-    connectivity via `input:` references, but not on MACRO_PIN nodes
-    themselves - the actual hubs are other nodes (commonly Grp_.../P*
-    standard-cell-cluster pseudo-ports) whose input: list references
-    several macro pins directly. Every node in the file is scanned for
-    this pattern, not just MACRO_PIN nodes - the hub's own type doesn't
-    matter, only which macro pins it references."""
+    """Returns a list of pins per net. Connectivity is expressed via
+    `input:` references on hub nodes (commonly Grp_/P* standard-cell
+    pseudo-ports), so every node is scanned - the hub's own type doesn't
+    matter, only which macro pins it references. A net is kept only with
+    >= 2 distinct macros."""
     pin_lookup = {name: (macro, x, y) for macro, x, y, name in _macro_pin_entries(pb_text)}
 
     nets = []
@@ -84,6 +81,6 @@ def parse_nets(pb_text: str) -> Nets:
 
 
 def load_protobuf(pb_path: pathlib.Path) -> tuple[SizeMap, Nets]:
-    """Returns (macro_sizes, nets) - same shape as load_bookshelf/load_def."""
+    """Returns (macro_sizes, nets) - same shape as the other loaders."""
     pb_text = pb_path.read_text()
     return parse_macros(pb_text), parse_nets(pb_text)

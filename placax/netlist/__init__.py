@@ -1,8 +1,7 @@
-"""Detects a benchmark's format, then routes to the right loader. Bookshelf,
-DEF, and protobuf all resolve to the identical (macro_sizes, nets) shape -
-real research repos bridge multiple formats routinely, this isn't unusual
-overhead - so nothing downstream needs to know which format a benchmark
-came from."""
+"""Detects a benchmark's format, then routes to the right loader.
+Bookshelf, DEF, and protobuf all resolve to the identical
+(macro_sizes, nets) shape, so nothing downstream needs to know which
+format a benchmark came from."""
 import enum
 import pathlib
 
@@ -21,10 +20,8 @@ class NetlistFormat(enum.Enum):
 
 
 def detect_format(benchmark_dir: pathlib.Path) -> NetlistFormat:
-    """Bookshelf has an .aux manifest; DEF, protobuf, and unconverted RTL
-    are identified by extension. Order matters: check .aux before .def/
-    .pb.txt/.v, since a real Bookshelf dir could plausibly have unrelated
-    stray files sitting near it."""
+    """Identifies the format by extension. Order matters: .aux (Bookshelf)
+    is checked before .def/.pb.txt/.v so stray files can't misclassify."""
     if any(benchmark_dir.glob("*.aux")):
         return NetlistFormat.BOOKSHELF
     if any(benchmark_dir.glob("*.def")):

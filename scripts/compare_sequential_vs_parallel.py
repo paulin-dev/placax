@@ -1,8 +1,6 @@
 """Compares sequential vs vmap-parallel episode execution speed on real
-benchmark data. On CPU-only hardware, sequential+jit was found to be
-~73x FASTER than vmap-across-episodes - vmap's speed advantage needs
-real parallel hardware. Run this on a GPU to check whether vmap pays
-off on your own hardware.
+benchmark data - run this on your hardware to see whether vmap pays off
+(on CPU-only machines, sequential+jit measured ~73x faster).
 
 Usage: python scripts/compare_sequential_vs_parallel.py [benchmark_dir] [n_episodes]
 """
@@ -11,9 +9,9 @@ import sys
 import time
 
 from placax.core import random_action, reset, step  # noqa: F401  must precede jax imports
+from placax.extras.rewards import make_hpwl_reward  # noqa: F401
 from placax.netlist import load_netlist  # noqa: F401
 from placax.netlist.padding import build_padded_arrays  # noqa: F401
-from placax.extras.rewards import make_hpwl_reward  # noqa: F401
 from placax.types import EnvParams  # noqa: F401
 
 import jax
@@ -22,11 +20,11 @@ from jax import random
 
 
 def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
-    """N episodes, one after another, each step jit-compiled."""
+    """N episodes one after another, each step jit-compiled (warm-up done
+    outside the timed region)."""
     jitted_step = jax.jit(step, static_argnames=("reward_fn",))
     jitted_random_action = jax.jit(random_action)
 
-    # warm-up (compile once, outside the timed region)
     state = reset(params)
     key = random.PRNGKey(0)
     key, subkey = random.split(key)
@@ -47,10 +45,8 @@ def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
 
 
 def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
-    """N episodes at once, batched via vmap - one single jitted function
-    per step, not jitted pieces glued together by unjitted code (that
-    mistake alone cost an extra ~3.3s in earlier testing)."""
-
+    """N episodes at once via vmap - ONE jitted function per step, not
+    jitted pieces glued by unjitted code."""
     def one_batched_step(keys, batched_state):
         keys, subkeys = jax.vmap(lambda k: tuple(random.split(k)))(keys)
         actions = jax.vmap(random_action, in_axes=(0, None))(subkeys, params)
@@ -87,7 +83,7 @@ if __name__ == "__main__":
     benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
     n_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 
-    print(f"JAX backend: {jax.default_backend()}")  # cpu, gpu, or tpu
+    print(f"JAX backend: {jax.default_backend()}")
     print(f"placax.recommended_parallelism_mode(): {recommended_parallelism_mode()!r}")
     print(f"loading {benchmark_dir}...")
     macro_sizes, nets = load_netlist(benchmark_dir)

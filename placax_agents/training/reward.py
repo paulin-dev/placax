@@ -1,9 +1,6 @@
-"""Wraps placax's own make_hpwl_reward with the grid-to-real-unit
-conversion it needs to be physically meaningful. Without this, hpwl()
-mixes tiny grid indices directly with real-unit offsets - a confirmed
-bug (see scale.py's to_real_centers): the offset dominates almost
-entirely, making the reward barely sensitive to the actual grid cell
-an action chose."""
+"""Wraps make_hpwl_reward with the grid-to-real-unit conversion - without
+it, hpwl() would mix tiny grid indices directly with real-unit pin
+offsets, making the reward nearly blind to which cell was chosen."""
 from placax.extras.rewards import make_hpwl_reward  # noqa: F401  must precede jax imports
 from placax.types import RewardFn  # noqa: F401
 from placax_agents.policy.scale import to_real_centers  # noqa: F401
@@ -18,10 +15,11 @@ def make_scaled_hpwl_reward(
     sizes_array: jax.Array,
     cell_size: float,
 ) -> RewardFn:
+    """reward(positions) = -HPWL of real-unit macro centers (grid
+    positions converted via to_real_centers)."""
     base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
 
     def reward_fn(positions: jax.Array) -> jax.Array:
-        real_centers = to_real_centers(positions, sizes_array, cell_size)
-        return base_reward_fn(real_centers)
+        return base_reward_fn(to_real_centers(positions, sizes_array, cell_size))
 
     return reward_fn

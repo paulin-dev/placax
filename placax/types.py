@@ -17,18 +17,12 @@ class EnvState:
 
 @struct.dataclass
 class EnvParams:
-    """Static config: fixed for a run, can be swept independently of state.
-
-    grid/n_macros determine array shapes, so they're marked pytree_node=False -
-    static metadata JAX treats as a compile-time constant, not a traced value.
-    A field like a reward weight, which doesn't affect any shape, would stay
-    a normal pytree_node=True field and could be vmapped over freely.
-
-    grid_y defaults to None, meaning "same as grid" (a square canvas) -
-    every existing EnvParams(grid=64) call keeps working identically.
-    Real chip die areas aren't always square, so a genuinely generic
-    environment needs to support grid_x != grid_y (EnvParams(grid=128,
-    grid_y=64)); grid itself is the x dimension in that case."""
+    """Static per-run config. grid/grid_y/n_macros determine array shapes,
+    so they're pytree_node=False - static compile-time metadata for JAX,
+    not traced values; a shape-independent field (e.g. a reward weight)
+    would stay a normal pytree node and could be vmapped over freely.
+    grid_y=None means "same as grid" (square canvas); grid is the x
+    dimension when they differ."""
 
     grid: int = struct.field(pytree_node=False, default=4)
     grid_y: int | None = struct.field(pytree_node=False, default=None)

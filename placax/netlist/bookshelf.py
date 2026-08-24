@@ -1,11 +1,8 @@
-"""Reads Bookshelf .nodes/.nets, converging on the same shape def_reader
-produces. Only terminal nodes (macros) are kept - the thousands of
-standard cells are out of scope, same filter MaskPlace itself uses.
-
-Pin offsets are kept, not discarded: two placements that differ only in
-where a pin actually sits within its macro can have genuinely different
-real wirelength but identical HPWL if every pin is snapped to its macro's
-center - a real blind spot MaskPlace's own paper documents directly."""
+"""Reads Bookshelf .nodes/.nets into the same shape the DEF loader
+produces. Only terminal nodes (macros) are kept - standard cells are out
+of scope, same filter MaskPlace uses. Pin offsets are kept, not snapped
+to macro centers: two placements differing only in pin position within a
+macro can have different real wirelength but identical HPWL otherwise."""
 import pathlib
 import re
 
@@ -29,11 +26,11 @@ def parse_nodes(nodes_path: pathlib.Path) -> SizeMap:
 
 def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
     """Returns a list of pins per net, each pin (macro_name, x_offset,
-    y_offset). Every pin is kept, even multiple pins on the same macro -
-    each is a real, separate connection point. A net is dropped only if
-    fewer than 2 *distinct* macros appear in it (an intra-macro-only net
-    has no wirelength that any placement decision can change)."""
-    nets = []
+    y_offset). Every pin is kept, even several on one macro - each is a
+    separate connection point. A net is dropped only if fewer than 2
+    *distinct* macros appear in it (intra-macro-only nets have no
+    placement-sensitive wirelength)."""
+    nets: Nets = []
     current: list[NetPin] = []
 
     def _flush() -> None:
