@@ -30,6 +30,16 @@ if not _GPU_PHYSICALLY_PRESENT:
 if _is_wsl():
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")
 
+# Silences XLA/cuDNN's C++ logging (bfc_allocator "ran out of memory",
+# hlo_rematerialization, cuda_timer, ...). These come from the compiler
+# trying several kernel algorithms/layouts internally and discarding
+# the ones that don't fit or are slow to measure - routine, not
+# actionable, and easy to mistake for a crash (e.g. during
+# placax_agents.ops.autotune's batch-size search). A genuine fatal
+# error (a C++ CHECK failure) still aborts the process regardless of
+# this setting - it isn't something Python logging levels can hide.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 
 def warn_if_gpu_unused() -> None:
     """Warns if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""
