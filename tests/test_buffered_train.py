@@ -88,6 +88,25 @@ def test_train_buffered_produces_finite_losses_and_changes_params() -> None:
     assert total_change > 0
 
 
+def test_train_buffered_accepts_an_extra_illegal_fn() -> None:
+    params, sizes_array, reward_fn = _toy_setup()
+    policy = CNNActorCritic()
+    key = random.PRNGKey(3)
+    obs0 = observation(reset(params), params, sizes_array)
+    variables = policy.init(key, obs0)
+
+    def no_extra_restriction(obs):
+        return jnp.zeros((params.grid, params.grid), dtype=bool)
+
+    _final_variables, losses = train_buffered(
+        key, variables, policy.apply, params, reward_fn, sizes_array, cell_size=1.0,
+        n_iterations=1, n_episodes=2, ppo_epochs=1, batch_size=2,
+        extra_illegal_fn=no_extra_restriction,
+    )
+    assert len(losses) == 1
+    assert jnp.isfinite(losses[0])
+
+
 def test_train_buffered_matches_maskplace_defaults_shape() -> None:
     # maskplace_ppo_config() + train_buffered's own defaults together
     # reproduce MaskPlace's procedure shape (n_episodes stands in for its

@@ -11,7 +11,7 @@ from placax_agents.training.algorithm.optimizer_step import apply_gradient_updat
 from placax_agents.training.algorithm.running_stats import RunningStats
 from placax_agents.training.loops.common import checkpoint_every_n, make_step_input, open_train_state
 from placax_agents.training.rollout import collect_rollout
-from placax_agents.types import AlgorithmFn, StateFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 import jax.numpy as jnp
@@ -31,15 +31,17 @@ def parallel_train_step(
     cell_size: float,
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Like train.train_step, but keys has a leading n_envs dimension:
     n_envs episodes are collected and averaged into one update."""
     # One episode per key, batched via vmap.
     batched_rollout = jax.vmap(
-        collect_rollout, in_axes=(0, None, None, None, None, None, None, None)
+        collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
     )
     trajectories, final_states = batched_rollout(
-        keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn
+        keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
+        extra_illegal_fn,
     )
 
     batched_gae = jax.vmap(compute_gae, in_axes=(0, 0, 0, None, None, None))
@@ -55,6 +57,7 @@ def parallel_train_step(
                 policy_params, policy_apply_fn, traj, adv, ret, cell_size, params,
                 clip_eps=ppo_config.clip_eps, value_coef=ppo_config.value_coef,
                 entropy_coef=ppo_config.entropy_coef, value_loss_fn=ppo_config.value_loss_fn,
+                extra_illegal_fn=extra_illegal_fn,
             )
         )(trajectories, normalized_advantages, normalized_returns)
         return per_episode_losses.mean()
@@ -68,7 +71,7 @@ def parallel_train_step(
 # Built once at import; see train.py for why.
 _jitted_parallel_train_step = jax.jit(
     parallel_train_step,
-    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config"),
+    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config", "extra_illegal_fn"),
 )
 
 
@@ -87,6 +90,7 @@ def train_parallel(
     optimizer: optax.GradientTransformation | None = None,
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Runs n_iterations of parallel_train_step, each collecting n_envs
     episodes at once. Returns (final_variables, losses)."""
@@ -101,7 +105,7 @@ def train_parallel(
         key, step_keys = make_step_input(key, n_envs)  # n_envs fresh keys, one per parallel episode
         variables, opt_state, running_stats, loss, _ = _jitted_parallel_train_step(
             step_keys, variables, opt_state, running_stats, optimizer, policy_apply_fn,
-            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
+            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config, extra_illegal_fn,
         )
         losses.append(float(loss))
         checkpoint_every_n(checkpoint_path, 1, start_iteration + i + 1, variables, opt_state, running_stats, key)  # every=1: always

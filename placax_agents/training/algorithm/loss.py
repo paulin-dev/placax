@@ -4,7 +4,7 @@ from typing import Callable
 from placax.types import EnvParams  # must precede jax imports
 from placax_agents.policy.action import action_log_prob, legal_action_logits
 from placax_agents.policy.scale import to_grid_units
-from placax_agents.types import AlgorithmFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn
 
 import jax
 import jax.numpy as jnp
@@ -47,6 +47,7 @@ def ppo_loss(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
     value_loss_fn: ValueLossFn = mse_value_loss,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> jax.Array:
     """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
     over one trajectory dict (as produced by collect_rollout, or any
@@ -55,14 +56,17 @@ def ppo_loss(
     the array, so this is safe to call on shuffled minibatches too, e.g.
     from loops.buffered_train). value_loss_fn swaps the critic's loss
     (default mse_value_loss; huber_value_loss above is a drop-in
-    alternative)."""
+    alternative). extra_illegal_fn, if given, must match whatever was
+    used at rollout time (see placax_agents.types.ExtraIllegalFn) - the
+    PPO ratio compares probabilities under the same distribution."""
 
     def per_step(obs, action, old_log_prob, advantage, ret):
         # Recompute the legal mask from the saved obs so the ratio compares
         # probabilities under the same distribution used at rollout time.
         logits, value = policy_apply_fn(policy_params, obs)
         macro_size = to_grid_units(obs["current_macro_size"], cell_size)
-        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size)
+        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
+        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
         new_log_prob = action_log_prob(masked_logits, action)
 
         ratio = jnp.exp(new_log_prob - old_log_prob)  # new/old probability ratio

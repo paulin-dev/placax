@@ -25,3 +25,12 @@ Any other keys are yours to add for a custom policy (observation()'s
 positions/sizes_array/placed_mask/step/lookahead_sizes are conventions,
 not requirements - as is "wiremask", added by
 policy.observation.make_wiremask_observation)."""
+
+ExtraIllegalFn = Callable[[dict], jax.Array]
+"""obs -> (grid_x, grid_y) bool, an extra illegal-cell cutoff OR'd into
+legality in legal_action_logits (see placax.extras.masks.quality_mask
+for a generic "score exceeds a cutoff" building block). Optional on
+collect_rollout/ppo_loss/evaluate (and the loops.*.train_* wrappers) -
+None (the default) means legality-only masking, unchanged from before
+this existed. Reads whatever obs keys it needs, e.g. "wiremask" from
+policy.observation.make_wiremask_observation."""

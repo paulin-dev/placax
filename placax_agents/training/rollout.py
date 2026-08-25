@@ -4,7 +4,7 @@ from placax.types import EnvParams, RewardFn
 from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action
 from placax_agents.policy.observation import observation
 from placax_agents.policy.scale import to_grid_units
-from placax_agents.types import AlgorithmFn, StateFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 
@@ -18,11 +18,14 @@ def collect_rollout(
     sizes_array: jax.Array,
     cell_size: float,
     state_fn: StateFn = observation,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Samples one full episode. Returns (trajectory, final_state);
     trajectory maps obs/action/reward/log_prob/value/done to arrays with a
     leading n_macros dimension. Per-step reward shape (sparse/terminal vs
-    dense/every-step) is entirely reward_fn's choice - see placax.types.RewardFn."""
+    dense/every-step) is entirely reward_fn's choice - see placax.types.RewardFn.
+    extra_illegal_fn, if given, restricts the action space beyond bare
+    legality - see placax_agents.types.ExtraIllegalFn."""
     initial_state = reset(params)
 
     def scan_step(state, step_key):
@@ -31,7 +34,8 @@ def collect_rollout(
         logits, value = policy_apply_fn(variables, obs)
 
         macro_size = to_grid_units(obs["current_macro_size"], cell_size)
-        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size)
+        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
+        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
 
         action = sample_action(step_key, masked_logits)
         log_prob = action_log_prob(masked_logits, action)

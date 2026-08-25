@@ -52,6 +52,36 @@ def test_collect_rollout_state_fn_is_genuinely_swappable() -> None:
     assert bool(trajectory["obs"]["canvas"][0].all())  # matches fake_state_fn, not the real observation()
 
 
+def test_collect_rollout_extra_illegal_fn_restricts_actions() -> None:
+    # extra_illegal_fn forces exactly one legal cell - the sampled action
+    # must land there, proving it's genuinely wired through to
+    # legal_action_logits, not just accepted and ignored. n_macros=1
+    # sidesteps occupancy from an earlier macro conflicting with the
+    # forced cell on a later step.
+    params = EnvParams(grid=4, n_macros=1)
+    sizes_array = jnp.array([[1.0, 1.0]])
+    padded_pin_idx = jnp.zeros((1, 1), dtype=jnp.int32)  # one padding-only net, no real pins
+    padded_pin_offset = jnp.zeros((1, 1, 2))
+    valid_mask = jnp.zeros((1, 1), dtype=bool)
+    reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
+    policy = CNNActorCritic()
+    key = random.PRNGKey(0)
+    key, init_key = random.split(key)
+    obs0 = observation(reset(params), params, sizes_array)
+    variables = policy.init(init_key, obs0)
+
+    def only_one_legal_cell(obs):
+        illegal = jnp.ones((params.grid, params.grid), dtype=bool)
+        return illegal.at[2, 3].set(False)
+
+    key, rollout_key = random.split(key)
+    trajectory, _final_state = collect_rollout(
+        rollout_key, variables, policy.apply, params, reward_fn, sizes_array, cell_size=1.0,
+        extra_illegal_fn=only_one_legal_cell,
+    )
+    assert trajectory["action"].tolist() == [[2, 3]]
+
+
 def test_collect_rollout_shapes_and_sparse_reward() -> None:
     params = EnvParams(grid=8, n_macros=4)
     sizes_array, reward_fn = _make_toy_setup(params)

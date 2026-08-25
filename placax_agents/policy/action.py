@@ -1,6 +1,7 @@
 """Turns a policy's raw logits into a legal action."""
-from placax.extras.masks import boundary_mask, occupancy_mask  # must precede jax imports
+from placax.extras.masks import boundary_mask, occupancy_mask, quality_mask  # must precede jax imports
 from placax.types import EnvParams
+from placax_agents.types import ExtraIllegalFn
 
 import jax
 import jax.numpy as jnp
@@ -23,6 +24,20 @@ def legal_action_logits(
         illegal = illegal | extra_illegal
     illegal = jnp.where(illegal.all(), False, illegal)  # bail out of masking rather than go all -inf
     return jnp.where(illegal, -jnp.inf, logits)
+
+
+def make_wiremask_quality_illegal(margin: float, wiremask_key: str = "wiremask") -> ExtraIllegalFn:
+    """ExtraIllegalFn: cells whose wiremask value exceeds
+    wiremask.min() + margin are illegal - MaskPlace's own additive
+    soft_coefficient action-space cutoff (PPO2.py), generalized as a
+    reusable factory over quality_mask(). Needs obs[wiremask_key], e.g.
+    from policy.observation.make_wiremask_observation."""
+
+    def extra_illegal_fn(obs: dict) -> jax.Array:
+        wiremask = obs[wiremask_key]
+        return quality_mask(wiremask, wiremask.min() + margin)
+
+    return extra_illegal_fn
 
 
 def sample_action(key: jax.Array, logits: jax.Array) -> jax.Array:

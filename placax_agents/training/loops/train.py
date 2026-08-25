@@ -11,7 +11,7 @@ from placax_agents.training.algorithm.optimizer_step import apply_gradient_updat
 from placax_agents.training.algorithm.running_stats import RunningStats
 from placax_agents.training.loops.common import checkpoint_every_n, make_step_input, open_train_state
 from placax_agents.training.rollout import collect_rollout
-from placax_agents.types import AlgorithmFn, StateFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 import jax.numpy as jnp
@@ -31,11 +31,13 @@ def train_step(
     cell_size: float,
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """One full episode + one gradient update. Returns (variables,
     opt_state, running_stats, loss, final_state)."""
     trajectory, final_state = collect_rollout(
-        key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn
+        key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
+        extra_illegal_fn,
     )
     advantages, returns = compute_gae(
         trajectory["reward"], trajectory["value"], trajectory["done"], next_value=jnp.array(0.0),
@@ -49,6 +51,7 @@ def train_step(
             cell_size, params,
             clip_eps=ppo_config.clip_eps, value_coef=ppo_config.value_coef,
             entropy_coef=ppo_config.entropy_coef, value_loss_fn=ppo_config.value_loss_fn,
+            extra_illegal_fn=extra_illegal_fn,
         )
 
     new_variables, new_opt_state, new_running_stats, loss = apply_gradient_update(
@@ -61,7 +64,7 @@ def train_step(
 # its own one-time compile cost on first use.
 _jitted_train_step = jax.jit(
     train_step,
-    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config"),
+    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config", "extra_illegal_fn"),
 )
 
 
@@ -79,6 +82,7 @@ def train_sequential(
     optimizer: optax.GradientTransformation | None = None,
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Runs n_iterations of train_step. Returns (final_variables, losses).
     checkpoint_path, if given, saves every iteration and auto-resumes;
@@ -94,7 +98,7 @@ def train_sequential(
         key, step_key = make_step_input(key)  # fresh key per iteration
         variables, opt_state, running_stats, loss, _ = _jitted_train_step(
             step_key, variables, opt_state, running_stats, optimizer, policy_apply_fn,
-            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
+            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config, extra_illegal_fn,
         )
         losses.append(float(loss))
         checkpoint_every_n(checkpoint_path, 1, start_iteration + i + 1, variables, opt_state, running_stats, key)  # every=1: always

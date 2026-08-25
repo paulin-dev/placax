@@ -97,6 +97,33 @@ def test_ppo_loss_accepts_a_custom_value_loss_fn() -> None:
     assert jnp.isfinite(loss)
 
 
+def test_ppo_loss_accepts_an_extra_illegal_fn() -> None:
+    params, sizes_array, reward_fn = _toy_setup()
+    policy = CNNActorCritic()
+    key = random.PRNGKey(0)
+    key, init_key = random.split(key)
+    obs0 = observation(reset(params), params, sizes_array)
+    variables = policy.init(init_key, obs0)
+
+    def no_extra_restriction(obs):
+        return jnp.zeros((params.grid, params.grid), dtype=bool)
+
+    key, rollout_key = random.split(key)
+    trajectory, _final_state = collect_rollout(
+        rollout_key, variables, policy.apply, params, reward_fn, sizes_array, cell_size=1.0,
+        extra_illegal_fn=no_extra_restriction,
+    )
+    advantages, returns = compute_gae(
+        trajectory["reward"], trajectory["value"], trajectory["done"], next_value=jnp.array(0.0)
+    )
+
+    loss = ppo_loss(
+        variables, policy.apply, trajectory, advantages, returns, 1.0, params,
+        extra_illegal_fn=no_extra_restriction,
+    )
+    assert jnp.isfinite(loss)
+
+
 def test_ppo_loss_gradient_is_finite_and_nonzero() -> None:
     params, sizes_array, reward_fn = _toy_setup()
     policy = CNNActorCritic()

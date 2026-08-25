@@ -16,7 +16,7 @@ from placax_agents.training.algorithm.optimizer_step import apply_gradient_updat
 from placax_agents.training.algorithm.running_stats import RunningStats
 from placax_agents.training.loops.common import checkpoint_every_n, make_step_input, open_train_state
 from placax_agents.training.rollout import collect_rollout
-from placax_agents.types import AlgorithmFn, StateFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 import jax.numpy as jnp
@@ -33,6 +33,7 @@ def collect_buffer(
     cell_size: float,
     n_episodes: int,
     state_fn: StateFn = observation,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """n_episodes of collect_rollout, vmapped and flattened into one
     buffer of (n_episodes * n_macros) transitions, in temporal order per
@@ -40,15 +41,15 @@ def collect_buffer(
     run once over the whole concatenation, not once per episode."""
     keys = jax.random.split(key, n_episodes)
     trajectories, _ = jax.vmap(
-        collect_rollout, in_axes=(0, None, None, None, None, None, None, None)
-    )(keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn)
+        collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
+    )(keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn, extra_illegal_fn)
     flatten = lambda x: x.reshape((-1,) + x.shape[2:])  # noqa: E731  (n_episodes, n_macros, ...) -> (n, ...)
     return jax.tree_util.tree_map(flatten, trajectories)
 
 
 def _minibatch_update(
     variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
-    batch_trajectory, batch_advantages, batch_returns, cell_size, ppo_config,
+    batch_trajectory, batch_advantages, batch_returns, cell_size, ppo_config, extra_illegal_fn,
 ):
     """One gradient step over one minibatch slice of an already-built buffer."""
     def loss_fn(policy_params, normalized_advantages, normalized_returns):
@@ -57,6 +58,7 @@ def _minibatch_update(
             cell_size, params,
             clip_eps=ppo_config.clip_eps, value_coef=ppo_config.value_coef,
             entropy_coef=ppo_config.entropy_coef, value_loss_fn=ppo_config.value_loss_fn,
+            extra_illegal_fn=extra_illegal_fn,
         )
 
     return apply_gradient_update(
@@ -65,7 +67,7 @@ def _minibatch_update(
 
 
 _jitted_minibatch_update = jax.jit(
-    _minibatch_update, static_argnames=("optimizer", "policy_apply_fn", "ppo_config")
+    _minibatch_update, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn")
 )
 
 
@@ -94,12 +96,14 @@ def buffered_train_step(
     batch_size: int,
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """One full buffer-collect + multi-epoch-minibatch update cycle.
     Returns (variables, opt_state, running_stats, last_minibatch_loss)."""
     key, buffer_key = jax.random.split(key)
     buffer = collect_buffer(
-        buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes, state_fn
+        buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes,
+        state_fn, extra_illegal_fn,
     )
     advantages, returns = compute_gae(
         buffer["reward"], buffer["value"], buffer["done"], next_value=jnp.array(0.0),
@@ -114,6 +118,7 @@ def buffered_train_step(
             variables, opt_state, running_stats, loss = _jitted_minibatch_update(
                 variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
                 batch_trajectory, advantages[batch_idx], returns[batch_idx], cell_size, ppo_config,
+                extra_illegal_fn,
             )
     return variables, opt_state, running_stats, loss
 
@@ -135,6 +140,7 @@ def train_buffered(
     optimizer: optax.GradientTransformation | None = None,
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Runs n_iterations of buffered_train_step. Returns (final_variables,
     losses). Defaults (n_episodes=10, ppo_epochs=10, batch_size=64)
@@ -151,6 +157,7 @@ def train_buffered(
         variables, opt_state, running_stats, loss = buffered_train_step(
             step_key, variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
             reward_fn, sizes_array, cell_size, n_episodes, ppo_epochs, batch_size, state_fn, ppo_config,
+            extra_illegal_fn,
         )
         losses.append(float(loss))
         checkpoint_every_n(checkpoint_path, 1, start_iteration + i + 1, variables, opt_state, running_stats, key)

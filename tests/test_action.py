@@ -1,6 +1,10 @@
 from placax.extras.render import render  # noqa: F401  must precede jax imports
 from placax.types import EnvParams  # noqa: F401
-from placax_agents.policy.action import legal_action_logits, sample_action  # noqa: F401
+from placax_agents.policy.action import (  # noqa: F401
+    legal_action_logits,
+    make_wiremask_quality_illegal,
+    sample_action,
+)
 
 import jax
 import jax.numpy as jnp
@@ -77,6 +81,32 @@ def test_legal_action_logits_extra_illegal_defaults_to_no_effect() -> None:
     occupied = jnp.zeros((4, 4), dtype=bool)
     logits = jnp.zeros((4, 4))
     assert (legal_action_logits(logits, occupied, params, (1, 1)) == 0.0).all()
+
+
+def test_make_wiremask_quality_illegal_flags_cells_above_the_margin() -> None:
+    wiremask = jnp.array([[0.0, 5.0], [2.0, 10.0]])
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=1.0)
+    illegal = extra_illegal_fn({"wiremask": wiremask})
+    # min is 0.0, margin 1.0 -> cutoff 1.0 -> everything strictly above it is illegal
+    assert illegal.tolist() == [[False, True], [True, True]]
+
+
+def test_make_wiremask_quality_illegal_uses_a_custom_key() -> None:
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5, wiremask_key="score")
+    illegal = extra_illegal_fn({"score": jnp.array([[0.0, 1.0]])})
+    assert illegal.tolist() == [[False, True]]
+
+
+def test_make_wiremask_quality_illegal_composes_with_legal_action_logits() -> None:
+    params = EnvParams(grid=2, n_macros=1)
+    occupied = jnp.zeros((2, 2), dtype=bool)
+    logits = jnp.zeros((2, 2))
+    obs = {"wiremask": jnp.array([[0.0, 5.0], [0.0, 0.0]])}
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=1.0)
+
+    masked = legal_action_logits(logits, occupied, params, (1, 1), extra_illegal_fn(obs))
+    assert masked[0, 1] == -jnp.inf  # illegal via the wiremask cutoff, not occupancy/boundary
+    assert masked[0, 0] == 0.0
 
 
 def test_sample_action_only_picks_legal_cells() -> None:
