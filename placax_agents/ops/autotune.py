@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable, Iterator
 
 
-def _is_oom(e: Exception) -> bool:
+def is_oom(e: Exception) -> bool:
     """True if e is a genuine out-of-memory error."""
     message = str(e)
     return (
@@ -66,7 +66,7 @@ def _attempt(try_fn: Callable[[int], None], n: int, cleanup_fn: Callable[[], Non
         print(f"  n={n}: ok ({time.monotonic() - start:.1f}s)", flush=True)
         return True
     except Exception as e:
-        if _is_oom(e):
+        if is_oom(e):
             print(f"  n={n}: OOM ({time.monotonic() - start:.1f}s)", flush=True)
             return False
         raise

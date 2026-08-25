@@ -5,17 +5,25 @@ pieces together into one thing you can actually run.
 Usage:
     python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]
 
-n_envs auto-detection runs real 1-step train_parallel() trials on the
-real benchmark in this process (no subprocess, no approximation), so
-what's measured is exactly what training will do. Tradeoff: a candidate
-that hangs hangs this script too - interrupt with Ctrl+C and re-run with
-a smaller max_candidate or explicit n_envs.
+n_envs auto-detection tries each candidate for real, but in a disposable
+subprocess (see _try_n_envs_subprocess), not this process. Two reasons:
+
+1. JAX preallocates ~75-90% of GPU memory as one arena on first use and
+   never gives it back, so this process's own memory_stats() can't tell
+   candidates apart after the first one runs - every number afterward
+   reflects that one big reservation, not what any given n_envs actually
+   needs. A fresh process hasn't made that reservation yet.
+2. A candidate that hangs or crashes the GPU driver (observed directly
+   while building this) can't reliably be interrupted with SIGTERM
+   in-process. A subprocess can be given a hard wall-clock timeout and
+   killed outright without losing the training run driving the search.
 
 Safe to re-run: resumes from checkpoint.bin automatically; every 50
 iterations a permanent snapshot (never overwritten) is saved under
 snapshots/ for rollback."""
-import gc
+import os
 import pathlib
+import subprocess
 import sys
 
 from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
@@ -23,7 +31,7 @@ from placax.core import reset  # noqa: F401
 from placax.netlist import load_netlist  # noqa: F401
 from placax.netlist.padding import build_padded_arrays  # noqa: F401
 from placax.types import EnvParams  # noqa: F401
-from placax_agents.ops.autotune import find_max_batch_size  # noqa: F401
+from placax_agents.ops.autotune import find_max_batch_size, is_oom  # noqa: F401
 from placax_agents.ops.resumable_train import resumable_train  # noqa: F401
 from placax_agents.policy.architectures.cnn import CNNActorCritic  # noqa: F401
 from placax_agents.policy.observation import observation  # noqa: F401
@@ -31,48 +39,18 @@ from placax_agents.policy.scale import compute_grid_scale  # noqa: F401
 from placax_agents.training.loops.parallel_train import train_parallel  # noqa: F401
 from placax_agents.training.reward import make_scaled_hpwl_reward  # noqa: F401
 
-import jax
 from jax import random
 
-
-def _jax_cleanup() -> None:
-    """Releases what's safe between autotune candidates: compiled-
-    executable caches and unreferenced objects. Deliberately does NOT
-    delete live arrays (jax.live_arrays + delete) - that would also kill
-    arrays closed over by reward_fn that later candidates still need."""
-    jax.clear_caches()
-    gc.collect()
+_PROBE_FLAG = "--probe-n-envs"
+_PROBE_OOM_MARKER = "PLACAX_PROBE_OOM"
+_PROBE_TIMEOUT_S = 90.0
 
 
-def _auto_detect_n_envs(
-    key, variables, policy, params, reward_fn, sizes_array, cell_size, max_candidate: int = 64
-):
-    """Returns (mode, n_envs). Only searches if parallel is worth trying
-    on this hardware at all."""
-    mode = recommended_parallelism_mode()
-    if mode == "sequential":
-        return "sequential", 1
-
-    def try_n_envs(n: int) -> None:
-        train_parallel(
-            key, variables, policy.apply, params, reward_fn, sizes_array, cell_size,
-            n_envs=n, n_iterations=1,
-        )
-
-    n_envs = find_max_batch_size(try_n_envs, max_candidate=max_candidate, cleanup_fn=_jax_cleanup)
-    return "parallel", max(n_envs, 1)
-
-
-def main() -> None:
-    benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
-    n_iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-    n_envs_override = int(sys.argv[3]) if len(sys.argv) > 3 else None
-
-    if not benchmark_dir.exists():
-        print(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
-        sys.exit(1)
-
-    print(f"loading {benchmark_dir} ...")
+def _build_training_state(benchmark_dir: pathlib.Path):
+    """Loads the netlist and builds everything needed to attempt a
+    training step: policy, initial variables, reward_fn, sizes_array,
+    cell_size, params. Shared between real training and the n_envs
+    probe subprocess so both run the exact same computation."""
     macro_sizes, nets = load_netlist(benchmark_dir)
     _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
@@ -82,11 +60,6 @@ def main() -> None:
     reward_fn = make_scaled_hpwl_reward(
         padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size
     )
-    print(f"  {len(macro_sizes)} macros, {len(nets)} nets, cell_size={cell_size:.2f}")
-
-    checkpoint_path = benchmark_dir / "checkpoint.bin"
-    snapshot_dir = benchmark_dir / "snapshots"
-    log_path = benchmark_dir / "training_log.jsonl"
 
     policy = CNNActorCritic()
     key = random.PRNGKey(0)
@@ -94,16 +67,97 @@ def main() -> None:
     obs0 = observation(reset(params), params, sizes_array)
     variables_init = policy.init(init_key, obs0)
 
+    return {
+        "macro_sizes": macro_sizes, "nets": nets, "params": params, "cell_size": cell_size,
+        "reward_fn": reward_fn, "sizes_array": sizes_array, "padded_pin_idx": padded_pin_idx,
+        "padded_pin_offset": padded_pin_offset, "valid_mask": valid_mask,
+        "policy": policy, "key": key, "variables_init": variables_init,
+    }
+
+
+def _probe_entrypoint(benchmark_dir: pathlib.Path, n: int) -> None:
+    """Run as a subprocess of _try_n_envs_subprocess: attempts one real
+    n-env training step and reports the outcome via exit code, so the
+    parent never has to interpret this process's internals - just
+    whether it succeeded, hit a real OOM, or crashed for some other
+    reason."""
+    state = _build_training_state(benchmark_dir)
+    try:
+        train_parallel(
+            state["key"], state["variables_init"], state["policy"].apply, state["params"],
+            state["reward_fn"], state["sizes_array"], state["cell_size"], n_envs=n, n_iterations=1,
+        )
+    except Exception as e:
+        if is_oom(e):
+            print(_PROBE_OOM_MARKER)
+            sys.exit(1)
+        raise
+
+
+def _try_n_envs_subprocess(benchmark_dir: pathlib.Path, n: int) -> None:
+    """try_fn for find_max_batch_size: attempts n_envs=n in a fresh,
+    disposable process instead of this one (see module docstring for
+    why). Raises MemoryError on OOM or timeout - either way, n_envs=n
+    doesn't work here - so find_max_batch_size backs off exactly as it
+    would for an in-process OOM. Any other failure is a real bug and
+    propagates with the subprocess's traceback attached."""
+    env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+    try:
+        result = subprocess.run(
+            [sys.executable, __file__, _PROBE_FLAG, str(benchmark_dir), str(n)],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S, env=env,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise MemoryError(f"n_envs={n} probe exceeded {_PROBE_TIMEOUT_S:.0f}s, treating as infeasible") from e
+
+    if result.returncode == 0:
+        return
+    if _PROBE_OOM_MARKER in result.stdout:
+        raise MemoryError(f"n_envs={n} does not fit")
+    raise RuntimeError(f"probe for n_envs={n} crashed (exit {result.returncode}):\n{result.stderr[-4000:]}")
+
+
+def _auto_detect_n_envs(benchmark_dir: pathlib.Path, max_candidate: int = 64) -> tuple[str, int]:
+    """Returns (mode, n_envs). Only searches if parallel is worth trying
+    on this hardware at all."""
+    mode = recommended_parallelism_mode()
+    if mode == "sequential":
+        return "sequential", 1
+
+    n_envs = find_max_batch_size(
+        lambda n: _try_n_envs_subprocess(benchmark_dir, n), max_candidate=max_candidate
+    )
+    return "parallel", max(n_envs, 1)
+
+
+def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == _PROBE_FLAG:
+        _probe_entrypoint(pathlib.Path(sys.argv[2]), int(sys.argv[3]))
+        return
+
+    benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
+    n_iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+    n_envs_override = int(sys.argv[3]) if len(sys.argv) > 3 else None
+
+    if not benchmark_dir.exists():
+        print(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
+        sys.exit(1)
+
+    print(f"loading {benchmark_dir} ...")
+    state = _build_training_state(benchmark_dir)
+    print(f"  {len(state['macro_sizes'])} macros, {len(state['nets'])} nets, cell_size={state['cell_size']:.2f}")
+
+    checkpoint_path = benchmark_dir / "checkpoint.bin"
+    snapshot_dir = benchmark_dir / "snapshots"
+    log_path = benchmark_dir / "training_log.jsonl"
+
     if n_envs_override is not None:
         mode = "sequential" if n_envs_override <= 1 else "parallel"
         n_envs = n_envs_override
         print(f"n_envs={n_envs} given explicitly, mode={mode}")
     else:
-        print("auto-detecting mode and n_envs (running real 1-step trials, no subprocess) ...")
-        key, probe_key = random.split(key)
-        mode, n_envs = _auto_detect_n_envs(
-            probe_key, variables_init, policy, params, reward_fn, sizes_array, cell_size
-        )
+        print("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
+        mode, n_envs = _auto_detect_n_envs(benchmark_dir)
         print(f"  -> mode={mode}, n_envs={n_envs}")
 
     resuming = checkpoint_path.exists()
@@ -111,8 +165,9 @@ def main() -> None:
     print(f"running {n_iterations} more iterations ...")
 
     _final_variables, log = resumable_train(
-        checkpoint_path, variables_init, key, policy.apply, params, reward_fn, sizes_array,
-        cell_size, n_iterations, padded_pin_idx, padded_pin_offset, valid_mask,
+        checkpoint_path, state["variables_init"], state["key"], state["policy"].apply, state["params"],
+        state["reward_fn"], state["sizes_array"], state["cell_size"], n_iterations,
+        state["padded_pin_idx"], state["padded_pin_offset"], state["valid_mask"],
         checkpoint_every=10, eval_every=10, log_path=log_path,
         n_envs=n_envs, mode=mode, snapshot_dir=snapshot_dir, snapshot_every=50,
     )
