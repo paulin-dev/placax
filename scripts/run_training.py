@@ -130,15 +130,50 @@ def _auto_detect_n_envs(benchmark_dir: pathlib.Path, max_candidate: int = 64) ->
     return "parallel", max(n_envs, 1)
 
 
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
+    """(benchmark_dir, n_iterations, n_envs_override) from sys.argv."""
+    benchmark_dir = pathlib.Path(argv[1] if len(argv) > 1 else "benchmarks/adaptec1")
+    n_iterations = int(argv[2]) if len(argv) > 2 else 100
+    n_envs_override = int(argv[3]) if len(argv) > 3 else None
+    return benchmark_dir, n_iterations, n_envs_override
+
+
+def _resolve_n_envs(benchmark_dir: pathlib.Path, n_envs_override: int | None) -> tuple[str, int]:
+    """(mode, n_envs): the override if given, else auto-detected. Prints
+    its own progress since auto-detection can take a while (see
+    _auto_detect_n_envs)."""
+    if n_envs_override is not None:
+        mode = "sequential" if n_envs_override <= 1 else "parallel"
+        print(f"n_envs={n_envs_override} given explicitly, mode={mode}")
+        return mode, n_envs_override
+
+    print("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
+    mode, n_envs = _auto_detect_n_envs(benchmark_dir)
+    print(f"  -> mode={mode}, n_envs={n_envs}")
+    return mode, n_envs
+
+
+def _print_results(
+    log: list[dict], checkpoint_path: pathlib.Path, snapshot_dir: pathlib.Path, log_path: pathlib.Path
+) -> None:
+    print()
+    print("iteration    loss           real_hpwl")
+    for entry in log:
+        hpwl_str = f"{entry['real_hpwl']:.1f}" if entry["real_hpwl"] is not None else "-"
+        print(f"{entry['iteration']:>9}    {entry['loss']:>10.4f}    {hpwl_str}")
+
+    print()
+    print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
+    print(f"snapshots (never overwritten) saved to {snapshot_dir}/")
+    print(f"full history saved to {log_path}")
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == _PROBE_FLAG:
         _probe_entrypoint(pathlib.Path(sys.argv[2]), int(sys.argv[3]))
         return
 
-    benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
-    n_iterations = int(sys.argv[2]) if len(sys.argv) > 2 else 100
-    n_envs_override = int(sys.argv[3]) if len(sys.argv) > 3 else None
-
+    benchmark_dir, n_iterations, n_envs_override = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         print(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
@@ -150,15 +185,7 @@ def main() -> None:
     checkpoint_path = benchmark_dir / "checkpoint.bin"
     snapshot_dir = benchmark_dir / "snapshots"
     log_path = benchmark_dir / "training_log.jsonl"
-
-    if n_envs_override is not None:
-        mode = "sequential" if n_envs_override <= 1 else "parallel"
-        n_envs = n_envs_override
-        print(f"n_envs={n_envs} given explicitly, mode={mode}")
-    else:
-        print("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
-        mode, n_envs = _auto_detect_n_envs(benchmark_dir)
-        print(f"  -> mode={mode}, n_envs={n_envs}")
+    mode, n_envs = _resolve_n_envs(benchmark_dir, n_envs_override)
 
     resuming = checkpoint_path.exists()
     print(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
@@ -171,17 +198,7 @@ def main() -> None:
         checkpoint_every=10, eval_every=10, log_path=log_path,
         n_envs=n_envs, mode=mode, snapshot_dir=snapshot_dir, snapshot_every=50,
     )
-
-    print()
-    print("iteration    loss           real_hpwl")
-    for entry in log:
-        hpwl_str = f"{entry['real_hpwl']:.1f}" if entry["real_hpwl"] is not None else "-"
-        print(f"{entry['iteration']:>9}    {entry['loss']:>10.4f}    {hpwl_str}")
-
-    print()
-    print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
-    print(f"snapshots (never overwritten) saved to {snapshot_dir}/")
-    print(f"full history saved to {log_path}")
+    _print_results(log, checkpoint_path, snapshot_dir, log_path)
 
 
 if __name__ == "__main__":

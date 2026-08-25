@@ -14,13 +14,52 @@ from placax.types import EnvParams, RewardFn  # noqa: F401
 from placax_agents.ops.evaluate import evaluate  # noqa: F401
 from placax_agents.policy.observation import observation  # noqa: F401
 from placax_agents.training.algorithm.config import PPOConfig  # noqa: F401
-from placax_agents.training.loops.common import open_train_state, save_train_state
+from placax_agents.training.loops.common import (  # noqa: F401
+    checkpoint_every_n,
+    make_step_input,
+    open_train_state,
+    save_train_state,
+)
 from placax_agents.training.loops.parallel_train import _jitted_parallel_train_step
 from placax_agents.training.loops.train import _jitted_train_step
 from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
 
 import jax
 import optax
+
+
+def _maybe_evaluate(
+    current_iteration: int,
+    eval_every: int,
+    variables,
+    policy_apply_fn: AlgorithmFn,
+    params: EnvParams,
+    sizes_array: jax.Array,
+    cell_size: float,
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    state_fn: StateFn,
+) -> float | None:
+    """Real HPWL at current_iteration, or None on non-evaluated iterations."""
+    if current_iteration % eval_every != 0:
+        return None
+    _positions, hpwl_value = evaluate(
+        variables, policy_apply_fn, params, sizes_array, cell_size,
+        padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
+    )
+    return float(hpwl_value)
+
+
+def _append_log_entry(
+    log: list[dict], log_path: pathlib.Path | None, iteration: int, loss: float, real_hpwl: float | None
+) -> None:
+    """Appends {iteration, loss, real_hpwl} to log, and to log_path as a JSON line if given."""
+    entry = {"iteration": iteration, "loss": float(loss), "real_hpwl": real_hpwl}
+    log.append(entry)
+    if log_path is not None:
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
 
 def resumable_train(
@@ -67,43 +106,30 @@ def resumable_train(
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path
     )
+    if snapshot_dir is not None and snapshot_every is not None:
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
 
     log = []
     for i in range(n_iterations):
         current_iteration = start_iteration + i + 1
 
-        key, step_key = jax.random.split(key)
-        step_input = jax.random.split(step_key, n_envs) if use_parallel else step_key
+        key, step_input = make_step_input(key, n_envs if use_parallel else None)
         variables, opt_state, running_stats, loss, _ = jitted_step(
             step_input, variables, opt_state, running_stats, optimizer, policy_apply_fn,
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
         )
 
-        real_hpwl = None
-        if current_iteration % eval_every == 0:
-            _positions, hpwl_value = evaluate(
-                variables, policy_apply_fn, params, sizes_array, cell_size,
-                padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
-            )
-            real_hpwl = float(hpwl_value)
+        real_hpwl = _maybe_evaluate(
+            current_iteration, eval_every, variables, policy_apply_fn, params, sizes_array, cell_size,
+            padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
+        )
+        _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
 
-        entry = {"iteration": current_iteration, "loss": float(loss), "real_hpwl": real_hpwl}
-        log.append(entry)
-        if log_path is not None:
-            with open(log_path, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-
-        if current_iteration % checkpoint_every == 0:
-            save_train_state(
-                checkpoint_path, variables, opt_state, running_stats, key, current_iteration
-            )
-        if snapshot_dir is not None and snapshot_every is not None:
-            if current_iteration % snapshot_every == 0:
-                snapshot_dir.mkdir(parents=True, exist_ok=True)
-                save_train_state(
-                    snapshot_dir / f"checkpoint_iter_{current_iteration}.bin",
-                    variables, opt_state, running_stats, key, current_iteration,
-                )
+        checkpoint_every_n(
+            checkpoint_path, checkpoint_every, current_iteration, variables, opt_state, running_stats, key
+        )
+        snapshot_path = snapshot_dir / f"checkpoint_iter_{current_iteration}.bin" if snapshot_dir else None
+        checkpoint_every_n(snapshot_path, snapshot_every, current_iteration, variables, opt_state, running_stats, key)
 
     save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables, log
