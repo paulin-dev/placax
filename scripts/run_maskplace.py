@@ -1,18 +1,15 @@
-"""Runs the MaskPlace-equivalent pipeline: every piece the placax-vs-
-MaskPlace comparison closed, wired together into one script instead of
-left as a recipe. Same mechanism, not a reimplementation of MaskPlace
-itself - built entirely from placax's own pluggable pieces:
+"""Runs the MaskPlace-equivalent pipeline end to end, using only placax's
+existing pluggable pieces (not a MaskPlace reimplementation):
 
   - connectivity_order        macro placement order (MaskPlace's topology order)
   - macro_budget              place only the N most important macros (--pnm)
   - dense=True reward         per-step HPWL delta, not a terminal-only reward
   - make_wiremask_observation wiremask + 2-macro lookahead as observation channels
   - make_wiremask_quality_illegal   wirelength-guided action masking (soft_coefficient)
-  - ResNetCoarseFineActorCritic(critic_style="step_embedding")  its own two-branch network,
-                               and a critic that shares zero parameters with the actor
+  - ResNetCoarseFineActorCritic(critic_style="step_embedding")  two-branch network,
+                               critic shares zero parameters with the actor
   - maskplace_ppo_config       its GAE/entropy/value-loss choices
-  - maskplace_optimizer        its two independently-clipped, independently-stepped Adam
-                               optimizers (actor and critic), without a second backward pass
+  - maskplace_optimizer        independently-clipped, independently-stepped actor/critic Adam
   - train_buffered            its buffer-collect + minibatch-epoch PPO update procedure
 
 Usage: python scripts/run_maskplace.py [benchmark_dir] [n_iterations] [macro_budget]
@@ -35,13 +32,43 @@ from placax_agents.policy.architectures.resnet_cnn import (
     build_untrained_resnet_backbone,
 )
 from placax_agents.policy.observation import make_wiremask_observation
-from placax_agents.training.algorithm.config import maskplace_optimizer, maskplace_ppo_config
+from placax_agents.training.algorithm.config import PPOConfig
+from placax_agents.training.algorithm.loss import huber_value_loss
+from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
 from placax_agents.training.loops.buffered_train import train_buffered
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
+import optax
 from jax import random
 
 WIREMASK_MARGIN = 1.0  # MaskPlace's own --soft_coefficient default
+
+MASKPLACE_LEARNING_RATE = 2.5e-3
+"""MaskPlace's own --lr default (PPO2.py)."""
+
+MASKPLACE_MAX_GRAD_NORM = 0.5
+"""MaskPlace's own PPO.max_grad_norm; clipped per-network, not jointly."""
+
+
+def maskplace_ppo_config() -> PPOConfig:
+    """PPOConfig matching MaskPlace's own PPO2.py defaults: gamma=0.95,
+    no GAE smoothing (lam=1.0), no entropy bonus, Huber value loss."""
+    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
+
+
+def maskplace_optimizer(
+    learning_rate: float = MASKPLACE_LEARNING_RATE,
+    max_grad_norm: float = MASKPLACE_MAX_GRAD_NORM,
+    critic_param_prefix: str = "critic_",
+) -> optax.GradientTransformation:
+    """Adam(learning_rate) for actor and critic separately, each with its
+    own clip-by-global-norm(max_grad_norm); matches MaskPlace's two
+    separate optimizers without needing a second backward pass. Requires
+    critic params named under critic_param_prefix and disjoint from the
+    actor's - true for critic_style="step_embedding", not "canvas"
+    (shared trunk)."""
+    per_network = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
+    return make_grouped_optimizer(per_network, per_network, critic_param_prefix)
 
 
 def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
@@ -95,6 +122,32 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
     )
 
 
+def _train_and_eval_loop(
+    key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
+    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, eval_every: int,
+):
+    """Runs n_iterations of buffered-PPO training in eval_every-sized chunks, logging real HPWL after each."""
+    done, remaining = 0, n_iterations
+    while remaining > 0:
+        chunk = min(eval_every, remaining)
+        variables, losses = train_buffered(
+            key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
+            benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk,
+            optimizer=optimizer, state_fn=state_fn, ppo_config=ppo_config,
+            extra_illegal_fn=extra_illegal_fn, checkpoint_path=checkpoint_path,
+        )
+        done += chunk
+        remaining -= chunk
+
+        _positions, real_hpwl = evaluate(
+            variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
+            benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
+            state_fn, extra_illegal_fn,
+        )
+        Log.info(f"iter {done:>5}/{n_iterations}  loss={losses[-1]:>10.4f}  real_hpwl={float(real_hpwl):.1f}")
+    return variables
+
+
 def main() -> None:
     Log.configure()
 
@@ -130,25 +183,10 @@ def main() -> None:
         f"independent actor/critic optimizers) ..."
     )
 
-    eval_every = 10
-    done, remaining = 0, n_iterations
-    while remaining > 0:
-        chunk = min(eval_every, remaining)
-        variables, losses = train_buffered(
-            key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
-            benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk,
-            optimizer=optimizer, state_fn=state_fn, ppo_config=ppo_config,
-            extra_illegal_fn=extra_illegal_fn, checkpoint_path=checkpoint_path,
-        )
-        done += chunk
-        remaining -= chunk
-
-        _positions, real_hpwl = evaluate(
-            variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
-            benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-            state_fn, extra_illegal_fn,
-        )
-        Log.info(f"iter {done:>5}/{n_iterations}  loss={losses[-1]:>10.4f}  real_hpwl={float(real_hpwl):.1f}")
+    variables = _train_and_eval_loop(
+        key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
+        checkpoint_path, n_iterations, eval_every=10,
+    )
 
     print()
     print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")

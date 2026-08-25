@@ -29,23 +29,29 @@ def _pack_groups(
     return idx, offset, valid
 
 
+def _order_macros(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn) -> dict[str, int]:
+    """name -> row index, per order_fn - that row index is used everywhere else (sizes_array, positions)."""
+    macro_names = order_fn(macro_sizes, nets)
+    assert set(macro_names) == set(macro_sizes), "order_fn must return every macro exactly once"
+    return {name: i for i, name in enumerate(macro_names)}
+
+
+def _remap_nets_to_indices(nets: Nets, name_to_idx: dict[str, int]) -> list[list[tuple[int, float, float]]]:
+    """Nets reference macros by name; remap to the index sizes_array/positions use."""
+    return [[(name_to_idx[name], x_off, y_off) for name, x_off, y_off in net] for net in nets]
+
+
 def build_padded_arrays(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn = alphabetical_order):
     """Returns (name_to_idx, sizes_array, padded_pin_idx,
     padded_pin_offset, valid_mask). Built with NumPy, then converted to
     JAX arrays once - incremental .at[].set() would be far too slow.
     order_fn picks placement order (default: alphabetical) - see
     placax.netlist.order for alternatives (largest-first, connectivity)."""
-    macro_names = order_fn(macro_sizes, nets)  # this order = each macro's row index everywhere else
-    assert set(macro_names) == set(macro_sizes), "order_fn must return every macro exactly once"
-    name_to_idx = {name: i for i, name in enumerate(macro_names)}
-
+    name_to_idx = _order_macros(macro_sizes, nets, order_fn)
     sizes_array = jnp.array(
-        np.array([macro_sizes[name] for name in macro_names], dtype=np.float32)
+        np.array([macro_sizes[name] for name in name_to_idx], dtype=np.float32)
     )
-    # Nets reference macros by name; remap to the index that sizes_array/positions use.
-    net_groups = [
-        [(name_to_idx[name], x_off, y_off) for name, x_off, y_off in net] for net in nets
-    ]
+    net_groups = _remap_nets_to_indices(nets, name_to_idx)
     pin_idx, pin_offset, valid_mask = _pack_groups(net_groups, len(nets))
 
     return name_to_idx, sizes_array, jnp.array(pin_idx), jnp.array(pin_offset), jnp.array(valid_mask)

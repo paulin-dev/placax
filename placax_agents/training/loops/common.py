@@ -32,8 +32,7 @@ def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | 
     it exists. Returns (variables, opt_state, running_stats, key,
     start_iteration)."""
     template = train_state_bundle(variables, optimizer.init(variables), init_running_stats(), key, 0)
-    # template also serves as the deserialization target - a checkpoint is just bytes,
-    # it needs a matching pytree structure to know how to unpack itself.
+    # template doubles as the deserialization target, giving load_checkpoint a pytree to unpack into.
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
         state["variables"],

@@ -5,32 +5,21 @@ from typing import Callable
 import jax
 
 AlgorithmFn = Callable[..., tuple[jax.Array, jax.Array]]
-"""(variables, obs) -> (action_logits, value), e.g. CNNActorCritic.apply.
-obs is whatever your StateFn returns (see below) - a policy only needs to
-read the keys it actually uses, but obs["canvas"] and
-obs["current_macro_size"] must still be present, since
-placax_agents.policy.action.legal_action_logits reads them regardless of
-policy. action_logits: (grid_x, grid_y) float. value: () float scalar."""
+"""(variables, obs) -> (action_logits (grid_x, grid_y) float, value ()
+float), e.g. CNNActorCritic.apply. obs["canvas"] and
+obs["current_macro_size"] must be present regardless of policy, since
+legal_action_logits reads them."""
 
 StateFn = Callable[..., dict]
 """(state, params, sizes_array) -> observation dict, e.g. observation().
-Two keys are required by the training/eval loops themselves, not just the
-default policy - omitting them breaks legal_action_logits(), regardless
-of what policy you pair this with:
-  "canvas": (grid_x, grid_y) bool, already-placed footprints.
-  "current_macro_size": (2,) float, REAL-unit (width, height) of the
-    macro being placed - convert with policy.scale.to_grid_units(...,
-    cell_size) before passing to legal_action_logits, as rollout/evaluate do.
-Any other keys are yours to add for a custom policy (observation()'s
-positions/sizes_array/placed_mask/step/lookahead_sizes are conventions,
-not requirements - as is "wiremask", added by
-policy.observation.make_wiremask_observation)."""
+Must include "canvas" ((grid_x, grid_y) bool, placed footprints) and
+"current_macro_size" ((2,) float, REAL-unit size of the macro being
+placed - convert with policy.scale.to_grid_units before
+legal_action_logits). Other keys are policy-specific conventions, e.g.
+"wiremask" from policy.observation.make_wiremask_observation."""
 
 ExtraIllegalFn = Callable[[dict], jax.Array]
 """obs -> (grid_x, grid_y) bool, an extra illegal-cell cutoff OR'd into
-legality in legal_action_logits (see placax.extras.masks.quality_mask
-for a generic "score exceeds a cutoff" building block). Optional on
-collect_rollout/ppo_loss/evaluate (and the loops.*.train_* wrappers) -
-None (the default) means legality-only masking, unchanged from before
-this existed. Reads whatever obs keys it needs, e.g. "wiremask" from
-policy.observation.make_wiremask_observation."""
+legality in legal_action_logits (see placax.extras.masks.quality_mask).
+Optional on collect_rollout/ppo_loss/evaluate; None means legality-only
+masking."""

@@ -1,9 +1,7 @@
-"""Pluggable OrderFns: what sequence macros get placed in. Each macro's
+"""Pluggable OrderFns: what sequence macros get placed in. A macro's
 position in the returned list becomes its row index everywhere downstream
-(positions, sizes_array, pin indices) - swap via
-build_padded_arrays(..., order_fn=...). alphabetical_order is only the
-default, not a requirement; nothing downstream assumes any particular
-order."""
+(positions, sizes_array, pin indices); swap via
+build_padded_arrays(..., order_fn=...)."""
 from placax.types import Nets, SizeMap
 
 
@@ -38,11 +36,10 @@ def _macro_nets(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[int]]:
 
 
 def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Breadth-first by connectivity: starts from the highest-degree
-    macro, then repeatedly adds whichever unplaced macro shares the most
-    nets with what's already ordered (ties broken by degree, then name) -
-    keeps connected macros close together in placement order. A generic
-    heuristic, not tied to any one benchmark or reward."""
+    """Breadth-first by connectivity: starts from the highest-degree macro,
+    then repeatedly adds whichever unplaced macro shares the most nets
+    with what's already ordered (ties: degree, then name). Keeps
+    connected macros close together in placement order."""
     if not macro_sizes:
         return []
     degree = _net_degree(nets)

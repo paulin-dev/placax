@@ -19,10 +19,9 @@ def reset(params: EnvParams, initial_positions: jax.Array | None = None) -> EnvS
 def step(
     state: EnvState, action: jax.Array, reward_fn: RewardFn, params: EnvParams
 ) -> tuple[EnvState, jax.Array, jax.Array]:
-    """Places the next macro, then calls reward_fn every step (see
-    placax.types.RewardFn) - sparse (terminal-only) and dense (per-step)
-    reward are both just reward_fn choices, not something step() special-
-    cases. Returns (new_state, reward, done)."""
+    """Places the next macro and calls reward_fn (see placax.types.RewardFn);
+    sparse vs. dense reward is entirely reward_fn's choice. Returns
+    (new_state, reward, done)."""
     positions = state.positions.at[state.step].set(action)  # write this macro's chosen cell
     new_state = EnvState(positions=positions, step=state.step + 1)
     done = new_state.step == params.n_macros

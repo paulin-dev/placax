@@ -14,11 +14,8 @@ def make_scaled_hpwl_reward(
     cell_size: float,
     dense: bool = False,
 ) -> RewardFn:
-    """-HPWL of real-unit macro centers (grid positions converted via
-    to_real_centers). Satisfies RewardFn's grid-unit-input contract -
-    safe to plug straight into training, unlike make_hpwl_reward alone.
-    dense: see make_hpwl_reward - sparse (terminal) by default, or a
-    dense per-step reward."""
+    """-HPWL of real-unit macro centers, converted from grid positions via
+    to_real_centers. dense: see make_hpwl_reward."""
     base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask, dense=dense)
 
     def reward_fn(

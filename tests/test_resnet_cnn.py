@@ -88,7 +88,7 @@ def test_step_embedding_critic_params_are_disjoint_from_the_actor() -> None:
 
 
 def test_maskplace_optimizer_updates_a_real_policys_variables() -> None:
-    from placax_agents.training.algorithm.config import maskplace_optimizer
+    from scripts.run_maskplace import maskplace_optimizer
 
     params, obs = _toy_obs()
     policy = ResNetCoarseFineActorCritic(

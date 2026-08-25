@@ -27,21 +27,15 @@ class NEnvsDetector:
     """Auto-detects (mode, n_envs) for parallel training on this
     hardware. policy_path/make_reward_fn_path are dotted import paths
     ("module.Name") so a fresh subprocess can rebuild the exact same
-    policy/reward without any Python object crossing a process
-    boundary - both default to this library's own CNNActorCritic /
-    make_scaled_hpwl_reward, but any importable alternative works, with
-    two constraints the subprocess relies on:
-    policy_path must resolve to a zero-argument-constructible flax
-    nn.Module implementing AlgorithmFn (.apply) via .init()/.apply() -
-    it's instantiated as policy_path() with no arguments.
-    make_reward_fn_path, if given, must resolve to a RewardFnFactory
-    (see placax_agents.benchmark.RewardFnFactory).
+    policy/reward with nothing crossing the process boundary but
+    strings; policy_path must be zero-argument-constructible
+    (instantiated as policy_path()), make_reward_fn_path must resolve to
+    a RewardFnFactory.
 
-    Each candidate n_envs is tried for real, but in a disposable
-    subprocess (see probe_subprocess): JAX's own memory accounting is
-    unusable after the first real GPU allocation (preallocation), and a
-    hung or crashing candidate can be killed outright without losing
-    the calling process."""
+    Each candidate n_envs is tried for real in a disposable subprocess
+    (see probe_subprocess): JAX's memory accounting is unusable after the
+    first real GPU allocation, and a hung/crashing candidate can be
+    killed without losing the calling process."""
 
     def __init__(
         self,
@@ -86,14 +80,19 @@ class NEnvsDetector:
         probe_subprocess(argv, timeout_s=self.timeout_s, oom_marker=_OOM_MARKER, env=env)
 
 
-def _probe_entrypoint(benchmark_dir: str, policy_path: str, make_reward_fn_path: str, n: int) -> None:
-    """Subprocess entry point (see NEnvsDetector._try_n_envs): attempts
-    one n-env training step, reporting the outcome via exit code."""
-    # Rebuild the benchmark/policy from scratch - nothing crosses the process boundary but strings.
+def _rebuild_benchmark_and_policy(benchmark_dir: str, policy_path: str, make_reward_fn_path: str):
+    """Rebuilds (benchmark, policy, variables) from scratch - nothing crosses the process boundary but strings."""
     load_kwargs = {"make_reward_fn": _import(make_reward_fn_path)} if make_reward_fn_path else {}
     benchmark = Benchmark.load(pathlib.Path(benchmark_dir), **load_kwargs)
     policy = _import(policy_path)()
     variables = benchmark.init_policy(policy, random.PRNGKey(0))
+    return benchmark, policy, variables
+
+
+def _probe_entrypoint(benchmark_dir: str, policy_path: str, make_reward_fn_path: str, n: int) -> None:
+    """Subprocess entry point (see NEnvsDetector._try_n_envs): attempts
+    one n-env training step, reporting the outcome via exit code."""
+    benchmark, policy, variables = _rebuild_benchmark_and_policy(benchmark_dir, policy_path, make_reward_fn_path)
     try:
         train_parallel(
             random.PRNGKey(0), variables, policy.apply, benchmark.params, benchmark.reward_fn,

@@ -53,22 +53,16 @@ def boundary_mask(params: EnvParams, macro_size: tuple[int, int]) -> jax.Array:
 
 
 def quality_mask(scores: jax.Array, max_score: jax.Array) -> jax.Array:
-    """True (illegal) wherever scores exceeds max_score - a single
-    composable cutoff over any per-cell cost array (e.g.
-    extras.rewards.wiremask(), a congestion or density map, ...).
-    Combine with |  like any other mask here. How max_score is picked is
-    up to the caller: scores.min() + margin (an additive cutoff) and
-    jnp.quantile(scores, keep_frac) (a relative cutoff) are both just
-    ordinary uses of this one primitive, not special cases of it."""
+    """True (illegal) wherever scores exceeds max_score. Composable with |
+    over any per-cell cost array; how max_score is picked (margin,
+    quantile, ...) is up to the caller."""
     return scores > max_score
 
 
 def lookahead_illegal_masks(occupied: jax.Array, params: EnvParams, macro_sizes: jax.Array) -> jax.Array:
     """(horizon, grid_x, grid_y) bool: occupancy_mask | boundary_mask for
-    each row of macro_sizes (horizon, 2) against the SAME occupied canvas
-    - valid because none of those macros are placed yet, so they all mask
-    against today's canvas. Pairs with
-    policy.observation.lookahead_sizes()'s grid-unit equivalent."""
+    each row of macro_sizes, all against today's canvas (valid since none
+    of them are placed yet). Pairs with policy.observation.lookahead_sizes()."""
 
     def mask_for(size: jax.Array) -> jax.Array:
         w, h = size[0], size[1]

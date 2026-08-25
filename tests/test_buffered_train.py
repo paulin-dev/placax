@@ -111,7 +111,7 @@ def test_train_buffered_matches_maskplace_defaults_shape() -> None:
     # maskplace_ppo_config() + train_buffered's own defaults together
     # reproduce MaskPlace's procedure shape (n_episodes stands in for its
     # buffer_capacity = 10 * placed_num_macro, in effect, at n_episodes=10).
-    from placax_agents.training.algorithm.config import maskplace_ppo_config
+    from scripts.run_maskplace import maskplace_ppo_config
 
     params, sizes_array, reward_fn = _toy_setup()
     policy = CNNActorCritic()

@@ -1,3 +1,4 @@
+"""Public API: reset/step (the env kernel) and their type contracts."""
 from placax import _device  # must run before any `import jax`
 
 from placax.core import reset, step, random_action

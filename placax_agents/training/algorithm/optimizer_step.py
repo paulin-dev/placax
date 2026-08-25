@@ -20,11 +20,8 @@ def apply_gradient_update(
     returns: jax.Array,
 ):
     """One gradient step. loss_fn(policy_params, normalized_advantages,
-    normalized_returns) -> () float scalar; advantages/normalized_advantages
-    and returns/normalized_returns are (n_steps,) float, one entry per
-    trajectory step - loss_fn is responsible for reducing that to a
-    scalar itself (e.g. ppo_loss vmaps over the step dimension, then
-    .mean()s). Returns (variables, opt_state, running_stats, loss)."""
+    normalized_returns) -> scalar loss. Returns (variables, opt_state,
+    running_stats, loss)."""
     new_running_stats = update_running_stats(running_stats, returns)  # fold this batch's returns in
     normalized_returns = normalize_with_stats(new_running_stats, returns)
     normalized_advantages = normalize_advantages(advantages)

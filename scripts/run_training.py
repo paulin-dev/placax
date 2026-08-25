@@ -43,40 +43,44 @@ def _print_summary(checkpoint_path: pathlib.Path, snapshot_dir: pathlib.Path, lo
     print(f"full history saved to {log_path}")
 
 
+def _load_benchmark(benchmark_dir: pathlib.Path) -> Benchmark:
+    Log.info(f"loading {benchmark_dir} ...")
+    benchmark = Benchmark.load(benchmark_dir)
+    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
+    return benchmark
+
+
+def _output_paths(benchmark_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    """(checkpoint_path, snapshot_dir, log_path), all under their own
+    output subdirectory - benchmark_dir itself holds the input netlist
+    and shouldn't get mixed up with run artifacts."""
+    output_dir = benchmark_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / "checkpoint.bin", output_dir / "snapshots", output_dir / "training_log.jsonl"
+
+
 def main() -> None:
     Log.configure()
 
-    # 1. args + benchmark
     benchmark_dir, n_iterations, n_envs_override = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
-    Log.info(f"loading {benchmark_dir} ...")
-    benchmark = Benchmark.load(benchmark_dir)
-    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
+    benchmark = _load_benchmark(benchmark_dir)
 
-    # 2. policy
     policy = CNNActorCritic()
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     variables = benchmark.init_policy(policy, init_key)
 
-    # 3. n_envs (explicit or auto-detected)
-    # Training output lives under its own subdirectory - benchmark_dir itself
-    # holds the input netlist and shouldn't get mixed up with run artifacts.
-    output_dir = benchmark_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / "checkpoint.bin"
-    snapshot_dir = output_dir / "snapshots"
-    log_path = output_dir / "training_log.jsonl"
+    checkpoint_path, snapshot_dir, log_path = _output_paths(benchmark_dir)
     mode, n_envs = _resolve_n_envs(benchmark_dir, n_envs_override)
 
     resuming = checkpoint_path.exists()
     Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
     Log.info(f"running {n_iterations} more iterations ...")
 
-    # 4. train, resuming from checkpoint_path if it exists
     _final_variables, _log = resumable_train(
         checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
         benchmark.sizes_array, benchmark.cell_size, n_iterations,

@@ -49,16 +49,10 @@ def ppo_loss(
     value_loss_fn: ValueLossFn = mse_value_loss,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> jax.Array:
-    """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
-    over one trajectory dict (as produced by collect_rollout, or any
-    reordered/shuffled subset of one - each step's macro size comes from
-    its own recorded obs["current_macro_size"], not from position within
-    the array, so this is safe to call on shuffled minibatches too, e.g.
-    from loops.buffered_train). value_loss_fn swaps the critic's loss
-    (default mse_value_loss; huber_value_loss above is a drop-in
-    alternative). extra_illegal_fn, if given, must match whatever was
-    used at rollout time (see placax_agents.types.ExtraIllegalFn) - the
-    PPO ratio compares probabilities under the same distribution."""
+    """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy)
+    over one trajectory dict from collect_rollout (or any shuffled subset
+    of one - per-step macro size comes from obs, not array position).
+    extra_illegal_fn must match what was used at rollout time."""
 
     def per_step(obs, action, old_log_prob, advantage, ret):
         # Recompute the legal mask from the saved obs so the ratio compares

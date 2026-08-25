@@ -17,16 +17,11 @@ def hpwl(
     valid_mask: jax.Array,
     placed_mask: jax.Array | None = None,
 ) -> jax.Array:
-    """sum over nets of (bbox width + height); a net with 0 counted pins
-    contributes 0 (guarded explicitly - sentinels alone would give a
-    large negative value). positions: (n_macros, 2) float, REAL units -
-    combined directly with padded_pin_offset (also real units), so
-    passing grid-cell coordinates here silently gives a meaningless
-    number rather than an error. placed_mask: (n_macros,) bool, which
-    macros' positions are real - a pin whose macro isn't placed yet is
-    excluded even if valid_mask says the slot is real, letting hpwl() be
-    called on a partial assignment. Defaults to "every macro is placed",
-    the historical full-assignment behavior."""
+    """Sum over nets of (bbox width + height); a net with 0 counted pins
+    contributes 0 (guarded explicitly). positions must be REAL units
+    (combined directly with padded_pin_offset). placed_mask marks which
+    macros have a real position yet, so hpwl() can be called on a partial
+    assignment; defaults to all-placed."""
     if placed_mask is None:
         placed_mask = jnp.ones(positions.shape[0], dtype=bool)
     pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset  # pin centers
@@ -67,14 +62,11 @@ def wiremask(
     macro_net_valid: jax.Array,
     macro_idx: jax.Array | int | None = None,
 ) -> jax.Array:
-    """(grid_x, grid_y) array: wiremask(x, y) = HPWL(hypothetical at
-    x, y) - HPWL(baseline), for placing macro_idx there. macro_idx
-    defaults to state.step (the macro actually about to be placed); pass
-    state.step + k to preview a macro further ahead in a lookahead window
-    (see lookahead_wiremasks below) - the baseline (which macros already
-    have a real position) always stays keyed to state.step itself, not
-    macro_idx, so previewing a later macro never pretends an earlier,
-    still-undecided one has been placed."""
+    """(grid_x, grid_y) array: wiremask(x, y) = HPWL(hypothetical at x, y)
+    - HPWL(baseline), for placing macro_idx there. macro_idx defaults to
+    state.step; pass state.step + k to preview a macro further ahead (see
+    lookahead_wiremasks) - the baseline always stays keyed to state.step,
+    so a previewed macro never appears already placed."""
     idx = state.step if macro_idx is None else macro_idx
     baseline_lo, baseline_hi, baseline_total = _wiremask_baseline(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask
@@ -111,10 +103,9 @@ def lookahead_wiremasks(
     horizon: int,
 ) -> jax.Array:
     """(horizon, grid_x, grid_y) array: wiremask() for each of the next
-    `horizon` macros (state.step, state.step+1, ...), all previewed
-    against today's canvas - none of them are placed yet, so they all
-    share the same baseline. horizon is a static Python int, so the
-    shape stays fixed under jit; slots past the last macro are zeroed."""
+    `horizon` macros, all sharing today's baseline. horizon is a static
+    Python int (fixed shape under jit); slots past the last macro are
+    zeroed."""
     offsets = jnp.arange(horizon)
     in_range = (state.step + offsets) < params.n_macros
     macro_idxs = jnp.clip(state.step + offsets, 0, params.n_macros - 1)
@@ -135,20 +126,11 @@ def make_hpwl_reward(
     valid_mask: jax.Array,
     dense: bool = False,
 ) -> RewardFn:
-    """Builds reward_fn(old_positions, new_positions, old_placed, new_placed)
-    matching core.step()'s RewardFn contract - called every step.
-    positions must be real units (see hpwl()) - this does NOT satisfy
-    make_scaled_hpwl_reward's grid-unit contract on its own; use that to
-    plug straight into training, or convert positions yourself.
-
-    dense=False (default): 0 every step, -HPWL(new) once every macro is
-    placed - the classic sparse/terminal reward.
-    dense=True: -(HPWL(placed-so-far after) - HPWL(placed-so-far before))
-    every step - a dense, per-action reward. Its episode sum telescopes
-    to the exact same total as dense=False (HPWL of an empty placement is
-    0), just paid out across steps instead of only at the end - sparse
-    and dense are two credit-assignment choices over the same quantity,
-    not two different mechanisms."""
+    """Builds a RewardFn (see core.step()) over -HPWL. positions must be
+    real units - see make_scaled_hpwl_reward for the grid-unit version.
+    dense=False: 0 every step, -HPWL(new) once fully placed (sparse).
+    dense=True: -(HPWL after - HPWL before) every step; sums to the same
+    episode total as dense=False, just paid out incrementally."""
 
     def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
         return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask)

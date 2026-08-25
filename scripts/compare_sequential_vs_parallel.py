@@ -46,8 +46,7 @@ def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
 
 
 def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
-    """N episodes at once via vmap - ONE jitted function per step, not
-    jitted pieces glued by unjitted code."""
+    """N episodes at once via vmap, as a single jitted step function."""
     def one_batched_step(keys, batched_state):
         # Same step() as sequential, just vmapped over the leading batch dimension.
         keys, subkeys = jax.vmap(lambda k: tuple(random.split(k)))(keys)

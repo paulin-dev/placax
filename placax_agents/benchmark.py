@@ -19,13 +19,13 @@ RewardFnFactory = Callable[[jax.Array, jax.Array, jax.Array, jax.Array, float], 
 """make_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size) -> RewardFn.
 padded_pin_idx: (n_nets, max_pins) int, macro index per pin slot.
 padded_pin_offset: (n_nets, max_pins, 2) float, real-unit pin offset from
-    that macro's center. padding slots are (0, 0), ignored via valid_mask.
-valid_mask: (n_nets, max_pins) bool, True where a pin slot is real, not padding.
+    that macro's center (padding slots are (0, 0), ignored via valid_mask).
+valid_mask: (n_nets, max_pins) bool, True where a pin slot is real.
 sizes_array: (n_macros, 2) float, real-unit (width, height) per macro.
 cell_size: real units per grid cell.
 The returned RewardFn must still satisfy the grid-unit contract in
-placax.types.RewardFn - convert with to_real_centers before combining
-with these (real-unit) arrays, the way make_scaled_hpwl_reward does."""
+placax.types.RewardFn - convert with to_real_centers first, as
+make_scaled_hpwl_reward does."""
 
 
 @dataclass(frozen=True)
@@ -42,6 +42,16 @@ class Benchmark:
     padded_pin_offset: jax.Array
     valid_mask: jax.Array
 
+    @staticmethod
+    def _load_and_truncate(
+        benchmark_dir: pathlib.Path, order_fn: OrderFn, macro_budget: int | None
+    ) -> tuple[SizeMap, Nets]:
+        """Raw, name-keyed netlist, optionally cut to its first macro_budget macros per order_fn."""
+        macro_sizes, nets = load_netlist(benchmark_dir)
+        if macro_budget is not None:
+            macro_sizes, nets = truncate_to_budget(macro_sizes, nets, macro_budget, order_fn=order_fn)
+        return macro_sizes, nets
+
     @classmethod
     def load(
         cls,
@@ -51,17 +61,11 @@ class Benchmark:
         order_fn: OrderFn = alphabetical_order,
         macro_budget: int | None = None,
     ) -> "Benchmark":
-        """Loads benchmark_dir (any supported netlist format). Pass
-        make_reward_fn for a different reward - same signature as
-        make_scaled_hpwl_reward. Pass order_fn for a different placement
-        order - same signature as placax.netlist.order.alphabetical_order.
-        macro_budget, if given, keeps only the first macro_budget macros
-        per order_fn (see netlist.budget.truncate_to_budget) - e.g.
-        MaskPlace's `placed_num_macro`: train on only the N most important
-        macros instead of the whole netlist."""
-        macro_sizes, nets = load_netlist(benchmark_dir)  # raw, name-keyed
-        if macro_budget is not None:
-            macro_sizes, nets = truncate_to_budget(macro_sizes, nets, macro_budget, order_fn=order_fn)
+        """Loads benchmark_dir (any supported netlist format). macro_budget,
+        if given, keeps only the first macro_budget macros per order_fn
+        (see netlist.budget.truncate_to_budget), e.g. MaskPlace's
+        `placed_num_macro`."""
+        macro_sizes, nets = cls._load_and_truncate(benchmark_dir, order_fn, macro_budget)
         # Pad/index into the fixed-shape arrays JAX code operates on.
         _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
             macro_sizes, nets, order_fn=order_fn
@@ -75,8 +79,7 @@ class Benchmark:
         )
 
     def init_policy(self, policy, key: jax.Array):
-        """variables for policy - any flax nn.Module whose .apply matches
-        AlgorithmFn (see placax_agents.types) - from one fresh
-        observation of this benchmark."""
+        """Initializes policy's variables from one fresh observation of
+        this benchmark."""
         obs0 = observation(reset(self.params), self.params, self.sizes_array)
         return policy.init(key, obs0)

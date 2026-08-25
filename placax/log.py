@@ -1,10 +1,7 @@
-"""Static logging facade over stdlib logging - call Log.info("msg")
-directly, no per-file `logger = logging.getLogger(__name__)` boilerplate.
-Each call is still routed to a logger named after its CALLER's module
-(via a stack lookup, the same technique stdlib logging itself uses
-internally to find caller info), so per-module level control - the
-reason that boilerplate exists in the first place - still works via
-silence()."""
+"""Static logging facade over stdlib logging - Log.info("msg") directly,
+no per-file `logger = logging.getLogger(__name__)` boilerplate. Each call
+is routed to a logger named after its caller's module (via a stack
+lookup), so per-module silence() still works."""
 import logging
 import sys
 
@@ -19,11 +16,9 @@ def _caller_logger() -> logging.Logger:
 
 
 class Log:
-    """Static logging facade used across the library and scripts.
-    Library code logs through this instead of calling print() directly,
-    so a caller using this as a library (not running a script) can
-    control or silence it - configure()/silence() change behavior for
-    the whole process, not just one call site."""
+    """Static logging facade used across the library and scripts, so a
+    caller embedding this as a library can control or silence it via
+    configure()/silence()."""
 
     @staticmethod
     def debug(msg: str, *args: object) -> None:
@@ -44,15 +39,14 @@ class Log:
     @staticmethod
     def configure(level: int = logging.INFO, fmt: str = _FORMAT) -> None:
         """Sets up console logging for the whole process. Call once, e.g.
-        at the top of a script's main() - library code should never call
-        this itself, only Log.info()/.warning()/etc."""
+        at the top of a script's main(); library code should never call
+        this itself."""
         logging.basicConfig(level=level, format=fmt)
 
     @staticmethod
     def silence(*names: str) -> None:
-        """Mutes a logger subtree. Defaults to every module path this
-        library logs under - "placax" and "placax_agents" are separate
-        top-level names, not one hierarchy, so both are silenced unless
-        names overrides them. Useful when embedding this as a library."""
+        """Mutes a logger subtree. Defaults to "placax" and "placax_agents"
+        (separate top-level names, so both are silenced unless names
+        overrides them)."""
         for name in names or ("placax", "placax_agents"):
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)

@@ -52,8 +52,7 @@ def warn_if_gpu_unused() -> None:
 
 def recommended_parallelism_mode(override: str | None = None) -> str:
     """"sequential" or "parallel": override if given, else auto-detected
-    from the JAX backend (vmap is ~73x slower on CPU, ~3.8x faster on
-    GPU - see scripts/compare_sequential_vs_parallel.py)."""
+    from the JAX backend (vmap is ~73x slower on CPU, ~3.8x faster on GPU)."""
     if override is not None:
         if override not in ("sequential", "parallel"):
             raise ValueError(f"mode must be 'sequential' or 'parallel', got {override!r}")

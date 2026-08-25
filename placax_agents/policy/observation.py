@@ -8,10 +8,9 @@ import jax.numpy as jnp
 
 
 def lookahead_sizes(state: EnvState, params: EnvParams, sizes_array: jax.Array, horizon: int) -> jax.Array:
-    """(horizon, 2) REAL-unit sizes of the next `horizon` macros still to
-    place, starting with the one about to be placed now. horizon is a
-    static Python int, so the shape stays fixed under jit regardless of
-    how many macros remain; slots past the last macro are zeroed out."""
+    """(horizon, 2) REAL-unit sizes of the next `horizon` macros, starting
+    with the one about to be placed. horizon is a static int so shape
+    stays fixed under jit; slots past the last macro are zeroed."""
     offsets = jnp.arange(horizon)
     in_range = (state.step + offsets) < params.n_macros
     idx = jnp.clip(state.step + offsets, 0, params.n_macros - 1)
@@ -19,14 +18,11 @@ def lookahead_sizes(state: EnvState, params: EnvParams, sizes_array: jax.Array, 
 
 
 def observation(state: EnvState, params: EnvParams, sizes_array: jax.Array, lookahead: int = 1) -> dict:
-    """Keys: canvas (grid_x, grid_y) bool, already-placed footprints;
-    current_macro_size (2,) float, REAL units, same as lookahead_sizes[0];
-    lookahead_sizes (lookahead, 2) float, REAL units, see lookahead_sizes()
-    above - pass a larger `lookahead` for policies that plan ahead;
-    positions (n_macros, 2) int, grid units (state.positions passed
-    through); sizes_array (n_macros, 2) float, REAL units, passed through
-    unchanged; placed_mask (n_macros,) bool; step () int, index being
-    placed next."""
+    """Keys: canvas (grid_x, grid_y) bool; current_macro_size (2,) float
+    REAL units (= lookahead_sizes[0]); lookahead_sizes (lookahead, 2)
+    float REAL units, see lookahead_sizes() above; positions (n_macros, 2)
+    int grid units; sizes_array (n_macros, 2) float REAL units;
+    placed_mask (n_macros,) bool; step () int, index placed next."""
     canvas = render(state.positions, sizes_array, params.grid_x, params.effective_grid_y)
     return {
         "canvas": canvas,
@@ -49,18 +45,12 @@ def make_wiremask_observation(
     base_state_fn=observation,
     lookahead: int = 1,
 ):
-    """Wraps any StateFn, adding two keys: "wiremask" (grid_x, grid_y)
-    float, the per-cell HPWL increase from placing the CURRENT macro
-    there, and "lookahead_wiremasks" (lookahead, grid_x, grid_y) float,
-    the same map previewed for each of the next `lookahead` macros
-    against today's canvas (lookahead=1: identical content to "wiremask",
-    just with a leading axis) - see extras.rewards.wiremask()/
-    lookahead_wiremasks(). Closes over one benchmark's netlist arrays -
-    build once per benchmark, pass the result as state_fn to
-    collect_rollout/train_*/evaluate. Generic: pairs with any base
-    StateFn and any policy that reads these extra keys, e.g.
-    policy.architectures.wiremask_cnn.WiremaskCNNActorCritic or
-    policy.architectures.resnet_cnn.ResNetCoarseFineActorCritic."""
+    """Wraps a StateFn, adding "wiremask" (grid_x, grid_y) float - the
+    per-cell HPWL increase from placing the current macro there - and
+    "lookahead_wiremasks" (lookahead, grid_x, grid_y) float, the same
+    preview for each of the next `lookahead` macros against today's
+    canvas. Closes over one benchmark's netlist arrays; build once per
+    benchmark and pass as state_fn."""
 
     def state_fn(state: EnvState, params: EnvParams, sizes_array: jax.Array) -> dict:
         obs = base_state_fn(state, params, sizes_array)

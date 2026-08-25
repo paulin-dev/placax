@@ -1,10 +1,7 @@
 """Buffer + minibatch-epoch PPO training: collect n_episodes of rollout
 into one buffer, then run ppo_epochs passes of shuffled batch_size
-minibatch updates over it - a third training-loop shape alongside
-train_sequential (one episode, one full-batch update) and train_parallel
-(n_envs episodes, one full-batch update). Matches MaskPlace's own PPO2.py
-procedure (buffer_capacity/ppo_epoch/batch_size), generalized: n_episodes
-takes the place of its `10 * placed_num_macro`-derived buffer size."""
+minibatch updates over it. Matches MaskPlace's own PPO2.py procedure
+(buffer_capacity/ppo_epoch/batch_size)."""
 import pathlib
 
 from placax.types import EnvParams, RewardFn  # must precede jax imports
@@ -36,9 +33,9 @@ def collect_buffer(
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """n_episodes of collect_rollout, vmapped and flattened into one
-    buffer of (n_episodes * n_macros) transitions, in temporal order per
-    episode - GAE's done-flag reset means compute_gae() below is safe to
-    run once over the whole concatenation, not once per episode."""
+    buffer of (n_episodes * n_macros) transitions, in per-episode temporal
+    order; safe to run compute_gae() once over the whole buffer since GAE
+    resets on each episode's done flag."""
     keys = jax.random.split(key, n_episodes)
     trajectories, _ = jax.vmap(
         collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
@@ -72,9 +69,8 @@ _jitted_minibatch_update = jax.jit(
 
 
 def _shuffled_batches(key: jax.Array, buffer_size: int, batch_size: int) -> jax.Array:
-    """(n_batches, batch_size) int array of shuffled buffer indices - a
-    remainder shorter than batch_size is dropped, matching MaskPlace's
-    own BatchSampler(..., drop_last=True)."""
+    """(n_batches, batch_size) int array of shuffled buffer indices;
+    drops a short remainder, matching MaskPlace's BatchSampler(drop_last=True)."""
     n_batches = buffer_size // batch_size
     perm = jax.random.permutation(key, buffer_size)
     return perm[: n_batches * batch_size].reshape(n_batches, batch_size)

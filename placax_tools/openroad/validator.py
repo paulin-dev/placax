@@ -66,12 +66,10 @@ class OpenROADValidator(Validator):
         self.clock_name = clock_name
         self.openroad_binary = openroad_binary
 
-    def validate(
+    def _write_script(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
-    ) -> PPAResult:
-        """Writes the TCL script, runs OpenROAD, parses its output."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # 1. write the TCL script OpenROAD will execute.
+    ) -> pathlib.Path:
+        """Writes the TCL script OpenROAD will execute."""
         script_path = output_dir / "validate.tcl"
         script_path.write_text(
             build_openroad_script(
@@ -79,10 +77,21 @@ class OpenROADValidator(Validator):
                 self.wire_rc_layer, self.clock_name,
             )
         )
+        return script_path
 
-        # 2. run it, 3. parse the text report back into PPAResult.
+    def _run_openroad(self, script_path: pathlib.Path) -> str:
+        """Runs OpenROAD on the script, returns its stdout report."""
         result = subprocess.run(
             [self.openroad_binary, "-exit", str(script_path)],
             capture_output=True, text=True, check=True,
         )
-        return parse_openroad_output(result.stdout)
+        return result.stdout
+
+    def validate(
+        self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
+    ) -> PPAResult:
+        """Writes the TCL script, runs OpenROAD, parses its output."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        script_path = self._write_script(def_path, lef_paths, output_dir)
+        raw_output = self._run_openroad(script_path)
+        return parse_openroad_output(raw_output)

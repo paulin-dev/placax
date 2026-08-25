@@ -14,8 +14,7 @@ def build_dreamplace_config(
     gpu: bool = False,
     target_density: float = 1.0,
 ) -> dict:
-    """Real DREAMPlace config fields; standalone so it's independently
-    testable - DREAMPlaceCellPlacer just calls it."""
+    """Builds the DREAMPlace config dict (standalone for testability)."""
     return {
         "def_input": str(def_path),
         "lef_input": ";".join(str(p) for p in lef_paths),
@@ -67,27 +66,28 @@ class DREAMPlaceCellPlacer(CellPlacer):
         self.extra_config = extra_config or {}
         self.python_executable = python_executable
 
-    def place(
+    def _write_config(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> pathlib.Path:
-        """Writes the config, runs DREAMPlace, returns the placed DEF."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        # 1. build and write the config DREAMPlace itself reads.
+        """Builds and writes the config DREAMPlace itself reads."""
         config = build_dreamplace_config(
             def_path, lef_paths, output_dir, gpu=self.gpu, target_density=self.target_density
         )
         config.update(self.extra_config)
         config_path = output_dir / "dreamplace_config.json"
         config_path.write_text(json.dumps(config, indent=2))
+        return config_path
 
-        # 2. run DREAMPlace as an external process.
+    def _run_dreamplace(self, config_path: pathlib.Path) -> None:
+        """Runs DREAMPlace as an external process."""
         subprocess.run(
             [self.python_executable, "dreamplace/Placer.py", str(config_path)],
             cwd=self.dreamplace_root,
             check=True,
         )
 
-        # 3. confirm it actually produced the DEF we expect.
+    def _expect_result_def(self, def_path: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
+        """Confirms DREAMPlace actually produced the DEF we expect."""
         result_def = output_dir / f"{def_path.stem}.gp.def"
         if not result_def.exists():
             raise FileNotFoundError(
@@ -95,3 +95,12 @@ class DREAMPlaceCellPlacer(CellPlacer):
                 "check result_dir naming matches your DREAMPlace version"
             )
         return result_def
+
+    def place(
+        self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
+    ) -> pathlib.Path:
+        """Writes the config, runs DREAMPlace, returns the placed DEF."""
+        output_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self._write_config(def_path, lef_paths, output_dir)
+        self._run_dreamplace(config_path)
+        return self._expect_result_def(def_path, output_dir)
