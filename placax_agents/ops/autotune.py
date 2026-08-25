@@ -139,3 +139,27 @@ def find_max_batch_size(
             return last_good
         # 2. Binary-search inside that bracket to pin down the exact boundary.
         return _binary_search(try_fn, last_good, first_bad, cleanup_fn, verbose)
+
+
+def find_max_via_subprocess(
+    module: str,
+    fixed_args: list[str],
+    max_candidate: int = 1024,
+    start: int = 1,
+    timeout_s: float = 90.0,
+    oom_marker: str = "PLACAX_PROBE_OOM",
+    env: dict | None = None,
+    verbose: bool = True,
+) -> int:
+    """Finds the largest n for which `python -m module *fixed_args n` succeeds, via find_max_batch_size
+    + probe_subprocess. module must, under `if __name__ == "__main__"`, parse (*fixed_args, n) from
+    sys.argv and either exit 0 on success or print oom_marker and exit nonzero on OOM. This is the
+    shared glue behind every "how many of X fit on this hardware" detector in this codebase (e.g.
+    ops.n_envs.NEnvsDetector, scripts.run_maskplace.NEpisodesDetector) - a raw Python callable can't
+    be handed to a fresh subprocess (nothing crosses the boundary but strings), so callers only
+    differ in which module to re-invoke and what fixed arguments to pass it."""
+    def try_fn(n: int) -> None:
+        argv = [sys.executable, "-m", module, *fixed_args, str(n)]
+        probe_subprocess(argv, timeout_s=timeout_s, oom_marker=oom_marker, env=env)
+
+    return find_max_batch_size(try_fn, max_candidate=max_candidate, start=start, verbose=verbose)

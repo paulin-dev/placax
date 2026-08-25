@@ -12,7 +12,7 @@ existing pluggable pieces (not a MaskPlace reimplementation):
   - maskplace_optimizer        independently-clipped, independently-stepped actor/critic Adam
   - train_buffered            its buffer-collect + minibatch-epoch PPO update procedure
 
-Usage: python scripts/run_maskplace.py [benchmark_dir] [n_iterations] [macro_budget]
+Usage: python scripts/run_maskplace.py [benchmark_dir] [n_iterations] [macro_budget] [n_episodes|auto]
 """
 import pathlib
 import sys
@@ -24,6 +24,7 @@ from placax.log import Log
 from placax.netlist.order import connectivity_order
 from placax.netlist.padding import build_macro_net_index
 from placax_agents.benchmark import Benchmark
+from placax_agents.ops.autotune import find_max_via_subprocess, is_oom
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.policy.action import make_wiremask_quality_illegal
 from placax_agents.policy.architectures.resnet_cnn import (
@@ -42,6 +43,12 @@ import optax
 from jax import random
 
 WIREMASK_MARGIN = 1.0  # MaskPlace's own --soft_coefficient default
+
+MASKPLACE_N_EPISODES = 10
+"""MaskPlace's own buffer size: 10 episodes collected (in parallel, via vmap) per PPO update."""
+
+_MODULE = "scripts.run_maskplace"
+_OOM_MARKER = "PLACAX_PROBE_OOM"
 
 MASKPLACE_LEARNING_RATE = 2.5e-3
 """MaskPlace's own --lr default (PPO2.py)."""
@@ -69,12 +76,14 @@ def maskplace_optimizer(
     return make_grouped_optimizer(per_network, per_network, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
-    """(benchmark_dir, n_iterations, macro_budget) from sys.argv."""
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str]:
+    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg) from sys.argv; n_episodes_arg
+    is either an int-as-string or the literal "auto" (see NEpisodesDetector)."""
     benchmark_dir = pathlib.Path(argv[1] if len(argv) > 1 else "benchmarks/adaptec1")
     n_iterations = int(argv[2]) if len(argv) > 2 else 100
     macro_budget = int(argv[3]) if len(argv) > 3 else None
-    return benchmark_dir, n_iterations, macro_budget
+    n_episodes_arg = argv[4] if len(argv) > 4 else str(MASKPLACE_N_EPISODES)
+    return benchmark_dir, n_iterations, macro_budget, n_episodes_arg
 
 
 def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
@@ -126,9 +135,70 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
     )
 
 
+def _probe_buffer_fits(benchmark_dir: str, macro_budget: str, n_episodes: int) -> None:
+    """Subprocess entry point (see NEpisodesDetector): attempts one n_episodes-sized buffered-PPO
+    step of this exact pipeline, reporting the outcome via exit code."""
+    budget = None if macro_budget == "None" else int(macro_budget)
+    benchmark = _load_benchmark(pathlib.Path(benchmark_dir), budget)
+    state_fn = _build_state_fn(benchmark)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
+    policy = _build_policy(benchmark)
+    obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
+    variables = policy.init(random.PRNGKey(0), obs0)
+    try:
+        # ppo_epochs=1 already hits the same peak memory as a real run (rollout
+        # collection and one gradient minibatch dominate; more epochs just repeat it).
+        train_buffered(
+            random.PRNGKey(0), variables, policy.apply, benchmark.params, benchmark.reward_fn,
+            benchmark.sizes_array, benchmark.cell_size, n_iterations=1, n_episodes=n_episodes,
+            ppo_epochs=1, optimizer=maskplace_optimizer(), state_fn=state_fn,
+            ppo_config=maskplace_ppo_config(), extra_illegal_fn=extra_illegal_fn,
+        )
+    except Exception as e:
+        if is_oom(e):  # doesn't fit - report it and let the parent see the exit code
+            print(_OOM_MARKER)
+            sys.exit(1)
+        raise  # anything else is a real bug - propagate with its traceback
+
+
+class NEpisodesDetector:
+    """Auto-detects the largest n_episodes (buffer size) this hardware can run for the
+    MaskPlace pipeline, by probing candidates for real in disposable subprocesses - same
+    reasoning as ops.n_envs.NEnvsDetector: JAX's GPU memory accounting is unreliable after
+    the first real allocation, and a crashing/hung candidate must not take down the caller.
+    Entirely optional: only used if the CLI is given "auto" for n_episodes."""
+
+    def __init__(
+        self,
+        benchmark_dir: pathlib.Path,
+        macro_budget: int | None = None,
+        max_candidate: int = MASKPLACE_N_EPISODES,  # no point searching past MaskPlace's own value
+        timeout_s: float = 180.0,
+        verbose: bool = True,
+    ):
+        self.benchmark_dir = benchmark_dir
+        self.macro_budget = macro_budget
+        self.max_candidate = max_candidate
+        self.timeout_s = timeout_s
+        self.verbose = verbose
+
+    def detect(self) -> int:
+        """Binary-searches the largest n_episodes (up to max_candidate) that actually fits."""
+        # Deliberately inherit the parent's default JAX allocator settings (unlike
+        # ops.n_envs's probe, which disables preallocation): this ResNet-heavy
+        # pipeline's cuDNN/cuBLAS autotuning can spuriously OOM under a growing
+        # allocator even when the real run - which uses the default preallocated
+        # arena - fits fine. The probe must match what the real run actually does.
+        return find_max_via_subprocess(
+            _MODULE, ["--probe", str(self.benchmark_dir), str(self.macro_budget)],
+            max_candidate=self.max_candidate, timeout_s=self.timeout_s, oom_marker=_OOM_MARKER,
+            verbose=self.verbose,
+        )
+
+
 def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
-    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, eval_every: int,
+    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, eval_every: int, n_episodes: int,
 ):
     """Runs n_iterations of buffered-PPO training in eval_every-sized chunks, logging real HPWL after each."""
     done, remaining = 0, n_iterations
@@ -138,7 +208,7 @@ def _train_and_eval_loop(
         chunk = min(eval_every, remaining)
         variables, losses = train_buffered(
             key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
-            benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk,
+            benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk, n_episodes=n_episodes,
             optimizer=optimizer, state_fn=state_fn, ppo_config=ppo_config,
             extra_illegal_fn=extra_illegal_fn, checkpoint_path=checkpoint_path,
         )
@@ -162,7 +232,7 @@ def main() -> None:
     Log.configure()
 
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
-    benchmark_dir, n_iterations, macro_budget = _parse_args(sys.argv)
+    benchmark_dir, n_iterations, macro_budget, n_episodes_arg = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
@@ -195,16 +265,29 @@ def main() -> None:
     # 6. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
     ppo_config = maskplace_ppo_config()
     optimizer = maskplace_optimizer()  # separately-clipped, separately-stepped actor/critic Adam
+
+    # 7. Resolve the buffer size: either MaskPlace's fixed 10, an explicit
+    #    override, or - only if the CLI asked for "auto" - the largest that
+    #    actually fits on this hardware (see NEpisodesDetector).
+    if n_episodes_arg.lower() == "auto":
+        Log.info("auto-detecting n_episodes (probing candidates in disposable subprocesses) ...")
+        n_episodes = NEpisodesDetector(benchmark_dir, macro_budget).detect()
+        if n_episodes < 1:
+            Log.error("not even n_episodes=1 fits on this hardware - try a smaller macro_budget.")
+            sys.exit(1)
+        Log.info(f"  -> n_episodes={n_episodes} (auto-detected, MaskPlace's own default is {MASKPLACE_N_EPISODES})")
+    else:
+        n_episodes = int(n_episodes_arg)
     Log.info(
         f"running {n_iterations} more buffered-PPO iterations "
-        f"(MaskPlace's own procedure: 10 episodes/buffer, 10 minibatch epochs, batch 64, "
+        f"({n_episodes} episodes/buffer, 10 minibatch epochs, batch 64, "
         f"independent actor/critic optimizers) ..."
     )
 
-    # 7. Run the actual training/eval loop.
+    # 8. Run the actual training/eval loop.
     variables = _train_and_eval_loop(
         key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
-        checkpoint_path, n_iterations, eval_every=10,
+        checkpoint_path, n_iterations, eval_every=10, n_episodes=n_episodes,
     )
 
     print()
@@ -212,4 +295,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--probe":
+        _probe_buffer_fits(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+    else:
+        main()

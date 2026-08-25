@@ -7,7 +7,7 @@ import sys
 
 from placax._device import recommended_parallelism_mode  # must precede jax imports
 from placax_agents.benchmark import Benchmark
-from placax_agents.ops.autotune import find_max_batch_size, is_oom, probe_subprocess
+from placax_agents.ops.autotune import find_max_via_subprocess, is_oom
 from placax_agents.training.loops.parallel_train import train_parallel
 
 from jax import random
@@ -50,7 +50,13 @@ class NEnvsDetector:
         mode = recommended_parallelism_mode()
         if mode == "sequential":
             return "sequential", 1
-        n_envs = find_max_batch_size(self._try_n_envs, max_candidate=self.max_candidate, verbose=self.verbose)
+        # preallocate=false: each fresh probe process must report real usage, not one big arena grab.
+        probe_env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+        n_envs = find_max_via_subprocess(
+            _MODULE, [str(self.benchmark_dir), self.policy_path, self.make_reward_fn_path or ""],
+            max_candidate=self.max_candidate, timeout_s=self.timeout_s, oom_marker=_OOM_MARKER,
+            env=probe_env, verbose=self.verbose,
+        )
         return "parallel", max(n_envs, 1)
 
     def resolve(self, override: int | None = None) -> tuple[str, int]:
@@ -58,17 +64,6 @@ class NEnvsDetector:
         if override is not None:
             return ("sequential" if override <= 1 else "parallel"), override
         return self.detect()
-
-    def _try_n_envs(self, n: int) -> None:
-        """Probes whether n parallel envs fit, by re-running this module in a fresh subprocess."""
-        # preallocate=false: this fresh process must report real usage, not one big arena grab.
-        env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-        # Re-invoke this module as `python -m ...` - see the __main__ block below.
-        argv = [
-            sys.executable, "-m", _MODULE, str(self.benchmark_dir), self.policy_path,
-            self.make_reward_fn_path or "", str(n),
-        ]
-        probe_subprocess(argv, timeout_s=self.timeout_s, oom_marker=_OOM_MARKER, env=env)
 
 
 def _rebuild_benchmark_and_policy(benchmark_dir: str, policy_path: str, make_reward_fn_path: str):
