@@ -1,5 +1,4 @@
-"""Runs one full episode as a single lax.scan - one compiled function,
-not jitted pieces glued by an unjitted Python loop."""
+"""Runs one full episode as a single lax.scan."""
 from placax.core import random_action, reset, step  # noqa: F401  must precede jax imports
 from placax.types import EnvParams, RewardFn  # noqa: F401
 from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action  # noqa: F401
@@ -20,14 +19,13 @@ def collect_rollout(
     cell_size: float,
     state_fn: StateFn = observation,
 ):
-    """Samples one full episode with the current policy. Returns
-    (trajectory, final_state) where trajectory maps obs/action/reward/
-    log_prob/value/done to arrays with a leading n_macros dimension;
-    reward is sparse (0 until the final placement). state_fn defaults
-    to observation() and is swappable like policy_apply_fn."""
+    """Samples one full episode. Returns (trajectory, final_state);
+    trajectory maps obs/action/reward/log_prob/value/done to arrays
+    with a leading n_macros dimension. reward is 0 until placement."""
     initial_state = reset(params)
 
     def scan_step(state, step_key):
+        # obs -> policy -> mask illegal cells -> sample -> apply -> record.
         obs = state_fn(state, params, sizes_array)
         logits, value = policy_apply_fn(variables, obs)
 

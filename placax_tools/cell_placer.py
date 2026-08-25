@@ -1,7 +1,4 @@
-"""The generic cell-placer contract, independent of any specific tool.
-An ABC rather than a Callable alias: tool-specific config (install root,
-GPU) lives in each concrete subclass's __init__, so place() stays
-uniform across any placer."""
+"""The generic cell-placer contract, independent of any specific tool."""
 import pathlib
 from abc import ABC, abstractmethod
 

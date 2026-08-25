@@ -1,5 +1,4 @@
-"""Advantage normalization - standard in PPO; keeps gradient magnitude
-sane regardless of reward scale (scale itself is running_stats' job)."""
+"""Advantage normalization, standard in PPO."""
 import jax
 
 

@@ -1,6 +1,4 @@
-"""Generalized Advantage Estimation - turns a rollout's rewards and
-values into advantages and returns, scanned backwards through the
-trajectory (a genuine sequential recurrence)."""
+"""Generalized Advantage Estimation, scanned backwards through the trajectory."""
 import jax
 import jax.numpy as jnp
 
@@ -13,10 +11,10 @@ def compute_gae(
     gamma: float = 0.99,
     lam: float = 0.95,
 ) -> tuple[jax.Array, jax.Array]:
-    """Returns (advantages, returns) for one trajectory. next_value is
-    the bootstrap value after the last step - in practice irrelevant
-    here since done=True on that step zeroes it."""
+    """Returns (advantages, returns): delta_t = r_t + gamma*V(s_{t+1})*(1-done) - V(s_t),
+    A_t = delta_t + gamma*lam*(1-done)*A_{t+1}, returns = advantages + values."""
     def scan_fn(gae, transition):
+        # One backward GAE step; reverse=True below feeds transitions last-to-first.
         reward, value, next_val, done = transition
         delta = reward + gamma * next_val * (1 - done) - value
         gae = delta + gamma * lam * (1 - done) * gae

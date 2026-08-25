@@ -1,7 +1,4 @@
-"""PPO's loss: clipped surrogate objective + value loss - entropy bonus,
-over one full trajectory. Each step's legal mask is recomputed from its
-saved obs so the ratio compares probabilities under the same
-distribution used at rollout time."""
+"""PPO's loss: clipped surrogate objective + value loss - entropy bonus."""
 from placax.types import EnvParams  # noqa: F401  must precede jax imports
 from placax_agents.policy.action import action_log_prob, legal_action_logits  # noqa: F401
 from placax_agents.policy.scale import to_grid_units  # noqa: F401
@@ -12,10 +9,8 @@ import jax.numpy as jnp
 
 
 def _entropy(masked_logits: jax.Array) -> jax.Array:
-    """Entropy of the masked categorical distribution - illegal actions
-    contribute exactly 0. Guards the *input* to probs * log_probs, not
-    just the output: masking only the output still differentiates
-    through the discarded -inf branch and yields NaN gradients."""
+    """-sum(probs * log_probs). Guards probs==0 explicitly - masking
+    only the product still NaNs the gradient through the -inf branch."""
     log_probs = jax.nn.log_softmax(masked_logits.ravel())
     probs = jnp.exp(log_probs)
     safe_log_probs = jnp.where(probs > 0, log_probs, 0.0)
@@ -35,12 +30,13 @@ def ppo_loss(
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
 ) -> jax.Array:
-    """Scalar PPO loss over one trajectory dict (as produced by
-    collect_rollout): policy surrogate + value_coef * value MSE -
-    entropy_coef * entropy, each averaged over steps."""
+    """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
+    over one trajectory dict (as produced by collect_rollout)."""
     macro_sizes = to_grid_units(sizes_array, cell_size)
 
     def per_step(obs, action, old_log_prob, advantage, ret, macro_size):
+        # Recompute the legal mask from the saved obs so the ratio compares
+        # probabilities under the same distribution used at rollout time.
         logits, value = policy_apply_fn(policy_params, obs)
         masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size)
         new_log_prob = action_log_prob(masked_logits, action)

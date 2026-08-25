@@ -1,6 +1,5 @@
 """Agent-side type contracts: AlgorithmFn (a policy's apply) and StateFn
-(an observation builder) - the two swappable axes the core kernel takes
-no formal dependency on."""
+(an observation builder)."""
 from typing import Callable
 
 import jax

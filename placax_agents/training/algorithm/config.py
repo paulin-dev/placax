@@ -1,6 +1,4 @@
-"""PPO's tunable hyperparameters, threaded together through the training
-loops. A plain frozen dataclass: ordinary floats that don't affect array
-shapes, passed as a static jit argument."""
+"""PPO's tunable hyperparameters, passed through as a static jit arg."""
 from dataclasses import dataclass
 
 

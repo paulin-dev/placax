@@ -1,6 +1,4 @@
-"""Turns EnvState into the dict a policy consumes - canvas for image
-policies, plus raw positions/sizes/placed_mask any other architecture
-(e.g. a GNN) could build features from."""
+"""Turns EnvState into the dict a policy consumes."""
 from placax.extras.render import render  # noqa: F401  must precede jax imports
 from placax.types import EnvParams, EnvState  # noqa: F401
 

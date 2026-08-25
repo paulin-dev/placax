@@ -1,7 +1,5 @@
-"""MST-based wirelength (Prim's, Manhattan distance) - more accurate
-than HPWL for high-fanout nets but far more expensive. Deliberately
-plain Python, not jit-compiled: like MaskPlace's prim_real, it's only
-for periodic reporting, never inside the training loop."""
+"""MST-based wirelength (Prim's, Manhattan distance) - more accurate than
+HPWL but expensive; plain Python, for periodic reporting only."""
 from placax.types import Nets
 
 
@@ -20,6 +18,7 @@ def _prim_mst_length(points: list[tuple[float, float]]) -> float:
 
     total = 0.0
     for _ in range(n - 1):
+        # Add the nearest untreed point, then relax distances through it.
         best_j = min((j for j in range(n) if not in_tree[j]), key=lambda j: min_dist[j])
         total += min_dist[best_j]
         in_tree[best_j] = True

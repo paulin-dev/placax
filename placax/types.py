@@ -17,12 +17,8 @@ class EnvState:
 
 @struct.dataclass
 class EnvParams:
-    """Static per-run config. grid/grid_y/n_macros determine array shapes,
-    so they're pytree_node=False - static compile-time metadata for JAX,
-    not traced values; a shape-independent field (e.g. a reward weight)
-    would stay a normal pytree node and could be vmapped over freely.
-    grid_y=None means "same as grid" (square canvas); grid is the x
-    dimension when they differ."""
+    """Static per-run config. grid/grid_y/n_macros are pytree_node=False
+    (static shapes, not traced values). grid_y=None means square canvas."""
 
     grid: int = struct.field(pytree_node=False, default=4)
     grid_y: int | None = struct.field(pytree_node=False, default=None)

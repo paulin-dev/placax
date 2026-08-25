@@ -1,7 +1,5 @@
 """Reads DEF COMPONENTS/NETS + LEF geometry into the same shape the
-Bookshelf loader produces. Pin offsets come from a second LEF lookup
-(cell_type, port_name) -> offset: DEF's NETS section gives pin names
-only, not geometry - that lives in LEF's per-cell PIN blocks."""
+Bookshelf loader produces."""
 import pathlib
 import re
 
@@ -23,9 +21,8 @@ def parse_components(def_text: str) -> dict[str, tuple[str, float, float]]:
 
 
 def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
-    """Returns a list of [(instance_name, port_name)] per net, skipping
-    top-level PIN references. A list, not a dict keyed by name: net names
-    legitimately repeat for buffered segments of one logical net."""
+    """Returns [(instance_name, port_name)] per net (a list, not a dict -
+    net names legitimately repeat across buffered segments)."""
     section = def_text[def_text.index("\nNETS") : def_text.index("\nEND NETS")]
 
     nets = []
@@ -42,9 +39,7 @@ def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
 def resolve_macro_sizes(
     components: dict[str, tuple[str, float, float]], cell_sizes: SizeMap
 ) -> SizeMap:
-    """Looks up each instance's cell_type in cell_sizes - a type-keyed LEF
-    table becomes an instance-keyed one, the shape Bookshelf's .nodes
-    file gives directly."""
+    """Looks up each instance's cell_type in cell_sizes: type-keyed -> instance-keyed."""
     return {
         name: cell_sizes[cell_type]
         for name, (cell_type, _x, _y) in components.items()
@@ -57,10 +52,8 @@ def resolve_net_pin_offsets(
     components: dict[str, tuple[str, float, float]],
     pin_offsets: PinOffsets,
 ) -> Nets:
-    """Converts (instance, port) pairs into (instance, x_offset,
-    y_offset). Pins with no matching LEF geometry fall back to (0, 0)
-    (macro center) rather than being dropped - dropping would change net
-    degree."""
+    """(instance, port) -> (instance, x_offset, y_offset). Pins with no
+    matching LEF geometry fall back to (0, 0) rather than being dropped."""
     resolved: Nets = []
     for net in nets:
         pins: list[NetPin] = []

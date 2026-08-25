@@ -1,7 +1,5 @@
 """Reads Circuit Training's .pb.txt netlist format (a TensorFlow GraphDef
-text representation) into the same shape as the other loaders. This is
-the canonical source for ariane's macro geometry - other public sources
-carry degenerate (zero-size) pin geometry."""
+text representation) into the same shape as the other loaders."""
 import pathlib
 import re
 
@@ -21,8 +19,7 @@ def _split_nodes(pb_text: str) -> list[str]:
 
 
 def parse_macros(pb_text: str) -> SizeMap:
-    """Returns {macro_name: (width, height)} for MACRO-type nodes only -
-    excludes standard-cell clusters (soft macros, Grp_*) and ports."""
+    """Returns {macro_name: (width, height)} for MACRO-type nodes only."""
     macros = {}
     for block in _split_nodes(pb_text):
         type_match = _TYPE_RE.search(block)
@@ -60,11 +57,9 @@ def parse_macro_pins(pb_text: str) -> list[NetPin]:
 
 
 def parse_nets(pb_text: str) -> Nets:
-    """Returns a list of pins per net. Connectivity is expressed via
-    `input:` references on hub nodes (commonly Grp_/P* standard-cell
-    pseudo-ports), so every node is scanned - the hub's own type doesn't
-    matter, only which macro pins it references. A net is kept only with
-    >= 2 distinct macros."""
+    """Returns a list of pins per net, from `input:` references on hub
+    nodes (any node - only which macro pins it references matters).
+    Kept only if >= 2 distinct macros."""
     pin_lookup = {name: (macro, x, y) for macro, x, y, name in _macro_pin_entries(pb_text)}
 
     nets = []

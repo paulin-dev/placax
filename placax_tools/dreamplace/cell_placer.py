@@ -1,8 +1,5 @@
-"""DREAMPlace-specific CellPlacer. Macro placement is placax's job; cell
-placement (analytical optimization over millions of cells) is handed to
-an external, swappable tool. Config fields follow DREAMPlace's real
-parsed format (`python dreamplace/Placer.py config.json`). Not verified
-end-to-end here - DREAMPlace isn't installed in this environment."""
+"""DREAMPlace-specific CellPlacer. Not verified end-to-end here -
+DREAMPlace isn't installed in this environment."""
 import json
 import pathlib
 import subprocess
@@ -53,10 +50,8 @@ def build_dreamplace_config(
 
 
 class DREAMPlaceCellPlacer(CellPlacer):
-    """Default CellPlacer implementation, requiring a real DREAMPlace
-    install. extra_config overrides/adds any other DREAMPlace config
-    field on top of the defaults - more scalable than enumerating every
-    knob as a constructor parameter."""
+    """Default CellPlacer, requiring a real DREAMPlace install.
+    extra_config overrides/adds any DREAMPlace config field."""
 
     def __init__(
         self,

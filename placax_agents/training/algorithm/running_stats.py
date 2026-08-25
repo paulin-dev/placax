@@ -1,5 +1,4 @@
-"""Running mean/variance across episodes via Chan's parallel algorithm
-(the standard way to merge batch statistics incrementally)."""
+"""Running mean/variance across episodes."""
 import jax.numpy as jnp
 from flax import struct
 
@@ -18,7 +17,8 @@ def init_running_stats() -> RunningStats:
 
 
 def update_running_stats(stats: RunningStats, x: jnp.ndarray) -> RunningStats:
-    """Merges a new batch x (any shape, flattened) into the stats."""
+    """Merges a new batch x (any shape, flattened) into the stats -
+    Chan's parallel-variance merge formula."""
     x = x.ravel()
     batch_mean, batch_var, batch_count = x.mean(), x.var(), x.size
 

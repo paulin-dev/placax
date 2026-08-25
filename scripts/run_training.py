@@ -1,26 +1,7 @@
 """Runs (or resumes) extended training on a real benchmark, checkpointing
-and evaluating real HPWL along the way - the script tying the library
-pieces together into one thing you can actually run.
+and evaluating real HPWL along the way.
 
-Usage:
-    python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]
-
-n_envs auto-detection tries each candidate for real, but in a disposable
-subprocess (see _try_n_envs_subprocess), not this process. Two reasons:
-
-1. JAX preallocates ~75-90% of GPU memory as one arena on first use and
-   never gives it back, so this process's own memory_stats() can't tell
-   candidates apart after the first one runs - every number afterward
-   reflects that one big reservation, not what any given n_envs actually
-   needs. A fresh process hasn't made that reservation yet.
-2. A candidate that hangs or crashes the GPU driver (observed directly
-   while building this) can't reliably be interrupted with SIGTERM
-   in-process. A subprocess can be given a hard wall-clock timeout and
-   killed outright without losing the training run driving the search.
-
-Safe to re-run: resumes from checkpoint.bin automatically; every 50
-iterations a permanent snapshot (never overwritten) is saved under
-snapshots/ for rollback."""
+Usage: python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]"""
 import os
 import pathlib
 import subprocess
@@ -47,10 +28,8 @@ _PROBE_TIMEOUT_S = 90.0
 
 
 def _build_training_state(benchmark_dir: pathlib.Path):
-    """Loads the netlist and builds everything needed to attempt a
-    training step: policy, initial variables, reward_fn, sizes_array,
-    cell_size, params. Shared between real training and the n_envs
-    probe subprocess so both run the exact same computation."""
+    """Loads the netlist and builds everything needed for training:
+    policy, initial variables, reward_fn, sizes_array, cell_size, params."""
     macro_sizes, nets = load_netlist(benchmark_dir)
     _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
@@ -76,11 +55,8 @@ def _build_training_state(benchmark_dir: pathlib.Path):
 
 
 def _probe_entrypoint(benchmark_dir: pathlib.Path, n: int) -> None:
-    """Run as a subprocess of _try_n_envs_subprocess: attempts one real
-    n-env training step and reports the outcome via exit code, so the
-    parent never has to interpret this process's internals - just
-    whether it succeeded, hit a real OOM, or crashed for some other
-    reason."""
+    """Subprocess entry point for _try_n_envs_subprocess: attempts one
+    n-env training step, reporting the outcome via exit code."""
     state = _build_training_state(benchmark_dir)
     try:
         train_parallel(
@@ -95,12 +71,11 @@ def _probe_entrypoint(benchmark_dir: pathlib.Path, n: int) -> None:
 
 
 def _try_n_envs_subprocess(benchmark_dir: pathlib.Path, n: int) -> None:
-    """try_fn for find_max_batch_size: attempts n_envs=n in a fresh,
-    disposable process instead of this one (see module docstring for
-    why). Raises MemoryError on OOM or timeout - either way, n_envs=n
-    doesn't work here - so find_max_batch_size backs off exactly as it
-    would for an in-process OOM. Any other failure is a real bug and
-    propagates with the subprocess's traceback attached."""
+    """try_fn for find_max_batch_size: tries n_envs=n in a fresh
+    subprocess, not this one - JAX's own memory_stats() is unusable
+    after the first real allocation (GPU preallocation), and a hung
+    candidate can be killed outright without losing this process.
+    Raises MemoryError on OOM or timeout; anything else is a real bug."""
     env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
     try:
         result = subprocess.run(

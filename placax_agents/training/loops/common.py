@@ -1,6 +1,4 @@
-"""Checkpoint plumbing shared by the training loops: one bundle layout
-(variables, opt_state, running_stats, iteration, key) saved/resumed by
-train_sequential, train_parallel, and resumable_train alike."""
+"""Checkpoint and per-iteration plumbing shared by the training loops."""
 import pathlib
 
 from placax import _device  # noqa: F401  must precede jax imports
@@ -30,10 +28,9 @@ def save_train_state(path: pathlib.Path, variables, opt_state, running_stats, ke
 
 
 def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | None):
-    """Initializes optimizer/running stats fresh, or resumes them from an
-    existing checkpoint. Returns (variables, opt_state, running_stats,
-    key, start_iteration); variables/key double as the deserialization
-    template when loading."""
+    """Fresh optimizer/running stats, or resumed from checkpoint_path if
+    it exists. Returns (variables, opt_state, running_stats, key,
+    start_iteration)."""
     template = train_state_bundle(variables, optimizer.init(variables), init_running_stats(), key, 0)
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
@@ -63,10 +60,6 @@ def checkpoint_every_n(
     running_stats: RunningStats,
     key: jax.Array,
 ) -> None:
-    """Saves training state to path if iteration is a multiple of every.
-    No-op if path or every is None - shared by the unconditional
-    per-iteration checkpointing in train_sequential/train_parallel
-    (every=1) and resumable_train's periodic checkpoint and snapshot
-    saves (every=checkpoint_every/snapshot_every)."""
+    """Saves to path if iteration % every == 0. No-op if path or every is None."""
     if path is not None and every is not None and iteration % every == 0:
         save_train_state(path, variables, opt_state, running_stats, key, iteration)

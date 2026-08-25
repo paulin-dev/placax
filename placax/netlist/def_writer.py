@@ -1,9 +1,6 @@
 """Writes placed positions back into a DEF file - the reverse of
-def_reader.py, and the handoff artifact for a downstream cell placer
-(DREAMPlace) or validator (OpenROAD). Rewrites only the COMPONENTS
-section's PLACED coordinates; everything else passes through unchanged,
-since downstream tools need the real floorplan structure (rows/tracks)
-too - synthesizing a DEF from scratch would lose that."""
+def_reader.py. Rewrites only PLACED coordinates; everything else passes
+through unchanged."""
 import re
 
 _COMPONENT_RE = re.compile(r"-\s+(\S+)\s+(\S+)\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")

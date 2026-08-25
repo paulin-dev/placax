@@ -1,5 +1,5 @@
-"""HPWL (half-perimeter wirelength) - the standard cheap wirelength proxy
-- plus wiremask(), the per-candidate HPWL-increase map used for guidance."""
+"""HPWL (half-perimeter wirelength) and wiremask(), its per-candidate
+increase map used for guidance."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
 
 import jax
@@ -16,9 +16,9 @@ def hpwl(
     padded_pin_offset: jax.Array,
     valid_mask: jax.Array,
 ) -> jax.Array:
-    """Sum over nets of bounding-box width + height, padding masked out.
-    A net with zero valid pins contributes 0 (guarded explicitly - the
-    masking sentinels alone would give a large negative value)."""
+    """sum over nets of (bbox width + height); a net with 0 valid pins
+    contributes 0 (guarded explicitly - sentinels alone would give a
+    large negative value)."""
     pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset
     lo = jnp.where(valid_mask[..., None], pin_xy, _BIG).min(axis=1)
     hi = jnp.where(valid_mask[..., None], pin_xy, -_BIG).max(axis=1)
@@ -54,18 +54,14 @@ def wiremask(
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
 ) -> jax.Array:
-    """(grid_x, grid_y) array of the HPWL increase from placing the macro
-    at state.step at each candidate cell:
-
-        wiremask(x, y) = HPWL(hypothetical at x, y) - HPWL(baseline)
-
-    Uses build_macro_net_index's reverse index so each candidate touches
-    only this macro's own small participation list - what makes vmap
-    over every cell affordable at real scale."""
+    """(grid_x, grid_y) array: wiremask(x, y) = HPWL(hypothetical at
+    x, y) - HPWL(baseline), for placing the macro at state.step."""
     idx = state.step
     baseline_lo, baseline_hi, baseline_total = _wiremask_baseline(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask
     )
+    # This macro's own (small) net participation list, via the reverse
+    # index - the whole netlist per candidate cell wouldn't scale.
     my_nets = macro_net_idx[idx]
     my_offsets = macro_net_offset[idx]
     my_valid = macro_net_valid[idx]
@@ -85,9 +81,7 @@ def wiremask(
 def make_hpwl_reward(
     padded_pin_idx: jax.Array, padded_pin_offset: jax.Array, valid_mask: jax.Array
 ) -> RewardFn:
-    """Builds a reward_fn closing over one netlist's fixed pin structure:
-    reward(positions) = -HPWL(positions) (sign flipped to match RL
-    convention: smaller wirelength = larger reward)."""
+    """Builds reward_fn(positions) = -HPWL(positions)."""
 
     def reward_fn(positions: jax.Array) -> jax.Array:
         return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask)

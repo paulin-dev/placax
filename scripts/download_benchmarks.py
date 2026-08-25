@@ -1,5 +1,4 @@
-"""Fetches benchmarks into benchmarks/<name>/. Meant to run once, by hand
-- benchmarks get bundled into the repo rather than re-fetched in CI."""
+"""Fetches benchmarks into benchmarks/<name>/. Meant to run once, by hand."""
 import enum
 import gzip
 import pathlib

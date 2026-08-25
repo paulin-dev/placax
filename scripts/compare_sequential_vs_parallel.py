@@ -1,6 +1,5 @@
 """Compares sequential vs vmap-parallel episode execution speed on real
-benchmark data - run this on your hardware to see whether vmap pays off
-(on CPU-only machines, sequential+jit measured ~73x faster).
+benchmark data - run this on your hardware to see whether vmap pays off.
 
 Usage: python scripts/compare_sequential_vs_parallel.py [benchmark_dir] [n_episodes]
 """
@@ -25,6 +24,7 @@ def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
     jitted_step = jax.jit(step, static_argnames=("reward_fn",))
     jitted_random_action = jax.jit(random_action)
 
+    # Warm-up: pay the one-time jit compile cost outside the timed region.
     state = reset(params)
     key = random.PRNGKey(0)
     key, subkey = random.split(key)

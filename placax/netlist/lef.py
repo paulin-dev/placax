@@ -36,9 +36,7 @@ def _parse_macro_pins(macro_block: str, width: float, height: float) -> dict[str
 
 def parse_lef_pin_offsets(lef_path: pathlib.Path) -> PinOffsets:
     """Returns {macro_name: {pin_name: (x_offset, y_offset)}} relative to
-    the macro center (LEF RECT geometry is relative to the lower-left
-    origin). Only the first RECT per pin is used - a fair approximation
-    of a multi-layer pin's location."""
+    the macro center. Only the first RECT per pin is used."""
     result: PinOffsets = {}
     for macro_name, block in _MACRO_BLOCK_RE.findall(lef_path.read_text()):
         size_match = _SIZE_IN_BLOCK_RE.search(block)

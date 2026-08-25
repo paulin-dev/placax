@@ -1,5 +1,4 @@
-"""Turns any policy's raw logits into a legal action, independent of the
-architecture that produced them."""
+"""Turns a policy's raw logits into a legal action."""
 from placax.extras.masks import boundary_mask, occupancy_mask  # noqa: F401  must precede jax imports
 from placax.types import EnvParams  # noqa: F401
 
@@ -10,12 +9,8 @@ import jax.numpy as jnp
 def legal_action_logits(
     logits: jax.Array, occupied: jax.Array, params: EnvParams, macro_size: tuple[int, int]
 ) -> jax.Array:
-    """Masks illegal cells (overlap or out-of-bounds for a macro_size
-    macro) to -inf before sampling. Takes `occupied` directly - the same
-    canvas saved in a rollout trajectory - so training can reconstruct
-    the exact distribution used at rollout time. If EVERY cell is
-    illegal, masking is skipped rather than producing all--inf logits
-    (log_softmax would NaN); one illegal placement beats a crashed run."""
+    """Masks illegal cells (overlap or out-of-bounds) to -inf. Skips
+    masking if every cell is illegal (all -inf would NaN log_softmax)."""
     illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
     illegal = jnp.where(illegal.all(), False, illegal)
     return jnp.where(illegal, -jnp.inf, logits)

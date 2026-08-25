@@ -1,8 +1,5 @@
 """Parallel training: n_envs episodes collected and averaged into one
-gradient update per iteration, via vmap. Whether that beats sequential
-depends entirely on hardware (~73x slower on CPU, ~3.8x faster on GPU -
-see scripts/compare_sequential_vs_parallel.py); the optimizer tail is
-shared via optimizer_step.py, checkpoint handling via common.py."""
+gradient update per iteration, via vmap. See train.py for sequential."""
 import pathlib
 
 from placax.types import EnvParams, RewardFn  # noqa: F401  must precede jax imports
@@ -35,9 +32,9 @@ def parallel_train_step(
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
 ):
-    """Same as train.train_step, but keys carries a leading n_envs
-    dimension: n_envs independent episodes are collected and averaged
-    into one gradient update, not n_envs separate updates."""
+    """Like train.train_step, but keys has a leading n_envs dimension:
+    n_envs episodes are collected and averaged into one update."""
+    # One episode per key, batched via vmap.
     batched_rollout = jax.vmap(
         collect_rollout, in_axes=(0, None, None, None, None, None, None, None)
     )
@@ -52,6 +49,7 @@ def parallel_train_step(
     )
 
     def loss_fn(policy_params, normalized_advantages, normalized_returns):
+        # Per-episode PPO loss, averaged into the one gradient update.
         per_episode_losses = jax.vmap(
             lambda traj, adv, ret: ppo_loss(
                 policy_params, policy_apply_fn, traj, adv, ret, sizes_array, cell_size, params,
@@ -91,9 +89,7 @@ def train_parallel(
     checkpoint_path: pathlib.Path | None = None,
 ):
     """Runs n_iterations of parallel_train_step, each collecting n_envs
-    episodes at once. Returns (final_variables, losses). The underlying
-    implementation behind run.train(); call directly to force parallel.
-    Same optimizer/checkpoint_path behavior as train_sequential."""
+    episodes at once. Returns (final_variables, losses)."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     variables, opt_state, running_stats, key, start_iteration = open_train_state(

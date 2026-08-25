@@ -1,5 +1,4 @@
-"""The optimizer-update tail shared by sequential and parallel training:
-normalize advantages/returns, take gradients, apply the optax update."""
+"""The optimizer-update tail shared by sequential and parallel training."""
 from placax_agents.training.algorithm.normalize import normalize_advantages  # noqa: F401  must precede jax imports
 from placax_agents.training.algorithm.running_stats import (  # noqa: F401
     RunningStats, normalize_with_stats, update_running_stats,
@@ -18,10 +17,9 @@ def apply_gradient_update(
     advantages: jax.Array,
     returns: jax.Array,
 ):
-    """Updates the running stats with returns, normalizes
-    advantages/returns, applies one gradient step. loss_fn must accept
-    (policy_params, normalized_advantages, normalized_returns) and
-    return a scalar. Returns (variables, opt_state, running_stats, loss)."""
+    """One gradient step. loss_fn(policy_params, normalized_advantages,
+    normalized_returns) -> scalar. Returns (variables, opt_state,
+    running_stats, loss)."""
     new_running_stats = update_running_stats(running_stats, returns)
     normalized_returns = normalize_with_stats(new_running_stats, returns)
     normalized_advantages = normalize_advantages(advantages)

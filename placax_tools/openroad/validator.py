@@ -1,9 +1,6 @@
-"""OpenROAD-specific Validator. Honestly scoped: area/utilization always
-computed; timing only if liberty + clock are given (real timing needs a
-real technology library). Power deliberately omitted - a meaningful
-number needs switching-activity data nothing here produces. Not verified
-end-to-end here - OpenROAD isn't installed; TCL follows OpenROAD's own
-documented commands."""
+"""OpenROAD-specific Validator: area/utilization always computed, timing
+only if liberty + clock are given. Not verified end-to-end here -
+OpenROAD isn't installed."""
 import pathlib
 import re
 import subprocess
@@ -20,8 +17,7 @@ def build_openroad_script(
     clock_name: str = "core_clock",
 ) -> str:
     """OpenROAD TCL for area (+ optional timing) reports. Timing lines
-    appear only if both liberty_path and clock_period_ns are given.
-    wire_rc_layer must be overridable - real PDKs vary (M3, metal2...)."""
+    appear only if both liberty_path and clock_period_ns are given."""
     lines = [f"read_lef {p}" for p in lef_paths]
     lines.append(f"read_def {def_path}")
     lines.append("report_design_area")
@@ -54,8 +50,7 @@ def parse_openroad_output(raw_output: str) -> PPAResult:
 
 
 class OpenROADValidator(Validator):
-    """Default Validator implementation, requiring a real OpenROAD
-    install. Timing-related settings live in __init__, not validate()."""
+    """Default Validator, requiring a real OpenROAD install."""
 
     def __init__(
         self,

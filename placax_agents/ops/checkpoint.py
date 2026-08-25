@@ -1,5 +1,4 @@
-"""Save/load Flax variables to/from disk - the foundation both local
-checkpoint reuse and pretrained-weight loading share."""
+"""Save/load Flax variables to/from disk."""
 import pathlib
 import urllib.request
 
@@ -13,8 +12,7 @@ def save_checkpoint(variables, path: pathlib.Path) -> None:
 
 
 def load_checkpoint(variables_template, path: pathlib.Path):
-    """Deserializes into an existing pytree structure (the saved bytes
-    carry no shape/dtype info - the template supplies it)."""
+    """Deserializes into variables_template (supplies shape/dtype)."""
     return serialization.from_bytes(variables_template, path.read_bytes())
 
 

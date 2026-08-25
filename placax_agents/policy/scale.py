@@ -1,5 +1,4 @@
-"""Converts real physical macro sizes into the discrete action grid -
-core.py's grid is a pure action-space concept, unaware of real units."""
+"""Converts real physical macro sizes to/from the discrete action grid."""
 import jax
 import jax.numpy as jnp
 
@@ -7,9 +6,8 @@ import jax.numpy as jnp
 def compute_grid_scale(
     sizes_array: jax.Array, grid_x: int, grid_y: int | None = None, target_utilization: float = 0.5
 ) -> float:
-    """Real units per grid cell, sized so all macros would fill roughly
-    target_utilization of the (grid_x x effective grid_y) area. One
-    cell_size applies uniformly to both dimensions even when they differ."""
+    """Real units per grid cell, sized so all macros fill roughly
+    target_utilization of the (grid_x x grid_y) area."""
     if grid_y is None:
         grid_y = grid_x
     total_area = (sizes_array[:, 0] * sizes_array[:, 1]).sum()
@@ -23,7 +21,5 @@ def to_grid_units(real_size: jax.Array, cell_size: float) -> jax.Array:
 
 
 def to_real_centers(positions: jax.Array, sizes_array: jax.Array, cell_size: float) -> jax.Array:
-    """Grid positions (lower-left corner) -> real-unit macro centers,
-    matching the units padded_pin_offset is in and MaskPlace's own
-    comp_res.py formula."""
+    """Grid positions (lower-left corner) -> real-unit macro centers."""
     return positions.astype(jnp.float32) * cell_size + sizes_array / 2.0

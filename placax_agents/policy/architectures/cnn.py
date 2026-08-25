@@ -7,9 +7,7 @@ from flax import linen as nn
 
 class CNNActorCritic(nn.Module):
     """obs dict (uses 'canvas') -> (action_logits (grid_x, grid_y),
-    value scalar). Shared conv trunk, two heads. Takes the whole obs
-    dict, not canvas directly: rollout/evaluate/loss pass the same obs
-    to any policy uniformly, and each architecture picks what it needs."""
+    value scalar). Shared conv trunk, two heads."""
 
     features: int = 16
     kernel_size: tuple[int, int] = (3, 3)

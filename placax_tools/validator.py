@@ -1,7 +1,4 @@
-"""The generic validator contract, independent of any specific tool.
-An ABC rather than a Callable alias: tool-specific config (liberty file,
-clock) lives in each concrete subclass's __init__, so validate() stays
-uniform across any validator."""
+"""The generic validator contract, independent of any specific tool."""
 import pathlib
 from abc import ABC, abstractmethod
 

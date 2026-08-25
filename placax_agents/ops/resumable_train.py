@@ -1,11 +1,6 @@
-"""Resumable training: checkpoints the full training state periodically,
-evaluates real HPWL periodically, and appends a JSONL log - so a long
-run can be interrupted and continued later without losing progress.
-
-checkpoint_every/eval_every count in ABSOLUTE iterations (not relative
-to this call), so behavior is identical whether a run happens in one
-call or several resumed ones. Supports both sequential (n_envs=1) and
-parallel (n_envs>1), dispatched like run.train()."""
+"""Training loop with periodic checkpointing, HPWL evaluation, and a
+JSONL log - resumable across calls (checkpoint_every/eval_every count
+in absolute iterations, not relative to a single call)."""
 import json
 import pathlib
 
@@ -41,7 +36,7 @@ def _maybe_evaluate(
     valid_mask: jax.Array,
     state_fn: StateFn,
 ) -> float | None:
-    """Real HPWL at current_iteration, or None on non-evaluated iterations."""
+    """Real HPWL at current_iteration, or None if not an eval iteration."""
     if current_iteration % eval_every != 0:
         return None
     _positions, hpwl_value = evaluate(
@@ -87,17 +82,10 @@ def resumable_train(
     snapshot_dir: pathlib.Path | None = None,
     snapshot_every: int | None = None,
 ):
-    """Runs n_iterations MORE iterations, resuming from checkpoint_path
-    if it exists. Returns (final_variables, log) - log is a list of
-    {iteration, loss, real_hpwl} dicts for iterations run in this call
-    (real_hpwl is None on non-evaluated iterations); if log_path is
-    given each entry is also appended there as a JSON line, so full
-    history survives across resumed calls.
-
-    snapshot_dir/snapshot_every, if both given, additionally save a
-    permanent, never-overwritten copy at checkpoint_iter_{N}.bin every
-    snapshot_every iterations - checkpoint_path itself is always the
-    overwritten "resume from here" file."""
+    """Runs n_iterations more, resuming from checkpoint_path if it
+    exists. Returns (final_variables, log) for this call's iterations.
+    snapshot_dir/snapshot_every, if both given, also save a permanent,
+    never-overwritten copy every snapshot_every iterations."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     use_parallel = recommended_parallelism_mode(mode) == "parallel" and n_envs > 1

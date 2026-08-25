@@ -1,6 +1,5 @@
-"""Evaluates a policy's actual placement quality - greedy (argmax, no
-sampling noise), reporting real HPWL, the number comparable to published
-results (training loss is a normalized PPO-internal quantity)."""
+"""Evaluates a policy's placement quality: greedy (argmax) rollout,
+reporting real HPWL."""
 from placax.core import reset  # noqa: F401  must precede jax imports
 from placax.extras.rewards import hpwl  # noqa: F401
 from placax.types import EnvParams, RewardFn  # noqa: F401
@@ -24,12 +23,11 @@ def evaluate(
     valid_mask: jax.Array,
     state_fn: StateFn = observation,
 ):
-    """Places every macro greedily and returns (final_positions,
-    real_hpwl), HPWL computed on real-unit centers. Use the same
-    state_fn the policy was trained against."""
+    """Places every macro greedily. Returns (final_positions, real_hpwl)."""
     state = reset(params)
 
     def scan_step(state, _macro_idx):
+        # legal_action_logits masks illegal cells; argmax picks the best legal one.
         obs = state_fn(state, params, sizes_array)
         logits, _value = policy_apply_fn(variables, obs)
         macro_size = to_grid_units(obs["current_macro_size"], cell_size)

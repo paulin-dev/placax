@@ -1,7 +1,5 @@
-"""Detects a benchmark's format, then routes to the right loader.
-Bookshelf, DEF, and protobuf all resolve to the identical
-(macro_sizes, nets) shape, so nothing downstream needs to know which
-format a benchmark came from."""
+"""Detects a benchmark's format, then routes to the right loader - all
+resolve to the identical (macro_sizes, nets) shape."""
 import enum
 import pathlib
 
@@ -20,8 +18,7 @@ class NetlistFormat(enum.Enum):
 
 
 def detect_format(benchmark_dir: pathlib.Path) -> NetlistFormat:
-    """Identifies the format by extension. Order matters: .aux (Bookshelf)
-    is checked before .def/.pb.txt/.v so stray files can't misclassify."""
+    """Identifies the format by extension (checked in priority order)."""
     if any(benchmark_dir.glob("*.aux")):
         return NetlistFormat.BOOKSHELF
     if any(benchmark_dir.glob("*.def")):

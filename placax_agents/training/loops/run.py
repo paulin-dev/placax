@@ -1,7 +1,5 @@
-"""The single entry point for training - dispatches to sequential or
-parallel based on recommended_parallelism_mode() (auto-detected from
-the JAX backend, or forced via mode=). train_sequential/train_parallel
-remain directly callable if you want to force one specifically."""
+"""Entry point for training: dispatches to sequential or parallel based
+on recommended_parallelism_mode()."""
 import pathlib
 
 from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
@@ -32,13 +30,8 @@ def train(
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
 ):
-    """Runs n_iterations of training, sequential or parallel depending on
-    mode (None = auto-detect; "sequential"/"parallel" = force). n_envs
-    only matters when the resolved mode is parallel. Returns
-    (final_variables, losses), same shape either way. optimizer defaults
-    to optax.adam(learning_rate). checkpoint_path, if given, saves the
-    full training state after every iteration and auto-resumes from it;
-    for periodic checkpointing / eval snapshots use ops.resumable_train."""
+    """Runs n_iterations of training (mode=None auto-detects). Returns
+    (final_variables, losses). n_envs only matters if mode is parallel."""
     resolved_mode = recommended_parallelism_mode(mode)
 
     if resolved_mode == "sequential" or n_envs <= 1:

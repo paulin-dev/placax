@@ -1,7 +1,5 @@
-"""Bridges load_netlist()'s named/dict-based output into the padded,
-index-based arrays hpwl()/wiremask()/render() consume. One canonical
-macro_name -> index mapping throughout: a macro's row in positions/
-sizes_array always matches its index in padded_pin_idx."""
+"""Bridges load_netlist()'s named/dict output into the padded,
+index-based arrays hpwl()/wiremask()/render() consume."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
 
 import jax
@@ -21,6 +19,7 @@ def _pack_groups(
     offset = np.zeros((n_groups, max_len, 2), dtype=np.float32)
     valid = np.zeros((n_groups, max_len), dtype=bool)
 
+    # valid stays False past each group's own length - that's the padding.
     for i, group in enumerate(groups):
         for j, (member_idx, x_off, y_off) in enumerate(group):
             idx[i, j] = member_idx
@@ -31,10 +30,8 @@ def _pack_groups(
 
 def build_padded_arrays(macro_sizes: SizeMap, nets: Nets):
     """Returns (name_to_idx, sizes_array, padded_pin_idx,
-    padded_pin_offset, valid_mask), padded to the netlist's worst-case
-    pin count. Built with NumPy - incremental JAX .at[].set() calls each
-    allocate a new array, far too slow at real benchmark scale - and
-    converted to JAX arrays once at the end."""
+    padded_pin_offset, valid_mask). Built with NumPy, then converted to
+    JAX arrays once - incremental .at[].set() would be far too slow."""
     macro_names = sorted(macro_sizes)
     name_to_idx = {name: i for i, name in enumerate(macro_names)}
 
@@ -53,11 +50,8 @@ def build_macro_net_index(
     padded_pin_idx: jax.Array, padded_pin_offset: jax.Array, valid_mask: jax.Array, n_macros: int
 ):
     """Per-macro reverse index: which nets each macro participates in and
-    at what offset - padded to the most nets any single macro touches
-    (much smaller than max_pins). Lets wiremask() touch one macro's small
-    participation list per candidate cell instead of the whole netlist."""
-    # Flatten once; a Python loop over the full padded grid would be far
-    # slower than one over just the real entries.
+    at what offset, padded to the most nets any single macro touches."""
+    # Flatten to just the real (valid) entries first - far fewer than the padded grid.
     pin_idx_np, offset_np, valid_np = map(np.array, (padded_pin_idx, padded_pin_offset, valid_mask))
     n_nets = pin_idx_np.shape[0]
 

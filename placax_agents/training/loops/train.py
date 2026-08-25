@@ -1,8 +1,5 @@
 """Sequential training: one episode, one gradient update, repeated.
-See parallel_train.py for the batched version - the rollout/loss part
-genuinely differs (vmapped vs not, a measured ~28% overhead even at
-n_envs=1); the optimizer tail is shared via optimizer_step.py, and
-checkpoint state handling via common.py."""
+See parallel_train.py for the vmapped version."""
 import pathlib
 
 from placax.types import EnvParams, RewardFn  # noqa: F401  must precede jax imports
@@ -45,6 +42,7 @@ def train_step(
         gamma=ppo_config.gamma, lam=ppo_config.lam,
     )
 
+    # Closes over trajectory so apply_gradient_update can grad it w.r.t. policy_params alone.
     def loss_fn(policy_params, normalized_advantages, normalized_returns):
         return ppo_loss(
             policy_params, policy_apply_fn, trajectory, normalized_advantages, normalized_returns,
@@ -83,11 +81,8 @@ def train_sequential(
     checkpoint_path: pathlib.Path | None = None,
 ):
     """Runs n_iterations of train_step. Returns (final_variables, losses).
-    The underlying implementation behind run.train(); call directly to
-    force sequential. optimizer defaults to optax.adam(learning_rate).
-    checkpoint_path, if given, saves the full training state after every
-    iteration and auto-resumes from it if it already exists; for periodic
-    checkpointing and evaluation snapshots use ops.resumable_train."""
+    checkpoint_path, if given, saves every iteration and auto-resumes;
+    for periodic checkpointing/eval use ops.resumable_train instead."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     variables, opt_state, running_stats, key, start_iteration = open_train_state(

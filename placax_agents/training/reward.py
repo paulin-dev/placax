@@ -1,6 +1,4 @@
-"""Wraps make_hpwl_reward with the grid-to-real-unit conversion - without
-it, hpwl() would mix tiny grid indices directly with real-unit pin
-offsets, making the reward nearly blind to which cell was chosen."""
+"""Wraps make_hpwl_reward with the grid-to-real-unit conversion."""
 from placax.extras.rewards import make_hpwl_reward  # noqa: F401  must precede jax imports
 from placax.types import RewardFn  # noqa: F401
 from placax_agents.policy.scale import to_real_centers  # noqa: F401

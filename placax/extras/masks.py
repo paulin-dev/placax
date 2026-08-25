@@ -1,12 +1,5 @@
-"""Optional, composable legality constraints - each function answers one
-independent question about which cells are illegal. step() never requires
-these; occupancy is derived on demand from positions.
-
-compute_occupied() marks only each macro's single reference cell, not its
-real footprint - wrong for differently-sized macros. For real sizes build
-occupancy via placax.render.render() instead:
-    illegal = occupancy_mask(render(positions, sizes, grid), (w, h)) \\
-              | boundary_mask(params, (w, h))"""
+"""Composable legality constraints - each function answers one
+independent question about which cells are illegal."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
 
 import jax
@@ -16,9 +9,10 @@ from placax.types import EnvParams
 
 
 def compute_occupied(positions: jax.Array, grid: int) -> jax.Array:
-    """(grid, grid) bool array of occupied reference cells. Unplaced
-    macros (-1 sentinel) are filtered explicitly: JAX scatter would wrap
-    negative indices like ordinary indexing instead of dropping them."""
+    """(grid, grid) bool array of occupied reference cells only (not real
+    footprints - use render()+occupancy_mask() for that). Unplaced
+    macros (-1 sentinel) are filtered explicitly, else JAX scatter would
+    wrap negative indices instead of dropping them."""
     is_placed = positions[:, 0] >= 0
     row_idx = jnp.arange(grid)[:, None, None]
     col_idx = jnp.arange(grid)[None, :, None]
@@ -27,11 +21,9 @@ def compute_occupied(positions: jax.Array, grid: int) -> jax.Array:
 
 
 def occupancy_mask(occupied: jax.Array, macro_size: tuple[int, int]) -> jax.Array:
-    """True at (x, y) if placing a macro_size macro with its lower-left
-    corner there overlaps an occupied cell. Windows past the edge are
-    clamped to fit - boundary_mask's job, not this one's; combine with OR.
-    Summed-area table rather than dynamic slices so macro_size can be a
-    traced value inside jit/scan."""
+    """True at (x, y) if a macro_size macro placed there (lower-left
+    corner) overlaps an occupied cell. Edge cases are boundary_mask's
+    job - combine with OR. Summed-area table so macro_size can be traced."""
     grid_w, grid_h = occupied.shape
     w, h = macro_size
 

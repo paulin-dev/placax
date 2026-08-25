@@ -8,10 +8,8 @@ from jax import random
 
 
 def reset(params: EnvParams, initial_positions: jax.Array | None = None) -> EnvState:
-    """Starts an episode, nothing placed. For a warm start pass
-    initial_positions with the first k macros placed (in index order)
-    and the rest at the (-1, -1) sentinel - only a prefix is supported,
-    since step() places macros in index order."""
+    """Starts an episode. initial_positions, if given, warm-starts with
+    the first k macros placed (a prefix only) and the rest at (-1, -1)."""
     if initial_positions is None:
         initial_positions = jnp.full((params.n_macros, 2), -1)
     n_placed = (initial_positions[:, 0] >= 0).sum()

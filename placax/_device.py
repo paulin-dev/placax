@@ -30,14 +30,8 @@ if not _GPU_PHYSICALLY_PRESENT:
 if _is_wsl():
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")
 
-# Silences XLA/cuDNN's C++ logging (bfc_allocator "ran out of memory",
-# hlo_rematerialization, cuda_timer, ...). These come from the compiler
-# trying several kernel algorithms/layouts internally and discarding
-# the ones that don't fit or are slow to measure - routine, not
-# actionable, and easy to mistake for a crash (e.g. during
-# placax_agents.ops.autotune's batch-size search). A genuine fatal
-# error (a C++ CHECK failure) still aborts the process regardless of
-# this setting - it isn't something Python logging levels can hide.
+# Silences XLA/cuDNN's C++ logging (routine kernel-search noise, not
+# actionable); a real fatal error still aborts the process regardless.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
 
@@ -55,10 +49,9 @@ def warn_if_gpu_unused() -> None:
 
 
 def recommended_parallelism_mode(override: str | None = None) -> str:
-    """Returns "sequential" or "parallel", from `override` if given,
-    else auto-detected from the JAX backend. Measured, not guessed:
-    vmap-across-episodes is ~73x slower than sequential+jit on CPU,
-    ~3.8x faster on GPU (scripts/compare_sequential_vs_parallel.py)."""
+    """"sequential" or "parallel": override if given, else auto-detected
+    from the JAX backend (vmap is ~73x slower on CPU, ~3.8x faster on
+    GPU - see scripts/compare_sequential_vs_parallel.py)."""
     if override is not None:
         if override not in ("sequential", "parallel"):
             raise ValueError(f"mode must be 'sequential' or 'parallel', got {override!r}")
