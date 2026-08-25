@@ -2,107 +2,16 @@
 and evaluating real HPWL along the way.
 
 Usage: python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]"""
-import os
 import pathlib
-import subprocess
 import sys
 
 from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
-from placax.core import reset  # noqa: F401
-from placax.netlist import load_netlist  # noqa: F401
-from placax.netlist.padding import build_padded_arrays  # noqa: F401
-from placax.types import EnvParams  # noqa: F401
-from placax_agents.ops.autotune import find_max_batch_size, is_oom  # noqa: F401
+from placax_agents.benchmark import Benchmark  # noqa: F401
+from placax_agents.ops.n_envs import NEnvsDetector  # noqa: F401
 from placax_agents.ops.resumable_train import resumable_train  # noqa: F401
 from placax_agents.policy.architectures.cnn import CNNActorCritic  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.policy.scale import compute_grid_scale  # noqa: F401
-from placax_agents.training.loops.parallel_train import train_parallel  # noqa: F401
-from placax_agents.training.reward import make_scaled_hpwl_reward  # noqa: F401
 
 from jax import random
-
-_PROBE_FLAG = "--probe-n-envs"
-_PROBE_OOM_MARKER = "PLACAX_PROBE_OOM"
-_PROBE_TIMEOUT_S = 90.0
-
-
-def _build_training_state(benchmark_dir: pathlib.Path):
-    """Loads the netlist and builds everything needed for training:
-    policy, initial variables, reward_fn, sizes_array, cell_size, params."""
-    macro_sizes, nets = load_netlist(benchmark_dir)
-    _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
-        macro_sizes, nets
-    )
-    params = EnvParams(grid=64, n_macros=len(macro_sizes))
-    cell_size = compute_grid_scale(sizes_array, params.grid_x, params.effective_grid_y)
-    reward_fn = make_scaled_hpwl_reward(
-        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size
-    )
-
-    policy = CNNActorCritic()
-    key = random.PRNGKey(0)
-    key, init_key = random.split(key)
-    obs0 = observation(reset(params), params, sizes_array)
-    variables_init = policy.init(init_key, obs0)
-
-    return {
-        "macro_sizes": macro_sizes, "nets": nets, "params": params, "cell_size": cell_size,
-        "reward_fn": reward_fn, "sizes_array": sizes_array, "padded_pin_idx": padded_pin_idx,
-        "padded_pin_offset": padded_pin_offset, "valid_mask": valid_mask,
-        "policy": policy, "key": key, "variables_init": variables_init,
-    }
-
-
-def _probe_entrypoint(benchmark_dir: pathlib.Path, n: int) -> None:
-    """Subprocess entry point for _try_n_envs_subprocess: attempts one
-    n-env training step, reporting the outcome via exit code."""
-    state = _build_training_state(benchmark_dir)
-    try:
-        train_parallel(
-            state["key"], state["variables_init"], state["policy"].apply, state["params"],
-            state["reward_fn"], state["sizes_array"], state["cell_size"], n_envs=n, n_iterations=1,
-        )
-    except Exception as e:
-        if is_oom(e):
-            print(_PROBE_OOM_MARKER)
-            sys.exit(1)
-        raise
-
-
-def _try_n_envs_subprocess(benchmark_dir: pathlib.Path, n: int) -> None:
-    """try_fn for find_max_batch_size: tries n_envs=n in a fresh
-    subprocess, not this one - JAX's own memory_stats() is unusable
-    after the first real allocation (GPU preallocation), and a hung
-    candidate can be killed outright without losing this process.
-    Raises MemoryError on OOM or timeout; anything else is a real bug."""
-    env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
-    try:
-        result = subprocess.run(
-            [sys.executable, __file__, _PROBE_FLAG, str(benchmark_dir), str(n)],
-            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S, env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise MemoryError(f"n_envs={n} probe exceeded {_PROBE_TIMEOUT_S:.0f}s, treating as infeasible") from e
-
-    if result.returncode == 0:
-        return
-    if _PROBE_OOM_MARKER in result.stdout:
-        raise MemoryError(f"n_envs={n} does not fit")
-    raise RuntimeError(f"probe for n_envs={n} crashed (exit {result.returncode}):\n{result.stderr[-4000:]}")
-
-
-def _auto_detect_n_envs(benchmark_dir: pathlib.Path, max_candidate: int = 64) -> tuple[str, int]:
-    """Returns (mode, n_envs). Only searches if parallel is worth trying
-    on this hardware at all."""
-    mode = recommended_parallelism_mode()
-    if mode == "sequential":
-        return "sequential", 1
-
-    n_envs = find_max_batch_size(
-        lambda n: _try_n_envs_subprocess(benchmark_dir, n), max_candidate=max_candidate
-    )
-    return "parallel", max(n_envs, 1)
 
 
 def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
@@ -114,17 +23,13 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
 
 
 def _resolve_n_envs(benchmark_dir: pathlib.Path, n_envs_override: int | None) -> tuple[str, int]:
-    """(mode, n_envs): the override if given, else auto-detected. Prints
-    its own progress since auto-detection can take a while (see
-    _auto_detect_n_envs)."""
-    if n_envs_override is not None:
-        mode = "sequential" if n_envs_override <= 1 else "parallel"
-        print(f"n_envs={n_envs_override} given explicitly, mode={mode}")
-        return mode, n_envs_override
-
-    print("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
-    mode, n_envs = _auto_detect_n_envs(benchmark_dir)
-    print(f"  -> mode={mode}, n_envs={n_envs}")
+    """(mode, n_envs) via NEnvsDetector.resolve(); prints progress since
+    the auto-detect path can take a while."""
+    if n_envs_override is None:
+        print("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
+    mode, n_envs = NEnvsDetector(benchmark_dir).resolve(n_envs_override)
+    source = "given explicitly" if n_envs_override is not None else "auto-detected"
+    print(f"  -> mode={mode}, n_envs={n_envs} ({source})")
     return mode, n_envs
 
 
@@ -144,18 +49,19 @@ def _print_results(
 
 
 def main() -> None:
-    if len(sys.argv) > 1 and sys.argv[1] == _PROBE_FLAG:
-        _probe_entrypoint(pathlib.Path(sys.argv[2]), int(sys.argv[3]))
-        return
-
     benchmark_dir, n_iterations, n_envs_override = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         print(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
     print(f"loading {benchmark_dir} ...")
-    state = _build_training_state(benchmark_dir)
-    print(f"  {len(state['macro_sizes'])} macros, {len(state['nets'])} nets, cell_size={state['cell_size']:.2f}")
+    benchmark = Benchmark.load(benchmark_dir)
+    print(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
+
+    policy = CNNActorCritic()
+    key = random.PRNGKey(0)
+    key, init_key = random.split(key)
+    variables = benchmark.init_policy(policy, init_key)
 
     checkpoint_path = benchmark_dir / "checkpoint.bin"
     snapshot_dir = benchmark_dir / "snapshots"
@@ -167,9 +73,9 @@ def main() -> None:
     print(f"running {n_iterations} more iterations ...")
 
     _final_variables, log = resumable_train(
-        checkpoint_path, state["variables_init"], state["key"], state["policy"].apply, state["params"],
-        state["reward_fn"], state["sizes_array"], state["cell_size"], n_iterations,
-        state["padded_pin_idx"], state["padded_pin_offset"], state["valid_mask"],
+        checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
+        benchmark.sizes_array, benchmark.cell_size, n_iterations,
+        benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         checkpoint_every=10, eval_every=10, log_path=log_path,
         n_envs=n_envs, mode=mode, snapshot_dir=snapshot_dir, snapshot_every=50,
     )

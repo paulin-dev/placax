@@ -1,6 +1,7 @@
 """Binary-searches the largest n for which try_fn(n) succeeds, by
 trying values for real (double to bracket, then binary search)."""
 import contextlib
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -85,6 +86,27 @@ def _binary_search(
         else:
             first_bad = mid
     return last_good
+
+
+def probe_subprocess(
+    argv: list[str], timeout_s: float, oom_marker: str = "PLACAX_PROBE_OOM", env: dict | None = None
+) -> None:
+    """A try_fn for find_max_batch_size that runs argv as a subprocess
+    instead of in-process - for candidates that might hang or corrupt
+    process-wide state (e.g. GPU memory) if tried directly. argv must
+    print oom_marker and exit nonzero on OOM, exit 0 on success. Raises
+    MemoryError on OOM or timeout (both mean "doesn't fit"); RuntimeError
+    on any other crash."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_s, env=env)
+    except subprocess.TimeoutExpired as e:
+        raise MemoryError(f"probe exceeded {timeout_s:.0f}s, treating as infeasible") from e
+
+    if result.returncode == 0:
+        return
+    if oom_marker in result.stdout:
+        raise MemoryError("probe reported OOM")
+    raise RuntimeError(f"probe crashed (exit {result.returncode}):\n{result.stderr[-4000:]}")
 
 
 def find_max_batch_size(
