@@ -20,7 +20,7 @@ def compute_gae(
         gae = delta + gamma * lam * (1 - done) * gae
         return gae, gae
 
-    next_values = jnp.concatenate([values[1:], next_value[None]])
+    next_values = jnp.concatenate([values[1:], next_value[None]])  # V(s_{t+1}) per step, shifted by one
     _, advantages = jax.lax.scan(
         scan_fn,
         jnp.array(0.0),

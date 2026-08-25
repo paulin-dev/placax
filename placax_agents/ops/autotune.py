@@ -120,6 +120,6 @@ def find_max_batch_size(
     cleanup_fn, if given, runs after every attempt."""
     with _rlimit_as(memory_limit_bytes):
         last_good, first_bad = _grow_to_bracket(try_fn, start, max_candidate, cleanup_fn)
-        if first_bad is None:
+        if first_bad is None:  # never failed within max_candidate - nothing left to narrow
             return last_good
         return _binary_search(try_fn, last_good, first_bad, cleanup_fn)

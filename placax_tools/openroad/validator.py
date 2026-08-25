@@ -71,6 +71,7 @@ class OpenROADValidator(Validator):
     ) -> PPAResult:
         """Writes the TCL script, runs OpenROAD, parses its output."""
         output_dir.mkdir(parents=True, exist_ok=True)
+        # 1. write the TCL script OpenROAD will execute.
         script_path = output_dir / "validate.tcl"
         script_path.write_text(
             build_openroad_script(
@@ -79,6 +80,7 @@ class OpenROADValidator(Validator):
             )
         )
 
+        # 2. run it, 3. parse the text report back into PPAResult.
         result = subprocess.run(
             [self.openroad_binary, "-exit", str(script_path)],
             capture_output=True, text=True, check=True,

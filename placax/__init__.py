@@ -1,4 +1,4 @@
-from placax import _device  # noqa: F401  must run before any `import jax`
+from placax import _device  # must run before any `import jax`
 
 from placax.core import reset, step, random_action
 from placax.types import EnvParams, EnvState, RewardFn

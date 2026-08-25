@@ -1,6 +1,6 @@
 """Turns EnvState into the dict a policy consumes."""
-from placax.extras.render import render  # noqa: F401  must precede jax imports
-from placax.types import EnvParams, EnvState  # noqa: F401
+from placax.extras.render import render  # must precede jax imports
+from placax.types import EnvParams, EnvState
 
 import jax
 

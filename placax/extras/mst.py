@@ -34,7 +34,7 @@ def mst_wirelength(macro_positions: dict[str, tuple[float, float]], nets: Nets) 
     its real (x, y) center; pin position = center + offset."""
     total = 0.0
     for net in nets:
-        points = [
+        points = [  # pin = macro center + its offset
             (macro_positions[name][0] + x_off, macro_positions[name][1] + y_off)
             for name, x_off, y_off in net
         ]

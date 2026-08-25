@@ -25,7 +25,8 @@ def update_running_stats(stats: RunningStats, x: jnp.ndarray) -> RunningStats:
     delta = batch_mean - stats.mean
     total_count = stats.count + batch_count
 
-    new_mean = stats.mean + delta * batch_count / total_count
+    new_mean = stats.mean + delta * batch_count / total_count  # weighted toward the larger side
+    # Combined sum-of-squared-deviations: each side's own + a cross term from the mean shift.
     combined_m2 = (
         stats.var * stats.count + batch_var * batch_count + delta**2 * stats.count * batch_count / total_count
     )

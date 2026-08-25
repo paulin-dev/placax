@@ -2,16 +2,16 @@
 See parallel_train.py for the vmapped version."""
 import pathlib
 
-from placax.types import EnvParams, RewardFn  # noqa: F401  must precede jax imports
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.training.algorithm.config import PPOConfig  # noqa: F401
-from placax_agents.training.algorithm.gae import compute_gae  # noqa: F401
-from placax_agents.training.algorithm.loss import ppo_loss  # noqa: F401
-from placax_agents.training.algorithm.optimizer_step import apply_gradient_update  # noqa: F401
-from placax_agents.training.algorithm.running_stats import RunningStats  # noqa: F401
+from placax.types import EnvParams, RewardFn  # must precede jax imports
+from placax_agents.policy.observation import observation
+from placax_agents.training.algorithm.config import PPOConfig
+from placax_agents.training.algorithm.gae import compute_gae
+from placax_agents.training.algorithm.loss import ppo_loss
+from placax_agents.training.algorithm.optimizer_step import apply_gradient_update
+from placax_agents.training.algorithm.running_stats import RunningStats
 from placax_agents.training.loops.common import checkpoint_every_n, make_step_input, open_train_state
-from placax_agents.training.rollout import collect_rollout  # noqa: F401
-from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
+from placax_agents.training.rollout import collect_rollout
+from placax_agents.types import AlgorithmFn, StateFn
 
 import jax
 import jax.numpy as jnp
@@ -91,12 +91,12 @@ def train_sequential(
 
     losses = []
     for i in range(n_iterations):
-        key, step_key = make_step_input(key)
+        key, step_key = make_step_input(key)  # fresh key per iteration
         variables, opt_state, running_stats, loss, _ = _jitted_train_step(
             step_key, variables, opt_state, running_stats, optimizer, policy_apply_fn,
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
         )
         losses.append(float(loss))
-        checkpoint_every_n(checkpoint_path, 1, start_iteration + i + 1, variables, opt_state, running_stats, key)
+        checkpoint_every_n(checkpoint_path, 1, start_iteration + i + 1, variables, opt_state, running_stats, key)  # every=1: always
 
     return variables, losses

@@ -14,11 +14,12 @@ def render(positions: jax.Array, sizes: jax.Array, grid_x: int, grid_y: int | No
     ys = jnp.arange(grid_y)
 
     def footprint_of(pos: jax.Array, size: jax.Array) -> jax.Array:
+        # This macro's w x h rectangle as a boolean grid; (x >= 0) drops unplaced macros.
         x, y = pos
         w, h = size
         in_x = (xs >= x) & (xs < x + w)
         in_y = (ys >= y) & (ys < y + h)
         return (in_x[:, None] & in_y[None, :]) & (x >= 0)
 
-    footprints = jax.vmap(footprint_of)(positions, sizes)
-    return footprints.any(axis=0)
+    footprints = jax.vmap(footprint_of)(positions, sizes)  # one footprint per macro, batched
+    return footprints.any(axis=0)  # flatten to one canvas: covered if any macro is there

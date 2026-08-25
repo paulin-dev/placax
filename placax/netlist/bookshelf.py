@@ -25,23 +25,23 @@ def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
     """Returns a list of (macro_name, x_offset, y_offset) pins per net.
     Dropped if fewer than 2 distinct macros appear in it."""
     nets: Nets = []
-    current: list[NetPin] = []
+    current: list[NetPin] = []  # pins collected for the net being read right now
 
     def _flush() -> None:
         if len({name for name, _x, _y in current}) >= 2:
             nets.append(current)
 
     for line in nets_path.read_text().splitlines():
-        if _NET_HEADER_RE.search(line):
+        if _NET_HEADER_RE.search(line):  # "NetDegree :" starts a new net
             _flush()
             current = []
             continue
         pin_match = _NET_PIN_RE.match(line)
-        if pin_match and pin_match.group(1) in macro_names:
+        if pin_match and pin_match.group(1) in macro_names:  # skip non-macro (standard cell) pins
             name, x_off, y_off = pin_match.groups()
             current.append((name, float(x_off), float(y_off)))
 
-    _flush()
+    _flush()  # last net has no following header to trigger it
     return nets
 
 

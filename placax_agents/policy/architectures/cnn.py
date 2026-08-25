@@ -15,10 +15,12 @@ class CNNActorCritic(nn.Module):
 
     @nn.compact
     def __call__(self, obs: dict) -> tuple[jax.Array, jax.Array]:
-        x = obs["canvas"][..., None].astype(jnp.float32)
-        for _ in range(self.num_conv_layers):
+        x = obs["canvas"][..., None].astype(jnp.float32)  # add a channel dim
+        for _ in range(self.num_conv_layers):  # shared conv trunk
             x = nn.relu(nn.Conv(features=self.features, kernel_size=self.kernel_size, padding="SAME")(x))
 
+        # Policy head: one logit per grid cell.
         action_logits = nn.Conv(features=1, kernel_size=self.kernel_size, padding="SAME")(x)[..., 0]
+        # Value head: global-average-pool the trunk, then a scalar.
         value = nn.Dense(features=1)(x.mean(axis=(0, 1)))[0]
         return action_logits, value

@@ -2,8 +2,8 @@
 import pathlib
 
 from placax import _device  # noqa: F401  must precede jax imports
-from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint  # noqa: F401
-from placax_agents.training.algorithm.running_stats import RunningStats, init_running_stats  # noqa: F401
+from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
+from placax_agents.training.algorithm.running_stats import RunningStats, init_running_stats
 
 import jax
 import jax.numpy as jnp
@@ -32,6 +32,8 @@ def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | 
     it exists. Returns (variables, opt_state, running_stats, key,
     start_iteration)."""
     template = train_state_bundle(variables, optimizer.init(variables), init_running_stats(), key, 0)
+    # template also serves as the deserialization target - a checkpoint is just bytes,
+    # it needs a matching pytree structure to know how to unpack itself.
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
         state["variables"],

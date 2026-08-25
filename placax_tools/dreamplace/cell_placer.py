@@ -72,6 +72,7 @@ class DREAMPlaceCellPlacer(CellPlacer):
     ) -> pathlib.Path:
         """Writes the config, runs DREAMPlace, returns the placed DEF."""
         output_dir.mkdir(parents=True, exist_ok=True)
+        # 1. build and write the config DREAMPlace itself reads.
         config = build_dreamplace_config(
             def_path, lef_paths, output_dir, gpu=self.gpu, target_density=self.target_density
         )
@@ -79,12 +80,14 @@ class DREAMPlaceCellPlacer(CellPlacer):
         config_path = output_dir / "dreamplace_config.json"
         config_path.write_text(json.dumps(config, indent=2))
 
+        # 2. run DREAMPlace as an external process.
         subprocess.run(
             [self.python_executable, "dreamplace/Placer.py", str(config_path)],
             cwd=self.dreamplace_root,
             check=True,
         )
 
+        # 3. confirm it actually produced the DEF we expect.
         result_def = output_dir / f"{def_path.stem}.gp.def"
         if not result_def.exists():
             raise FileNotFoundError(

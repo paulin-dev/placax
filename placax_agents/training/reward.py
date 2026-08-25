@@ -1,7 +1,7 @@
 """Wraps make_hpwl_reward with the grid-to-real-unit conversion."""
-from placax.extras.rewards import make_hpwl_reward  # noqa: F401  must precede jax imports
-from placax.types import RewardFn  # noqa: F401
-from placax_agents.policy.scale import to_real_centers  # noqa: F401
+from placax.extras.rewards import make_hpwl_reward  # must precede jax imports
+from placax.types import RewardFn
+from placax_agents.policy.scale import to_real_centers
 
 import jax
 

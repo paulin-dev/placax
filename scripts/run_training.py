@@ -5,11 +5,11 @@ Usage: python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]"""
 import pathlib
 import sys
 
-from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
-from placax_agents.benchmark import Benchmark  # noqa: F401
-from placax_agents.ops.n_envs import NEnvsDetector  # noqa: F401
-from placax_agents.ops.resumable_train import resumable_train  # noqa: F401
-from placax_agents.policy.architectures.cnn import CNNActorCritic  # noqa: F401
+from placax import _device  # noqa: F401  must precede jax imports
+from placax_agents.benchmark import Benchmark
+from placax_agents.ops.n_envs import NEnvsDetector
+from placax_agents.ops.resumable_train import resumable_train
+from placax_agents.policy.architectures.cnn import CNNActorCritic
 
 from jax import random
 
@@ -49,6 +49,7 @@ def _print_results(
 
 
 def main() -> None:
+    # 1. args + benchmark
     benchmark_dir, n_iterations, n_envs_override = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         print(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -58,11 +59,13 @@ def main() -> None:
     benchmark = Benchmark.load(benchmark_dir)
     print(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
 
+    # 2. policy
     policy = CNNActorCritic()
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     variables = benchmark.init_policy(policy, init_key)
 
+    # 3. n_envs (explicit or auto-detected)
     checkpoint_path = benchmark_dir / "checkpoint.bin"
     snapshot_dir = benchmark_dir / "snapshots"
     log_path = benchmark_dir / "training_log.jsonl"
@@ -72,6 +75,7 @@ def main() -> None:
     print(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
     print(f"running {n_iterations} more iterations ...")
 
+    # 4. train, resuming from checkpoint_path if it exists
     _final_variables, log = resumable_train(
         checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
         benchmark.sizes_array, benchmark.cell_size, n_iterations,

@@ -1,10 +1,10 @@
 """Runs one full episode as a single lax.scan."""
-from placax.core import random_action, reset, step  # noqa: F401  must precede jax imports
-from placax.types import EnvParams, RewardFn  # noqa: F401
-from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.policy.scale import to_grid_units  # noqa: F401
-from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
+from placax.core import reset, step  # must precede jax imports
+from placax.types import EnvParams, RewardFn
+from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action
+from placax_agents.policy.observation import observation
+from placax_agents.policy.scale import to_grid_units
+from placax_agents.types import AlgorithmFn, StateFn
 
 import jax
 

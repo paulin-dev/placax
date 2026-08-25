@@ -1,6 +1,6 @@
 """Turns a policy's raw logits into a legal action."""
-from placax.extras.masks import boundary_mask, occupancy_mask  # noqa: F401  must precede jax imports
-from placax.types import EnvParams  # noqa: F401
+from placax.extras.masks import boundary_mask, occupancy_mask  # must precede jax imports
+from placax.types import EnvParams
 
 import jax
 import jax.numpy as jnp
@@ -12,7 +12,7 @@ def legal_action_logits(
     """Masks illegal cells (overlap or out-of-bounds) to -inf. Skips
     masking if every cell is illegal (all -inf would NaN log_softmax)."""
     illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
-    illegal = jnp.where(illegal.all(), False, illegal)
+    illegal = jnp.where(illegal.all(), False, illegal)  # bail out of masking rather than go all -inf
     return jnp.where(illegal, -jnp.inf, logits)
 
 

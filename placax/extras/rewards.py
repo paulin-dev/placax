@@ -19,11 +19,12 @@ def hpwl(
     """sum over nets of (bbox width + height); a net with 0 valid pins
     contributes 0 (guarded explicitly - sentinels alone would give a
     large negative value)."""
-    pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset
+    pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset  # pin centers
+    # Padding slots are masked to +-_BIG so they can never win the min/max.
     lo = jnp.where(valid_mask[..., None], pin_xy, _BIG).min(axis=1)
     hi = jnp.where(valid_mask[..., None], pin_xy, -_BIG).max(axis=1)
     net_has_pins = valid_mask.any(axis=1)
-    return jnp.where(net_has_pins[:, None], hi - lo, 0.0).sum()
+    return jnp.where(net_has_pins[:, None], hi - lo, 0.0).sum()  # zero out empty nets, then sum
 
 
 def _wiremask_baseline(
@@ -34,7 +35,7 @@ def _wiremask_baseline(
     only - computed once, reused by wiremask's per-candidate combine."""
     idx = state.step
     already_placed = jnp.arange(params.n_macros) < idx
-    baseline_mask = valid_mask & already_placed[padded_pin_idx]
+    baseline_mask = valid_mask & already_placed[padded_pin_idx]  # only already-placed macros' pins count
 
     pin_xy = state.positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset
     lo = jnp.where(baseline_mask[..., None], pin_xy, _BIG).min(axis=1)
@@ -67,12 +68,14 @@ def wiremask(
     my_valid = macro_net_valid[idx]
 
     def cost_at(xy: jax.Array) -> jax.Array:
+        # Extend just this macro's nets' baseline bounds with its pins at candidate xy.
         my_positions = xy + my_offsets
         full_lo = baseline_lo.at[my_nets].min(jnp.where(my_valid[:, None], my_positions, _BIG))
         full_hi = baseline_hi.at[my_nets].max(jnp.where(my_valid[:, None], my_positions, -_BIG))
         full_has_pins = full_lo[:, 0] < _BIG
         return jnp.where(full_has_pins, (full_hi - full_lo).sum(axis=1), 0.0).sum()
 
+    # Evaluate cost_at for every grid cell at once.
     xs, ys = jnp.meshgrid(jnp.arange(params.grid_x), jnp.arange(params.effective_grid_y), indexing="ij")
     coords = jnp.stack([xs.ravel(), ys.ravel()], axis=1)
     return jax.vmap(cost_at)(coords).reshape(params.grid_x, params.effective_grid_y) - baseline_total

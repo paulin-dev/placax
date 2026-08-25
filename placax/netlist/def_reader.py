@@ -70,6 +70,7 @@ def load_def(def_path: pathlib.Path, lef_paths: list[pathlib.Path]) -> tuple[Siz
     def_text = def_path.read_text()
     components = parse_components(def_text)
 
+    # Merge every LEF's cell geometry - a design can split cells across multiple LEFs.
     cell_sizes: SizeMap = {}
     pin_offsets: PinOffsets = {}
     for lef in lef_paths:

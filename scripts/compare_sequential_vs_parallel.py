@@ -7,11 +7,11 @@ import pathlib
 import sys
 import time
 
-from placax.core import random_action, reset, step  # noqa: F401  must precede jax imports
-from placax.extras.rewards import make_hpwl_reward  # noqa: F401
-from placax.netlist import load_netlist  # noqa: F401
-from placax.netlist.padding import build_padded_arrays  # noqa: F401
-from placax.types import EnvParams  # noqa: F401
+from placax.core import random_action, reset, step  # must precede jax imports
+from placax.extras.rewards import make_hpwl_reward
+from placax.netlist import load_netlist
+from placax.netlist.padding import build_padded_arrays
+from placax.types import EnvParams
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,7 @@ def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
     """N episodes at once via vmap - ONE jitted function per step, not
     jitted pieces glued by unjitted code."""
     def one_batched_step(keys, batched_state):
+        # Same step() as sequential, just vmapped over the leading batch dimension.
         keys, subkeys = jax.vmap(lambda k: tuple(random.split(k)))(keys)
         actions = jax.vmap(random_action, in_axes=(0, None))(subkeys, params)
         new_state, reward, done = jax.vmap(step, in_axes=(0, 0, None, None))(

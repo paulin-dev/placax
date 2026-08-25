@@ -64,6 +64,8 @@ def parse_nets(pb_text: str) -> Nets:
 
     nets = []
     for block in _split_nodes(pb_text):
+        # A net is: this node's own name, plus everything it lists as input: -
+        # whichever of those names happen to be MACRO_PIN nodes are this net's pins.
         hub_name_match = _NAME_RE.search(block)
         referenced = re.findall(r'input:\s*"([^"]+)"', block)
         if hub_name_match:

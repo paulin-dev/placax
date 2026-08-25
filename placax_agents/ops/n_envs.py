@@ -5,10 +5,10 @@ import os
 import pathlib
 import sys
 
-from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
-from placax_agents.benchmark import Benchmark  # noqa: F401
-from placax_agents.ops.autotune import find_max_batch_size, is_oom, probe_subprocess  # noqa: F401
-from placax_agents.training.loops.parallel_train import train_parallel  # noqa: F401
+from placax._device import recommended_parallelism_mode  # must precede jax imports
+from placax_agents.benchmark import Benchmark
+from placax_agents.ops.autotune import find_max_batch_size, is_oom, probe_subprocess
+from placax_agents.training.loops.parallel_train import train_parallel
 
 from jax import random
 
@@ -68,7 +68,9 @@ class NEnvsDetector:
         return self.detect()
 
     def _try_n_envs(self, n: int) -> None:
+        # preallocate=false: this fresh process must report real usage, not one big arena grab.
         env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
+        # Re-invoke this module as `python -m ...` - see the __main__ block below.
         argv = [
             sys.executable, "-m", _MODULE, str(self.benchmark_dir), self.policy_path,
             self.make_reward_fn_path or "", str(n),
@@ -79,6 +81,7 @@ class NEnvsDetector:
 def _probe_entrypoint(benchmark_dir: str, policy_path: str, make_reward_fn_path: str, n: int) -> None:
     """Subprocess entry point (see NEnvsDetector._try_n_envs): attempts
     one n-env training step, reporting the outcome via exit code."""
+    # Rebuild the benchmark/policy from scratch - nothing crosses the process boundary but strings.
     load_kwargs = {"make_reward_fn": _import(make_reward_fn_path)} if make_reward_fn_path else {}
     benchmark = Benchmark.load(pathlib.Path(benchmark_dir), **load_kwargs)
     policy = _import(policy_path)()
@@ -89,10 +92,10 @@ def _probe_entrypoint(benchmark_dir: str, policy_path: str, make_reward_fn_path:
             benchmark.sizes_array, benchmark.cell_size, n_envs=n, n_iterations=1,
         )
     except Exception as e:
-        if is_oom(e):
+        if is_oom(e):  # doesn't fit - report it and let the parent see the exit code
             print(_OOM_MARKER)
             sys.exit(1)
-        raise
+        raise  # anything else is a real bug - propagate with its traceback
 
 
 if __name__ == "__main__":

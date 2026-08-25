@@ -1,12 +1,12 @@
 """Evaluates a policy's placement quality: greedy (argmax) rollout,
 reporting real HPWL."""
-from placax.core import reset  # noqa: F401  must precede jax imports
-from placax.extras.rewards import hpwl  # noqa: F401
-from placax.types import EnvParams, RewardFn  # noqa: F401
-from placax_agents.policy.action import legal_action_logits  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.policy.scale import to_grid_units, to_real_centers  # noqa: F401
-from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
+from placax.core import reset  # must precede jax imports
+from placax.extras.rewards import hpwl
+from placax.types import EnvParams
+from placax_agents.policy.action import legal_action_logits
+from placax_agents.policy.observation import observation
+from placax_agents.policy.scale import to_grid_units, to_real_centers
+from placax_agents.types import AlgorithmFn, StateFn
 
 import jax
 import jax.numpy as jnp

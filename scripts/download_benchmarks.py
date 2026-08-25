@@ -106,11 +106,11 @@ def download_benchmark(name: str, dest_dir: pathlib.Path = BENCHMARKS_DIR) -> No
 
     out_dir = dest_dir / name
     if out_dir.exists() and any(out_dir.iterdir()):
-        return
+        return  # already fetched
     out_dir.mkdir(parents=True, exist_ok=True)
 
     benchmark = BENCHMARKS[name]
-    match benchmark.format:
+    match benchmark.format:  # each format needs a different fetch strategy
         case Format.ISPD05_NETLIST:
             _fetch_ispd05_netlist(benchmark.url, out_dir, name)
         case Format.PROTOBUF | Format.UNSYNTHESIZED_VERILOG:

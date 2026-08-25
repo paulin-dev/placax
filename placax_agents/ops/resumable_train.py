@@ -4,12 +4,12 @@ in absolute iterations, not relative to a single call)."""
 import json
 import pathlib
 
-from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
-from placax.types import EnvParams, RewardFn  # noqa: F401
-from placax_agents.ops.evaluate import evaluate  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.training.algorithm.config import PPOConfig  # noqa: F401
-from placax_agents.training.loops.common import (  # noqa: F401
+from placax._device import recommended_parallelism_mode  # must precede jax imports
+from placax.types import EnvParams, RewardFn
+from placax_agents.ops.evaluate import evaluate
+from placax_agents.policy.observation import observation
+from placax_agents.training.algorithm.config import PPOConfig
+from placax_agents.training.loops.common import (
     checkpoint_every_n,
     make_step_input,
     open_train_state,
@@ -17,7 +17,7 @@ from placax_agents.training.loops.common import (  # noqa: F401
 )
 from placax_agents.training.loops.parallel_train import _jitted_parallel_train_step
 from placax_agents.training.loops.train import _jitted_train_step
-from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
+from placax_agents.types import AlgorithmFn, StateFn
 
 import jax
 import optax
@@ -101,23 +101,26 @@ def resumable_train(
     for i in range(n_iterations):
         current_iteration = start_iteration + i + 1
 
+        # 1. one gradient step
         key, step_input = make_step_input(key, n_envs if use_parallel else None)
         variables, opt_state, running_stats, loss, _ = jitted_step(
             step_input, variables, opt_state, running_stats, optimizer, policy_apply_fn,
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
         )
 
+        # 2. periodic real-HPWL eval + 3. log entry (always, eval or not)
         real_hpwl = _maybe_evaluate(
             current_iteration, eval_every, variables, policy_apply_fn, params, sizes_array, cell_size,
             padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
         )
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
 
+        # 4. periodic checkpoint (overwritten) + 5. periodic snapshot (never overwritten)
         checkpoint_every_n(
             checkpoint_path, checkpoint_every, current_iteration, variables, opt_state, running_stats, key
         )
         snapshot_path = snapshot_dir / f"checkpoint_iter_{current_iteration}.bin" if snapshot_dir else None
         checkpoint_every_n(snapshot_path, snapshot_every, current_iteration, variables, opt_state, running_stats, key)
 
-    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
+    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)  # always checkpoint at the end
     return variables, log

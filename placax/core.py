@@ -21,9 +21,10 @@ def step(
 ) -> tuple[EnvState, jax.Array, jax.Array]:
     """Places the next macro; reward fires only once every macro is
     placed. Returns (new_state, reward, done)."""
-    positions = state.positions.at[state.step].set(action)
+    positions = state.positions.at[state.step].set(action)  # write this macro's chosen cell
     new_state = EnvState(positions=positions, step=state.step + 1)
     done = new_state.step == params.n_macros
+    # jax.lax.cond, not Python if: done is a traced value inside jit/scan.
     reward = jax.lax.cond(done, lambda: reward_fn(positions), lambda: 0.0)
     return new_state, reward, done
 

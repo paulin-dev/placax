@@ -24,9 +24,11 @@ def _is_wsl() -> bool:
 
 _GPU_PHYSICALLY_PRESENT: bool = _gpu_available()
 
+# No GPU: force JAX onto CPU explicitly, rather than letting it try and fail.
 if not _GPU_PHYSICALLY_PRESENT:
     os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
+# WSL2's GPU passthrough is memory-constrained - cap JAX's own preallocation.
 if _is_wsl():
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")
 

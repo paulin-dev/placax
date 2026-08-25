@@ -1,8 +1,8 @@
 """PPO's loss: clipped surrogate objective + value loss - entropy bonus."""
-from placax.types import EnvParams  # noqa: F401  must precede jax imports
-from placax_agents.policy.action import action_log_prob, legal_action_logits  # noqa: F401
-from placax_agents.policy.scale import to_grid_units  # noqa: F401
-from placax_agents.types import AlgorithmFn  # noqa: F401
+from placax.types import EnvParams  # must precede jax imports
+from placax_agents.policy.action import action_log_prob, legal_action_logits
+from placax_agents.policy.scale import to_grid_units
+from placax_agents.types import AlgorithmFn
 
 import jax
 import jax.numpy as jnp
@@ -41,11 +41,11 @@ def ppo_loss(
         masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size)
         new_log_prob = action_log_prob(masked_logits, action)
 
-        ratio = jnp.exp(new_log_prob - old_log_prob)
+        ratio = jnp.exp(new_log_prob - old_log_prob)  # new/old probability ratio
         clipped_ratio = jnp.clip(ratio, 1 - clip_eps, 1 + clip_eps)
-        policy_loss = -jnp.minimum(ratio * advantage, clipped_ratio * advantage)
+        policy_loss = -jnp.minimum(ratio * advantage, clipped_ratio * advantage)  # PPO's clipped surrogate
 
-        value_loss = (value - ret) ** 2
+        value_loss = (value - ret) ** 2  # critic MSE against the actual return
         return policy_loss, value_loss, _entropy(masked_logits)
 
     policy_losses, value_losses, entropies = jax.vmap(per_step)(

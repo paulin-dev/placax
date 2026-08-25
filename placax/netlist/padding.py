@@ -32,12 +32,13 @@ def build_padded_arrays(macro_sizes: SizeMap, nets: Nets):
     """Returns (name_to_idx, sizes_array, padded_pin_idx,
     padded_pin_offset, valid_mask). Built with NumPy, then converted to
     JAX arrays once - incremental .at[].set() would be far too slow."""
-    macro_names = sorted(macro_sizes)
+    macro_names = sorted(macro_sizes)  # fixed order = each macro's row index everywhere else
     name_to_idx = {name: i for i, name in enumerate(macro_names)}
 
     sizes_array = jnp.array(
         np.array([macro_sizes[name] for name in macro_names], dtype=np.float32)
     )
+    # Nets reference macros by name; remap to the index that sizes_array/positions use.
     net_groups = [
         [(name_to_idx[name], x_off, y_off) for name, x_off, y_off in net] for net in nets
     ]

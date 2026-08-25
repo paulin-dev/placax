@@ -3,13 +3,13 @@ import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from placax.core import reset  # noqa: F401  must precede jax imports
-from placax.netlist import load_netlist  # noqa: F401
-from placax.netlist.padding import build_padded_arrays  # noqa: F401
-from placax.types import EnvParams, Nets, RewardFn, SizeMap  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.policy.scale import compute_grid_scale  # noqa: F401
-from placax_agents.training.reward import make_scaled_hpwl_reward  # noqa: F401
+from placax.core import reset  # must precede jax imports
+from placax.netlist import load_netlist
+from placax.netlist.padding import build_padded_arrays
+from placax.types import EnvParams, Nets, RewardFn, SizeMap
+from placax_agents.policy.observation import observation
+from placax_agents.policy.scale import compute_grid_scale
+from placax_agents.training.reward import make_scaled_hpwl_reward
 
 import jax
 
@@ -40,7 +40,8 @@ class Benchmark:
         """Loads benchmark_dir (any supported netlist format). Pass
         make_reward_fn for a different reward - same signature as
         make_scaled_hpwl_reward."""
-        macro_sizes, nets = load_netlist(benchmark_dir)
+        macro_sizes, nets = load_netlist(benchmark_dir)  # raw, name-keyed
+        # Pad/index into the fixed-shape arrays JAX code operates on.
         _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
             macro_sizes, nets
         )

@@ -2,13 +2,13 @@
 on recommended_parallelism_mode()."""
 import pathlib
 
-from placax._device import recommended_parallelism_mode  # noqa: F401  must precede jax imports
-from placax.types import EnvParams, RewardFn  # noqa: F401
-from placax_agents.policy.observation import observation  # noqa: F401
-from placax_agents.training.algorithm.config import PPOConfig  # noqa: F401
-from placax_agents.training.loops.parallel_train import train_parallel  # noqa: F401
-from placax_agents.training.loops.train import train_sequential  # noqa: F401
-from placax_agents.types import AlgorithmFn, StateFn  # noqa: F401
+from placax._device import recommended_parallelism_mode  # must precede jax imports
+from placax.types import EnvParams, RewardFn
+from placax_agents.policy.observation import observation
+from placax_agents.training.algorithm.config import PPOConfig
+from placax_agents.training.loops.parallel_train import train_parallel
+from placax_agents.training.loops.train import train_sequential
+from placax_agents.types import AlgorithmFn, StateFn
 
 import optax
 
@@ -34,7 +34,7 @@ def train(
     (final_variables, losses). n_envs only matters if mode is parallel."""
     resolved_mode = recommended_parallelism_mode(mode)
 
-    if resolved_mode == "sequential" or n_envs <= 1:
+    if resolved_mode == "sequential" or n_envs <= 1:  # n_envs<=1 has nothing to parallelize over
         return train_sequential(
             key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size,
             n_iterations, learning_rate, state_fn, optimizer, ppo_config, checkpoint_path,
