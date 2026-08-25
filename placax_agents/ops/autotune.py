@@ -40,18 +40,23 @@ def _rlimit_as(memory_limit_bytes: int | None) -> Iterator[None]:
         resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
 
 
-def _attempt(try_fn: Callable[[int], None], n: int, cleanup_fn: Callable[[], None] | None) -> bool:
+def _attempt(
+    try_fn: Callable[[int], None], n: int, cleanup_fn: Callable[[], None] | None, verbose: bool
+) -> bool:
     """Runs try_fn(n) once; True on success, False on OOM. Non-OOM
     exceptions propagate - a real bug isn't a capacity limit."""
-    Log.info(f"Trying n={n}...")
+    if verbose:
+        Log.info(f"Trying n={n}...")
     start = time.monotonic()
     try:
         try_fn(n)
-        Log.info(f"  n={n}: ok ({time.monotonic() - start:.1f}s)")
+        if verbose:
+            Log.info(f"  n={n}: ok ({time.monotonic() - start:.1f}s)")
         return True
     except Exception as e:
         if is_oom(e):
-            Log.info(f"  n={n}: OOM ({time.monotonic() - start:.1f}s)")
+            if verbose:
+                Log.info(f"  n={n}: OOM ({time.monotonic() - start:.1f}s)")
             return False
         raise
     finally:
@@ -64,12 +69,13 @@ def _grow_to_bracket(
     start: int,
     max_candidate: int,
     cleanup_fn: Callable[[], None] | None,
+    verbose: bool,
 ) -> tuple[int, int | None]:
     """Doubles n until it fails or exceeds max_candidate. Returns
     (last_good, first_bad); first_bad is None if nothing failed."""
     last_good, n = 0, start
     while n <= max_candidate:
-        if _attempt(try_fn, n, cleanup_fn):
+        if _attempt(try_fn, n, cleanup_fn, verbose):
             last_good = n
             n *= 2
         else:
@@ -78,12 +84,16 @@ def _grow_to_bracket(
 
 
 def _binary_search(
-    try_fn: Callable[[int], None], last_good: int, first_bad: int, cleanup_fn: Callable[[], None] | None
+    try_fn: Callable[[int], None],
+    last_good: int,
+    first_bad: int,
+    cleanup_fn: Callable[[], None] | None,
+    verbose: bool,
 ) -> int:
     """Narrows (last_good, first_bad) to the exact boundary."""
     while first_bad - last_good > 1:
         mid = (last_good + first_bad) // 2
-        if _attempt(try_fn, mid, cleanup_fn):
+        if _attempt(try_fn, mid, cleanup_fn, verbose):
             last_good = mid
         else:
             first_bad = mid
@@ -117,11 +127,13 @@ def find_max_batch_size(
     start: int = 1,
     memory_limit_bytes: int | None = None,
     cleanup_fn: Callable[[], None] | None = None,
+    verbose: bool = True,
 ) -> int:
     """Largest n for which try_fn(n) succeeds, up to max_candidate.
-    cleanup_fn, if given, runs after every attempt."""
+    cleanup_fn, if given, runs after every attempt. verbose=False
+    disables the per-attempt Log.info() progress lines."""
     with _rlimit_as(memory_limit_bytes):
-        last_good, first_bad = _grow_to_bracket(try_fn, start, max_candidate, cleanup_fn)
+        last_good, first_bad = _grow_to_bracket(try_fn, start, max_candidate, cleanup_fn, verbose)
         if first_bad is None:  # never failed within max_candidate - nothing left to narrow
             return last_good
-        return _binary_search(try_fn, last_good, first_bad, cleanup_fn)
+        return _binary_search(try_fn, last_good, first_bad, cleanup_fn, verbose)

@@ -14,7 +14,9 @@ def make_scaled_hpwl_reward(
     cell_size: float,
 ) -> RewardFn:
     """reward(positions) = -HPWL of real-unit macro centers (grid
-    positions converted via to_real_centers)."""
+    positions converted via to_real_centers). Satisfies RewardFn's
+    grid-unit-input contract - safe to plug straight into training,
+    unlike make_hpwl_reward alone."""
     base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
 
     def reward_fn(positions: jax.Array) -> jax.Array:

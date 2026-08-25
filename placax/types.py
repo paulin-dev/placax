@@ -34,6 +34,13 @@ class EnvParams:
 
 
 RewardFn = Callable[[jax.Array], jax.Array]
+"""reward_fn(positions) -> scalar array. positions: (n_macros, 2) int,
+grid-cell coordinates (lower-left corner) - the raw values EnvState
+tracks, NOT real units. core.step() calls this once, on the final
+positions, after every macro is placed; every other step gets reward 0.
+To compute in real units (e.g. matching a netlist's pin offsets), convert
+first with placax_agents.policy.scale.to_real_centers - or start from
+placax_agents.training.reward.make_scaled_hpwl_reward, which already does."""
 
 SizeMap = dict[str, tuple[float, float]]  # instance or cell-type name -> (width, height)
 NetPin = tuple[str, float, float]  # (macro_name, x_offset, y_offset) - offset from macro center

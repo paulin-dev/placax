@@ -14,6 +14,16 @@ from placax_agents.training.reward import make_scaled_hpwl_reward
 import jax
 
 RewardFnFactory = Callable[[jax.Array, jax.Array, jax.Array, jax.Array, float], RewardFn]
+"""make_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size) -> RewardFn.
+padded_pin_idx: (n_nets, max_pins) int, macro index per pin slot.
+padded_pin_offset: (n_nets, max_pins, 2) float, real-unit pin offset from
+    that macro's center. padding slots are (0, 0), ignored via valid_mask.
+valid_mask: (n_nets, max_pins) bool, True where a pin slot is real, not padding.
+sizes_array: (n_macros, 2) float, real-unit (width, height) per macro.
+cell_size: real units per grid cell.
+The returned RewardFn must still satisfy the grid-unit contract in
+placax.types.RewardFn - convert with to_real_centers before combining
+with these (real-unit) arrays, the way make_scaled_hpwl_reward does."""
 
 
 @dataclass(frozen=True)
@@ -54,7 +64,8 @@ class Benchmark:
         )
 
     def init_policy(self, policy, key: jax.Array):
-        """variables for policy (any nn.Module taking an obs dict), from
-        one fresh observation of this benchmark."""
+        """variables for policy - any flax nn.Module whose .apply matches
+        AlgorithmFn (see placax_agents.types) - from one fresh
+        observation of this benchmark."""
         obs0 = observation(reset(self.params), self.params, self.sizes_array)
         return policy.init(key, obs0)

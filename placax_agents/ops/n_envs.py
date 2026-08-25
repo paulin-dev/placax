@@ -29,7 +29,13 @@ class NEnvsDetector:
     ("module.Name") so a fresh subprocess can rebuild the exact same
     policy/reward without any Python object crossing a process
     boundary - both default to this library's own CNNActorCritic /
-    make_scaled_hpwl_reward, but any importable alternative works.
+    make_scaled_hpwl_reward, but any importable alternative works, with
+    two constraints the subprocess relies on:
+    policy_path must resolve to a zero-argument-constructible flax
+    nn.Module implementing AlgorithmFn (.apply) via .init()/.apply() -
+    it's instantiated as policy_path() with no arguments.
+    make_reward_fn_path, if given, must resolve to a RewardFnFactory
+    (see placax_agents.benchmark.RewardFnFactory).
 
     Each candidate n_envs is tried for real, but in a disposable
     subprocess (see probe_subprocess): JAX's own memory accounting is
@@ -44,12 +50,14 @@ class NEnvsDetector:
         make_reward_fn_path: str | None = None,
         max_candidate: int = 64,
         timeout_s: float = 90.0,
+        verbose: bool = True,
     ):
         self.benchmark_dir = benchmark_dir
         self.policy_path = policy_path
         self.make_reward_fn_path = make_reward_fn_path
         self.max_candidate = max_candidate
         self.timeout_s = timeout_s
+        self.verbose = verbose
 
     def detect(self) -> tuple[str, int]:
         """Returns (mode, n_envs). Only searches if parallel is worth
@@ -57,7 +65,7 @@ class NEnvsDetector:
         mode = recommended_parallelism_mode()
         if mode == "sequential":
             return "sequential", 1
-        n_envs = find_max_batch_size(self._try_n_envs, max_candidate=self.max_candidate)
+        n_envs = find_max_batch_size(self._try_n_envs, max_candidate=self.max_candidate, verbose=self.verbose)
         return "parallel", max(n_envs, 1)
 
     def resolve(self, override: int | None = None) -> tuple[str, int]:

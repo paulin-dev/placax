@@ -18,7 +18,10 @@ def hpwl(
 ) -> jax.Array:
     """sum over nets of (bbox width + height); a net with 0 valid pins
     contributes 0 (guarded explicitly - sentinels alone would give a
-    large negative value)."""
+    large negative value). positions: (n_macros, 2) float, REAL units -
+    combined directly with padded_pin_offset (also real units), so
+    passing grid-cell coordinates here silently gives a meaningless
+    number rather than an error."""
     pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset  # pin centers
     # Padding slots are masked to +-_BIG so they can never win the min/max.
     lo = jnp.where(valid_mask[..., None], pin_xy, _BIG).min(axis=1)
@@ -84,7 +87,10 @@ def wiremask(
 def make_hpwl_reward(
     padded_pin_idx: jax.Array, padded_pin_offset: jax.Array, valid_mask: jax.Array
 ) -> RewardFn:
-    """Builds reward_fn(positions) = -HPWL(positions)."""
+    """Builds reward_fn(positions) = -HPWL(positions). positions must be
+    real units (see hpwl()) - this does NOT satisfy RewardFn's grid-unit
+    contract on its own; use make_scaled_hpwl_reward to plug straight
+    into training, or convert positions yourself before calling this."""
 
     def reward_fn(positions: jax.Array) -> jax.Array:
         return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask)
