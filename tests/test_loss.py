@@ -57,7 +57,7 @@ def test_ppo_loss_is_finite() -> None:
         trajectory["reward"], trajectory["value"], trajectory["done"], next_value=jnp.array(0.0)
     )
 
-    loss = ppo_loss(variables, policy.apply, trajectory, advantages, returns, sizes_array, 1.0, params)
+    loss = ppo_loss(variables, policy.apply, trajectory, advantages, returns, 1.0, params)
     assert jnp.isfinite(loss)
 
 
@@ -91,7 +91,7 @@ def test_ppo_loss_accepts_a_custom_value_loss_fn() -> None:
     )
 
     loss = ppo_loss(
-        variables, policy.apply, trajectory, advantages, returns, sizes_array, 1.0, params,
+        variables, policy.apply, trajectory, advantages, returns, 1.0, params,
         value_loss_fn=huber_value_loss,
     )
     assert jnp.isfinite(loss)
@@ -114,7 +114,7 @@ def test_ppo_loss_gradient_is_finite_and_nonzero() -> None:
     )
 
     grads = jax.grad(ppo_loss)(
-        variables, policy.apply, trajectory, advantages, returns, sizes_array, 1.0, params
+        variables, policy.apply, trajectory, advantages, returns, 1.0, params
     )
     leaves = jax.tree_util.tree_leaves(grads)
     assert all(jnp.isfinite(g).all() for g in leaves)

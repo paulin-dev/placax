@@ -34,3 +34,11 @@ def test_benchmark_load_accepts_a_custom_order_fn(tmp_path) -> None:
     benchmark = Benchmark.load(benchmark_dir, grid=4, order_fn=area_desc_order)
     assert benchmark.sizes_array[0].tolist() == [10.0, 10.0]  # "zbig" placed first by area_desc_order
     assert benchmark.sizes_array[1].tolist() == [1.0, 1.0]
+
+
+def test_benchmark_load_accepts_a_macro_budget(tmp_path) -> None:
+    benchmark_dir = _write_tiny_bookshelf(tmp_path)
+    benchmark = Benchmark.load(benchmark_dir, grid=4, order_fn=area_desc_order, macro_budget=1)
+    assert benchmark.params.n_macros == 1
+    assert benchmark.sizes_array.shape == (1, 2)
+    assert benchmark.sizes_array[0].tolist() == [10.0, 10.0]  # only "zbig" (the larger one) kept

@@ -1,6 +1,6 @@
 """Turns EnvState into the dict a policy consumes."""
 from placax.extras.render import render  # must precede jax imports
-from placax.extras.rewards import wiremask
+from placax.extras.rewards import lookahead_wiremasks
 from placax.types import EnvParams, EnvState
 
 import jax
@@ -47,21 +47,29 @@ def make_wiremask_observation(
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
     base_state_fn=observation,
+    lookahead: int = 1,
 ):
-    """Wraps any StateFn, adding a "wiremask" key: (grid_x, grid_y) float,
-    the per-cell HPWL increase from placing the current macro there (see
-    extras.rewards.wiremask()). Closes over one benchmark's netlist
-    arrays - build once per benchmark, pass the result as state_fn to
+    """Wraps any StateFn, adding two keys: "wiremask" (grid_x, grid_y)
+    float, the per-cell HPWL increase from placing the CURRENT macro
+    there, and "lookahead_wiremasks" (lookahead, grid_x, grid_y) float,
+    the same map previewed for each of the next `lookahead` macros
+    against today's canvas (lookahead=1: identical content to "wiremask",
+    just with a leading axis) - see extras.rewards.wiremask()/
+    lookahead_wiremasks(). Closes over one benchmark's netlist arrays -
+    build once per benchmark, pass the result as state_fn to
     collect_rollout/train_*/evaluate. Generic: pairs with any base
-    StateFn and any policy that reads the extra "wiremask" key, e.g.
-    policy.architectures.wiremask_cnn.WiremaskCNNActorCritic."""
+    StateFn and any policy that reads these extra keys, e.g.
+    policy.architectures.wiremask_cnn.WiremaskCNNActorCritic or
+    policy.architectures.resnet_cnn.ResNetCoarseFineActorCritic."""
 
     def state_fn(state: EnvState, params: EnvParams, sizes_array: jax.Array) -> dict:
         obs = base_state_fn(state, params, sizes_array)
-        obs["wiremask"] = wiremask(
+        maps = lookahead_wiremasks(
             state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-            macro_net_idx, macro_net_offset, macro_net_valid,
+            macro_net_idx, macro_net_offset, macro_net_valid, lookahead,
         )
+        obs["wiremask"] = maps[0]
+        obs["lookahead_wiremasks"] = maps
         return obs
 
     return state_fn

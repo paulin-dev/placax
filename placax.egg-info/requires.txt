@@ -11,3 +11,6 @@ jax[cuda12]
 
 [dev]
 pytest
+
+[resnet]
+flaxmodels

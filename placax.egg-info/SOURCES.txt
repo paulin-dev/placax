@@ -17,9 +17,11 @@ placax/extras/render.py
 placax/extras/rewards.py
 placax/netlist/__init__.py
 placax/netlist/bookshelf.py
+placax/netlist/budget.py
 placax/netlist/def_reader.py
 placax/netlist/def_writer.py
 placax/netlist/lef.py
+placax/netlist/order.py
 placax/netlist/padding.py
 placax/netlist/protobuf_reader.py
 placax_agents/__init__.py
@@ -37,6 +39,8 @@ placax_agents/policy/observation.py
 placax_agents/policy/scale.py
 placax_agents/policy/architectures/__init__.py
 placax_agents/policy/architectures/cnn.py
+placax_agents/policy/architectures/resnet_cnn.py
+placax_agents/policy/architectures/wiremask_cnn.py
 placax_agents/training/__init__.py
 placax_agents/training/reward.py
 placax_agents/training/rollout.py
@@ -62,7 +66,9 @@ placax_tools/openroad/validator.py
 tests/test_action.py
 tests/test_agents_integration.py
 tests/test_autotune.py
+tests/test_benchmark.py
 tests/test_bookshelf.py
+tests/test_budget.py
 tests/test_cell_placer.py
 tests/test_checkpoint.py
 tests/test_cnn.py
@@ -81,6 +87,7 @@ tests/test_netlist.py
 tests/test_normalize.py
 tests/test_observation.py
 tests/test_optimizer_step.py
+tests/test_order.py
 tests/test_padding.py
 tests/test_parallel_train.py
 tests/test_parallelism_mode.py
@@ -88,6 +95,7 @@ tests/test_policy.py
 tests/test_ppo_config.py
 tests/test_protobuf_reader.py
 tests/test_render.py
+tests/test_resnet_cnn.py
 tests/test_resumable_train.py
 tests/test_reward.py
 tests/test_rewards.py

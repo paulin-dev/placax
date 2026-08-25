@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from placax.core import reset  # must precede jax imports
 from placax.netlist import load_netlist
+from placax.netlist.budget import truncate_to_budget
 from placax.netlist.order import alphabetical_order
 from placax.netlist.padding import build_padded_arrays
 from placax.types import EnvParams, Nets, OrderFn, RewardFn, SizeMap
@@ -48,12 +49,19 @@ class Benchmark:
         grid: int = 64,
         make_reward_fn: RewardFnFactory = make_scaled_hpwl_reward,
         order_fn: OrderFn = alphabetical_order,
+        macro_budget: int | None = None,
     ) -> "Benchmark":
         """Loads benchmark_dir (any supported netlist format). Pass
         make_reward_fn for a different reward - same signature as
         make_scaled_hpwl_reward. Pass order_fn for a different placement
-        order - same signature as placax.netlist.order.alphabetical_order."""
+        order - same signature as placax.netlist.order.alphabetical_order.
+        macro_budget, if given, keeps only the first macro_budget macros
+        per order_fn (see netlist.budget.truncate_to_budget) - e.g.
+        MaskPlace's `placed_num_macro`: train on only the N most important
+        macros instead of the whole netlist."""
         macro_sizes, nets = load_netlist(benchmark_dir)  # raw, name-keyed
+        if macro_budget is not None:
+            macro_sizes, nets = truncate_to_budget(macro_sizes, nets, macro_budget, order_fn=order_fn)
         # Pad/index into the fixed-shape arrays JAX code operates on.
         _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
             macro_sizes, nets, order_fn=order_fn

@@ -13,3 +13,5 @@ Provides-Extra: cuda
 Requires-Dist: jax[cuda13]; extra == "cuda"
 Provides-Extra: cuda12
 Requires-Dist: jax[cuda12]; extra == "cuda12"
+Provides-Extra: resnet
+Requires-Dist: flaxmodels; extra == "resnet"

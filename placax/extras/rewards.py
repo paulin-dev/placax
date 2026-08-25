@@ -65,10 +65,17 @@ def wiremask(
     macro_net_idx: jax.Array,
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
+    macro_idx: jax.Array | int | None = None,
 ) -> jax.Array:
     """(grid_x, grid_y) array: wiremask(x, y) = HPWL(hypothetical at
-    x, y) - HPWL(baseline), for placing the macro at state.step."""
-    idx = state.step
+    x, y) - HPWL(baseline), for placing macro_idx there. macro_idx
+    defaults to state.step (the macro actually about to be placed); pass
+    state.step + k to preview a macro further ahead in a lookahead window
+    (see lookahead_wiremasks below) - the baseline (which macros already
+    have a real position) always stays keyed to state.step itself, not
+    macro_idx, so previewing a later macro never pretends an earlier,
+    still-undecided one has been placed."""
+    idx = state.step if macro_idx is None else macro_idx
     baseline_lo, baseline_hi, baseline_total = _wiremask_baseline(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask
     )
@@ -90,6 +97,36 @@ def wiremask(
     xs, ys = jnp.meshgrid(jnp.arange(params.grid_x), jnp.arange(params.effective_grid_y), indexing="ij")
     coords = jnp.stack([xs.ravel(), ys.ravel()], axis=1)
     return jax.vmap(cost_at)(coords).reshape(params.grid_x, params.effective_grid_y) - baseline_total
+
+
+def lookahead_wiremasks(
+    state: EnvState,
+    params: EnvParams,
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    macro_net_idx: jax.Array,
+    macro_net_offset: jax.Array,
+    macro_net_valid: jax.Array,
+    horizon: int,
+) -> jax.Array:
+    """(horizon, grid_x, grid_y) array: wiremask() for each of the next
+    `horizon` macros (state.step, state.step+1, ...), all previewed
+    against today's canvas - none of them are placed yet, so they all
+    share the same baseline. horizon is a static Python int, so the
+    shape stays fixed under jit; slots past the last macro are zeroed."""
+    offsets = jnp.arange(horizon)
+    in_range = (state.step + offsets) < params.n_macros
+    macro_idxs = jnp.clip(state.step + offsets, 0, params.n_macros - 1)
+
+    def one(macro_idx: jax.Array, keep: jax.Array) -> jax.Array:
+        wm = wiremask(
+            state, params, padded_pin_idx, padded_pin_offset, valid_mask,
+            macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=macro_idx,
+        )
+        return wm * keep
+
+    return jax.vmap(one)(macro_idxs, in_range)
 
 
 def make_hpwl_reward(

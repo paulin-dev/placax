@@ -1,5 +1,5 @@
 from placax.netlist.padding import build_macro_net_index  # noqa: F401  must precede jax imports
-from placax.extras.rewards import hpwl, make_hpwl_reward, wiremask  # noqa: F401
+from placax.extras.rewards import hpwl, lookahead_wiremasks, make_hpwl_reward, wiremask  # noqa: F401
 from placax.types import EnvParams, EnvState  # noqa: F401
 
 import jax.numpy as jnp
@@ -131,6 +131,78 @@ def test_wiremask_excludes_not_yet_placed_macros() -> None:
     # this net has fewer than 2 "relevant" pins (macro 2 excluded), so it
     # contributes nothing anywhere on the map - should be all zeros
     assert (wm == 0.0).all()
+
+
+def test_wiremask_macro_idx_previews_a_different_macro_than_state_step() -> None:
+    # 3 macros: macro 0 placed at (1,1), macro 1 about to be placed
+    # (state.step=1). Net A: macros 0,1 (same as the hand-calc test).
+    # Net B: macros 1,2. macro_idx=1 (the default) must match the
+    # existing hand-calculated values exactly.
+    params = EnvParams(grid=4, n_macros=3)
+    positions = jnp.array([[1, 1], [-1, -1], [-1, -1]])
+    state = EnvState(positions=positions, step=1)
+    padded_pin_idx = jnp.array([[0, 1], [1, 2]])
+    padded_pin_offset = jnp.zeros((2, 2, 2))
+    valid_mask = jnp.array([[True, True], [True, True]])
+    macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
+        padded_pin_idx, padded_pin_offset, valid_mask, n_macros=3
+    )
+
+    wm_1 = wiremask(
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask,
+        macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=1,
+    )
+    assert wm_1[1, 1] == 0.0 and wm_1[3, 3] == 4.0 and wm_1[0, 0] == 2.0  # Net A only, as before
+
+    # Previewing macro 2 (Net B's OTHER pin) must NOT pretend macro 1 has
+    # been placed just because we're asking about a later macro - the
+    # baseline stays keyed to state.step (only macro 0 is real), so Net B
+    # still has fewer than 2 real pins and contributes nothing anywhere.
+    wm_2 = wiremask(
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask,
+        macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=2,
+    )
+    assert (wm_2 == 0.0).all()
+
+
+def test_lookahead_wiremasks_previews_multiple_macros_against_the_same_baseline() -> None:
+    params = EnvParams(grid=4, n_macros=3)
+    positions = jnp.array([[1, 1], [-1, -1], [-1, -1]])
+    state = EnvState(positions=positions, step=1)
+    padded_pin_idx = jnp.array([[0, 1], [1, 2]])
+    padded_pin_offset = jnp.zeros((2, 2, 2))
+    valid_mask = jnp.array([[True, True], [True, True]])
+    macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
+        padded_pin_idx, padded_pin_offset, valid_mask, n_macros=3
+    )
+
+    maps = lookahead_wiremasks(
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask,
+        macro_net_idx, macro_net_offset, macro_net_valid, horizon=2,
+    )
+    assert maps.shape == (2, 4, 4)
+    assert maps[0, 1, 1] == 0.0 and maps[0, 3, 3] == 4.0  # macro 1's map, matches wiremask() directly
+    assert (maps[1] == 0.0).all()  # macro 2's map, per the decoupling test above
+
+
+def test_lookahead_wiremasks_zero_pads_past_the_last_macro() -> None:
+    params = EnvParams(grid=4, n_macros=2)
+    positions = jnp.array([[1, 1], [-1, -1]])
+    state = EnvState(positions=positions, step=1)  # only 1 macro left to place
+    padded_pin_idx = jnp.array([[0, 1]])
+    padded_pin_offset = jnp.zeros((1, 2, 2))
+    valid_mask = jnp.array([[True, True]])
+    macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
+        padded_pin_idx, padded_pin_offset, valid_mask, n_macros=2
+    )
+
+    maps = lookahead_wiremasks(
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask,
+        macro_net_idx, macro_net_offset, macro_net_valid, horizon=3,
+    )
+    assert maps.shape == (3, 4, 4)
+    assert maps[0, 3, 3] == 4.0  # macro 1's real map
+    assert (maps[1] == 0.0).all() and (maps[2] == 0.0).all()  # past the last macro -> zeroed
 
 
 def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> None:

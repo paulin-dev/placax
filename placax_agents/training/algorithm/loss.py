@@ -41,7 +41,6 @@ def ppo_loss(
     trajectory: dict,
     advantages: jax.Array,
     returns: jax.Array,
-    sizes_array: jax.Array,
     cell_size: float,
     params: EnvParams,
     clip_eps: float = 0.2,
@@ -50,15 +49,19 @@ def ppo_loss(
     value_loss_fn: ValueLossFn = mse_value_loss,
 ) -> jax.Array:
     """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
-    over one trajectory dict (as produced by collect_rollout). value_loss_fn
-    swaps the critic's loss (default mse_value_loss; huber_value_loss above
-    is a drop-in alternative)."""
-    macro_sizes = to_grid_units(sizes_array, cell_size)
+    over one trajectory dict (as produced by collect_rollout, or any
+    reordered/shuffled subset of one - each step's macro size comes from
+    its own recorded obs["current_macro_size"], not from position within
+    the array, so this is safe to call on shuffled minibatches too, e.g.
+    from loops.buffered_train). value_loss_fn swaps the critic's loss
+    (default mse_value_loss; huber_value_loss above is a drop-in
+    alternative)."""
 
-    def per_step(obs, action, old_log_prob, advantage, ret, macro_size):
+    def per_step(obs, action, old_log_prob, advantage, ret):
         # Recompute the legal mask from the saved obs so the ratio compares
         # probabilities under the same distribution used at rollout time.
         logits, value = policy_apply_fn(policy_params, obs)
+        macro_size = to_grid_units(obs["current_macro_size"], cell_size)
         masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size)
         new_log_prob = action_log_prob(masked_logits, action)
 
@@ -70,7 +73,6 @@ def ppo_loss(
         return policy_loss, value_loss, _entropy(masked_logits)
 
     policy_losses, value_losses, entropies = jax.vmap(per_step)(
-        trajectory["obs"], trajectory["action"], trajectory["log_prob"],
-        advantages, returns, macro_sizes,
+        trajectory["obs"], trajectory["action"], trajectory["log_prob"], advantages, returns,
     )
     return policy_losses.mean() + value_coef * value_losses.mean() - entropy_coef * entropies.mean()

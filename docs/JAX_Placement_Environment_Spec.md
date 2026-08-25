@@ -4,6 +4,10 @@
 
 **v4 changes:** Sections 4, 4.1, 4.2, 5, and 7 are rewritten to match the shipped code exactly — real file paths, real function signatures, no more illustrative pseudocode that drifted from the implementation. Where the vision described here goes further than what's built (SHAC/ACO/GA training loops, offline pretraining, the cell-placer/validator tool integration), that's now called out explicitly as **not yet implemented** rather than left ambiguous. Section 1's "no part hard-coded" claim, which was aspirational in v3, is now actually true for every axis inside the kernel's reach (reward, placement order, lookahead, action masking, observation, policy, value loss) — see Section 5.
 
+**v4.1 additions:** a multi-macro lookahead wiremask (`extras.rewards.lookahead_wiremasks`, `macro_idx` on `wiremask()`), a first-class macro-count budget (`netlist/budget.py`, `Benchmark.load(macro_budget=...)`), a `maskplace_ppo_config()` preset (`training/algorithm/config.py`), and a pretrained-ImageNet-ResNet-capable architecture (`policy/architectures/resnet_cnn.py`, optional `placax[resnet]` extra) — closing the remaining items the companion MaskPlace-comparison doc had flagged as open.
+
+**v4.2 additions:** `resnet_cnn.py` gained `build_pretrained_resnet_backbone()` (real ImageNet weights, with a `ckpt_dir` cache/weights-path story) and `extract_resnet_backbone_weights()`/`load_resnet_backbone_weights()` (save/load *any* local backbone checkpoint into an already-initialized policy, independent of flaxmodels' own download mechanism). `ppo_loss` was generalized to read each transition's own `obs["current_macro_size"]` instead of indexing a `sizes_array` positionally by trajectory step — the latter silently assumed "trajectory position i places macro i," true for one temporally-ordered episode but not for a shuffled minibatch. That generalization is what makes the new `training/loops/buffered_train.py` (`train_buffered`) correct: a third training-loop shape — multi-episode buffer + minibatch-epoch updates — matching MaskPlace's own PPO procedure, closing the one item v4.1's comparison doc left open.
+
 ---
 
 ## 1. Executive summary
@@ -136,8 +140,10 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
         padding.py                   build_padded_arrays()/build_macro_net_index() — order_fn plugs in here
         order.py                     OrderFn implementations: alphabetical_order (default),
                                       area_desc_order, connectivity_order (Section 5.1b)
+        budget.py                    truncate_to_budget() — keep only the first N macros by order_fn
     extras/
-        rewards.py                   hpwl(), wiremask(), make_hpwl_reward(padded_pin_idx, ..., dense=)
+        rewards.py                   hpwl(), wiremask() (macro_idx=), lookahead_wiremasks(),
+                                      make_hpwl_reward(padded_pin_idx, ..., dense=)
         masks.py                     occupancy_mask, boundary_mask, quality_mask, lookahead_illegal_masks
         render.py                    render() — boolean canvas from placed macro footprints
         mst.py                       Steiner-tree/RSMT cost (Prim's algorithm) — an alternative cost metric
@@ -152,17 +158,30 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
         architectures/
             cnn.py                      CNNActorCritic
             wiremask_cnn.py             WiremaskCNNActorCritic (pairs with make_wiremask_observation)
+            resnet_cnn.py                ResNetCoarseFineActorCritic — injected (optionally ImageNet-
+                                          pretrained) ResNet coarse branch + fine branch, MaskPlace's own
+                                          shape (Section 8); build_untrained_resnet_backbone() (offline,
+                                          tests/CI)/build_pretrained_resnet_backbone() (real weights,
+                                          ckpt_dir=) construct one, extract_/load_resnet_backbone_weights()
+                                          save/load any local backbone checkpoint post-init; needs the
+                                          optional `placax[resnet]` extra only if actually exercised
     training/
         reward.py                     make_scaled_hpwl_reward(..., dense=) — the grid-unit RewardFn factory
         rollout.py                    collect_rollout() — one episode as a lax.scan
         algorithm/
-            config.py                   PPOConfig (gamma, lam, clip_eps, value_coef, entropy_coef, value_loss_fn)
+            config.py                   PPOConfig (gamma, lam, clip_eps, value_coef, entropy_coef, value_loss_fn);
+                                         maskplace_ppo_config() preset, MASKPLACE_LEARNING_RATE
             gae.py                      compute_gae()
-            loss.py                     ppo_loss(), mse_value_loss(), huber_value_loss()
+            loss.py                     ppo_loss() (reads each transition's own current_macro_size, so it's
+                                         safe to call on a reordered/shuffled minibatch), mse_value_loss(),
+                                         huber_value_loss()
             normalize.py, optimizer_step.py, running_stats.py
         loops/
-            train.py                    train_sequential() — one episode, one update, repeated
-            parallel_train.py           train_parallel() — n_envs episodes via vmap, one averaged update
+            train.py                    train_sequential() — one episode, one full-batch update, repeated
+            parallel_train.py           train_parallel() — n_envs episodes via vmap, one averaged full-batch update
+            buffered_train.py           train_buffered() — n_episodes into one buffer, ppo_epochs of shuffled
+                                         batch_size minibatch updates over it (MaskPlace's own PPO procedure,
+                                         generalized - Section 8)
             run.py, common.py
     ops/
         evaluate.py, checkpoint.py, resumable_train.py, autotune.py, n_envs.py
@@ -187,7 +206,7 @@ scripts/                         # download_benchmarks.py, run_training.py, comp
 
 Originally treated as one swappable slot (`agent_fn`), these are two separate axes, matching `placax_agents/types.py`'s `AlgorithmFn`/`StateFn` split. Welding them into a single function means you can't cleanly ask "does switching to a GNN state help PPO specifically" without risking that whatever else changed alongside the state encoding also affected the result — exactly the kind of confound most placement papers don't isolate (Section 1).
 
-**Algorithm backend** (`AlgorithmFn = Callable[..., tuple[action_logits, value]]`, e.g. `CNNActorCritic.apply` in `policy/architectures/cnn.py`): as shipped, **PPO is the only algorithm implemented** (Section 4.2) — the interface argument that ACO/GA/other agents fit the same kernel without modification is design reasoning from the research plan (Section 12), not something with running code behind it in this codebase today. `Benchmark.init_policy(policy, key)` accepts any Flax module whose `.apply` matches `AlgorithmFn`, not just `CNNActorCritic` — `WiremaskCNNActorCritic` (`policy/architectures/wiremask_cnn.py`, adds a wiremask input channel) is the second one shipped, proof the slot is genuinely pluggable rather than sized to fit one network.
+**Algorithm backend** (`AlgorithmFn = Callable[..., tuple[action_logits, value]]`, e.g. `CNNActorCritic.apply` in `policy/architectures/cnn.py`): as shipped, **PPO is the only algorithm implemented** (Section 4.2) — the interface argument that ACO/GA/other agents fit the same kernel without modification is design reasoning from the research plan (Section 12), not something with running code behind it in this codebase today. `Benchmark.init_policy(policy, key)` accepts any Flax module whose `.apply` matches `AlgorithmFn`, not just `CNNActorCritic`. Three are shipped: `WiremaskCNNActorCritic` (`policy/architectures/wiremask_cnn.py`, adds a wiremask input channel), and `ResNetCoarseFineActorCritic` (`policy/architectures/resnet_cnn.py`) — a fine local branch merged with a coarse branch built on an *injected* backbone. Three ways to get that backbone, increasing in fidelity: `build_untrained_resnet_backbone()` (offline, no network, what this module's own tests use), `build_pretrained_resnet_backbone(ckpt_dir=...)` (real ImageNet weights — downloads once, `ckpt_dir` doubles as a pre-placed-weights cache path to skip the download entirely), or `flaxmodels.ResNet18(pretrained="imagenet")` directly. Weights aren't limited to what flaxmodels itself can fetch either: `extract_resnet_backbone_weights()`/`load_resnet_backbone_weights()` save and reload just the backbone's own variables (via `ops.checkpoint`) from any local file — a previously fine-tuned placax checkpoint, a hand-converted torchvision export, anything with the same shape — independent of flaxmodels' own download/caching mechanism. The backbone runs in eval mode (`train=False`) always, not a config knob: every call site in this codebase applies the policy to one observation at a time (even under `vmap`, which traces a per-example function), so BatchNorm in train mode would compute statistics over a batch of 1 — a correctness constraint, not a missing feature. The backbone being injected rather than baked in means the pretrained-weights dependency only bites for whoever actually wants it — proof the slot is genuinely pluggable rather than sized to fit one network, in both directions (adding a channel, and adding a heavyweight backbone).
 
 **State representation** (`StateFn = Callable[..., dict]`, e.g. `observation()` in `policy/observation.py`): a pure function applied *before* the policy sees anything, called by the Tier 2 training loop (`collect_rollout`, `train_sequential`/`train_parallel`), not by the kernel. Two keys are the only ones the training/eval loops themselves require — `"canvas"` and `"current_macro_size"` — everything else is convention, not requirement. The shipped `observation()` also exposes `positions`/`sizes_array`/`placed_mask`/`step` (for non-image policies, e.g. a GNN) and `lookahead_sizes` (an `(lookahead, 2)` array of upcoming macro sizes, `lookahead=1` by default — see `lookahead_sizes()`, static-shaped under jit). `make_wiremask_observation(...)` wraps any base `StateFn`, adding a `"wiremask"` key computed from `extras.rewards.wiremask()` — a decorator pattern for composing observation features rather than one fixed shape:
 
@@ -197,10 +216,15 @@ from placax_agents.policy.observation import observation, make_wiremask_observat
 state_fn = make_wiremask_observation(
     padded_pin_idx, padded_pin_offset, valid_mask,
     macro_net_idx, macro_net_offset, macro_net_valid,
-    base_state_fn=observation,
+    base_state_fn=observation, lookahead=2,
 )
-# state_fn(state, params, sizes_array) -> {..., "wiremask": (grid_x, grid_y) float}
+# state_fn(state, params, sizes_array) -> {
+#   ..., "wiremask": (grid_x, grid_y) float,                    # current macro
+#   "lookahead_wiremasks": (2, grid_x, grid_y) float,            # current + next macro, same baseline
+# }
 ```
+
+`wiremask()` itself takes an optional `macro_idx` (defaults to `state.step`) so a caller can preview any macro's candidate map against today's canvas without pretending an earlier, still-undecided macro has been placed — `lookahead_wiremasks(..., horizon)` is exactly `jax.vmap` over that, zero-padded past the last macro. This is what makes MaskPlace's second lookahead channel (Section 8) expressible at all, not just its position mask.
 
 ### 5.1b The macro placement order — a third axis, added after v3
 
@@ -209,6 +233,8 @@ Not present in the original design (v3 treated placement order as fixed/alphabet
 - `alphabetical_order` — deterministic, no opinion on quality. The default, matching the historical (pre-v4) behavior.
 - `area_desc_order` — largest footprint first, a common placement heuristic.
 - `connectivity_order` — breadth-first by shared nets, starting from the highest-degree macro; generalizes the topology-based ordering used by MaskPlace (Section 8) to any netlist, not specific to that one paper's implementation.
+
+**Macro budget** (`netlist/budget.py`'s `truncate_to_budget(macro_sizes, nets, budget, order_fn=...)`, plugged in via `Benchmark.load(..., macro_budget=...)`): keeps only the first `budget` macros per whatever `order_fn` decided, dropping every other macro and any net left with fewer than 2 real pins — MaskPlace's `--pnm` (place only the top-N most important macros, score HPWL over just those), generalized as a netlist-level transform composable with any `OrderFn`, not a training-script-only flag.
 
 ### 5.2 The reward / cost function, and its density
 
@@ -458,7 +484,7 @@ Checked the single-kernel design against 16 real tools/papers beyond the four di
 
 | Tool | Category | Fits via `step()`/`reset()`? |
 |---|---|---|
-| MaskPlace | CNN + PPO, sequential | Yes — and as of v4, its specific *mechanism* (not just "a CNN+PPO agent fits") composes from shipped pieces: `dense=True` reward (Section 5.2), `connectivity_order` (Section 5.1b), `make_wiremask_observation` + `WiremaskCNNActorCritic` + `quality_mask` for wirelength-guided action masking (Section 5.1/5.2). See the companion comparison doc for what still doesn't match (network capacity, exact hyperparameters) even with all of that wired up. |
+| MaskPlace | CNN + PPO, sequential | Yes — and as of v4.2, its specific *mechanism*, not just "a CNN+PPO agent fits," composes entirely from shipped pieces: `dense=True` reward, `connectivity_order`, `macro_budget` (its `--pnm`), wirelength-guided action masking (`make_wiremask_observation` + `quality_mask`), a 2-macro lookahead wiremask (`lookahead_wiremasks`), `maskplace_ppo_config()` + `MASKPLACE_LEARNING_RATE` for its hyperparameters, `ResNetCoarseFineActorCritic` (with a real ImageNet-pretrained backbone) for its network, and `train_buffered` for its multi-episode-buffer + minibatch-epoch PPO update procedure — the one item that used to be a training-loop-*shape* difference no config preset could close. What's left is genuinely just running it: nobody has yet trained the assembled pipeline end to end and compared the resulting HPWL to MaskPlace's published numbers. See the companion comparison doc for the full, up-to-date diff. |
 | AlphaChip / Circuit Training | GNN + PPO, sequential | Yes — `agent_fn` |
 | EfficientPlace | RL, sequential | Yes — `agent_fn` |
 | DeepTH | GNN + policy gradient, sequential | Yes — `agent_fn` |
@@ -589,4 +615,5 @@ Realistic target: an applied or workshop track at an ML-for-EDA-adjacent venue (
 - **RewardFn** (added v4): `(old_positions, new_positions, old_placed, new_placed) -> scalar`, called by `step()` every step. Sparse (fires once, at done) and dense (fires every step) reward are both just `RewardFn` implementations, distinguished by a `dense` flag on the factories that build them (Section 5.2), not by different code in `step()`.
 - **OrderFn** (added v4): `(macro_sizes, nets) -> macro names in placement order` — decides which row index (and therefore which point in the episode) each macro gets. Plugs into `build_padded_arrays`/`Benchmark.load` (Section 5.1b).
 - **StateFn / AlgorithmFn** (`placax_agents/types.py`): the two independent swappable-axis contracts from Section 5.1 — `StateFn` builds an observation dict from `EnvState`, `AlgorithmFn` turns that dict into `(action_logits, value)`.
-- **Wiremask:** per-candidate-cell HPWL increase from placing the current macro there — `extras.rewards.wiremask()`. The guidance signal MaskPlace's policy conditions on and its action masking restricts to (Section 8); exposed as an optional observation channel via `make_wiremask_observation`, not baked into the default `observation()`.
+- **Wiremask:** per-candidate-cell HPWL increase from placing a macro there — `extras.rewards.wiremask()` (current macro, or any `macro_idx`) / `lookahead_wiremasks()` (a window of upcoming macros, same baseline). The guidance signal MaskPlace's policy conditions on and its action masking restricts to (Section 8); exposed as optional observation channels via `make_wiremask_observation`, not baked into the default `observation()`.
+- **Macro budget** (added v4.1): `netlist/budget.py`'s `truncate_to_budget()` — keep only the first N macros by some `OrderFn`, dropping the rest from both the macro set and every net. MaskPlace's `--pnm`, generalized (Section 5.1b).

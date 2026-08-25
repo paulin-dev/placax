@@ -52,7 +52,7 @@ def parallel_train_step(
         # Per-episode PPO loss, averaged into the one gradient update.
         per_episode_losses = jax.vmap(
             lambda traj, adv, ret: ppo_loss(
-                policy_params, policy_apply_fn, traj, adv, ret, sizes_array, cell_size, params,
+                policy_params, policy_apply_fn, traj, adv, ret, cell_size, params,
                 clip_eps=ppo_config.clip_eps, value_coef=ppo_config.value_coef,
                 entropy_coef=ppo_config.entropy_coef, value_loss_fn=ppo_config.value_loss_fn,
             )

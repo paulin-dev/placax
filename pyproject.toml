@@ -14,6 +14,7 @@ dependencies = [
 dev = ["pytest"]
 cuda = ["jax[cuda13]"]
 cuda12 = ["jax[cuda12]"]
+resnet = ["flaxmodels"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
