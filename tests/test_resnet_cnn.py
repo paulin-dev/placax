@@ -15,6 +15,7 @@ from placax_agents.policy.observation import make_wiremask_observation, observat
 
 import jax
 import jax.numpy as jnp
+import optax
 import pytest
 from jax import random
 
@@ -67,6 +68,48 @@ def test_resnet_actor_critic_step_embedding_critic_variant() -> None:
     action_logits, value = policy.apply(variables, obs)
     assert action_logits.shape == (params.grid_x, params.effective_grid_y)
     assert value.shape == ()
+
+
+def test_step_embedding_critic_params_are_disjoint_from_the_actor() -> None:
+    # The property split_optimizer's independence relies on: no top-level
+    # param name both starts with "critic_" and contributes to
+    # action_logits' computation graph.
+    params, obs = _toy_obs()
+    policy = ResNetCoarseFineActorCritic(
+        resnet_backbone=build_untrained_resnet_backbone(), params=params, cell_size=1.0,
+        critic_style="step_embedding", max_episode_macros=16,
+    )
+    variables = policy.init(random.PRNGKey(0), obs)
+    top_level_names = set(variables["params"])
+    critic_names = {name for name in top_level_names if name.startswith("critic_")}
+    assert critic_names  # the critic really is named this way
+    assert critic_names <= {"critic_step_embed", "critic_hidden", "critic_value"}
+    assert "resnet_backbone" not in critic_names  # the actor's backbone isn't accidentally swept in
+
+
+def test_maskplace_optimizer_updates_a_real_policys_variables() -> None:
+    from placax_agents.training.algorithm.config import maskplace_optimizer
+
+    params, obs = _toy_obs()
+    policy = ResNetCoarseFineActorCritic(
+        resnet_backbone=build_untrained_resnet_backbone(), params=params, cell_size=1.0,
+        critic_style="step_embedding", max_episode_macros=16,
+    )
+    variables = policy.init(random.PRNGKey(0), obs)
+
+    def toy_loss(v):
+        action_logits, value = policy.apply(v, obs)
+        return action_logits.sum() + value
+
+    grads = jax.grad(toy_loss)(variables)
+    optimizer = maskplace_optimizer(learning_rate=0.01)
+    opt_state = optimizer.init(variables)
+    updates, _new_state = optimizer.update(grads, opt_state, variables)
+    new_variables = optax.apply_updates(variables, updates)
+
+    old_leaves = jax.tree_util.tree_leaves(variables)
+    new_leaves = jax.tree_util.tree_leaves(new_variables)
+    assert any(not jnp.allclose(o, n) for o, n in zip(old_leaves, new_leaves))
 
 
 def test_build_untrained_resnet_backbone_uses_no_pretrained_weights() -> None:

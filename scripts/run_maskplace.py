@@ -8,8 +8,11 @@ itself - built entirely from placax's own pluggable pieces:
   - dense=True reward         per-step HPWL delta, not a terminal-only reward
   - make_wiremask_observation wiremask + 2-macro lookahead as observation channels
   - make_wiremask_quality_illegal   wirelength-guided action masking (soft_coefficient)
-  - ResNetCoarseFineActorCritic     MaskPlace's own two-branch, ResNet-coarse network
-  - maskplace_ppo_config/MASKPLACE_LEARNING_RATE   its GAE/entropy/value-loss/lr choices
+  - ResNetCoarseFineActorCritic(critic_style="step_embedding")  its own two-branch network,
+                               and a critic that shares zero parameters with the actor
+  - maskplace_ppo_config       its GAE/entropy/value-loss choices
+  - maskplace_optimizer        its two independently-clipped, independently-stepped Adam
+                               optimizers (actor and critic), without a second backward pass
   - train_buffered            its buffer-collect + minibatch-epoch PPO update procedure
 
 Usage: python scripts/run_maskplace.py [benchmark_dir] [n_iterations] [macro_budget]
@@ -32,7 +35,7 @@ from placax_agents.policy.architectures.resnet_cnn import (
     build_untrained_resnet_backbone,
 )
 from placax_agents.policy.observation import make_wiremask_observation
-from placax_agents.training.algorithm.config import MASKPLACE_LEARNING_RATE, maskplace_ppo_config
+from placax_agents.training.algorithm.config import maskplace_optimizer, maskplace_ppo_config
 from placax_agents.training.loops.buffered_train import train_buffered
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
@@ -120,10 +123,11 @@ def main() -> None:
     Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
 
     ppo_config = maskplace_ppo_config()
+    optimizer = maskplace_optimizer()  # separately-clipped, separately-stepped actor/critic Adam
     Log.info(
         f"running {n_iterations} more buffered-PPO iterations "
         f"(MaskPlace's own procedure: 10 episodes/buffer, 10 minibatch epochs, batch 64, "
-        f"lr={MASKPLACE_LEARNING_RATE}) ..."
+        f"independent actor/critic optimizers) ..."
     )
 
     eval_every = 10
@@ -133,7 +137,7 @@ def main() -> None:
         variables, losses = train_buffered(
             key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
             benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk,
-            learning_rate=MASKPLACE_LEARNING_RATE, state_fn=state_fn, ppo_config=ppo_config,
+            optimizer=optimizer, state_fn=state_fn, ppo_config=ppo_config,
             extra_illegal_fn=extra_illegal_fn, checkpoint_path=checkpoint_path,
         )
         done += chunk

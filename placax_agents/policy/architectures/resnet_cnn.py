@@ -137,6 +137,12 @@ class _CoarseBranch(nn.Module):
 class ResNetCoarseFineActorCritic(nn.Module):
     """obs dict -> (action_logits (grid_x, grid_y), value scalar).
 
+    critic_style="step_embedding" gives a critic with zero shared
+    parameters with the actor (MaskPlace's own design - see
+    algorithm.split_optimizer for genuinely independent per-network
+    optimization built on that, matching MaskPlace's two separate
+    optimizers without a second backward pass).
+
     The backbone always runs in eval mode (train=False), fixed rather
     than a config knob - not a missing feature, a correctness constraint:
     every call site in this codebase (collect_rollout, ppo_loss,
@@ -186,10 +192,17 @@ class ResNetCoarseFineActorCritic(nn.Module):
         action_logits = nn.Conv(features=1, kernel_size=(1, 1))(merged)[..., 0]
 
         if self.critic_style == "step_embedding":
-            # MaskPlace's own critic: a value keyed purely on how many macros are placed, no canvas input.
-            emb = nn.Embed(num_embeddings=self.max_episode_macros, features=64)(obs["step"])
-            value = nn.Dense(features=1)(nn.relu(nn.Dense(features=64)(emb)))[0]
+            # MaskPlace's own critic: a value keyed purely on how many macros are placed, no canvas
+            # input - shares zero parameters with the actor computed above. Named with a "critic_"
+            # prefix so algorithm.split_optimizer.label_params_by_name_prefix can isolate this group
+            # from the actor's, e.g. for genuinely independent per-network optimization.
+            emb = nn.Embed(num_embeddings=self.max_episode_macros, features=64, name="critic_step_embed")(obs["step"])
+            hidden = nn.relu(nn.Dense(features=64, name="critic_hidden")(emb))
+            value = nn.Dense(features=1, name="critic_value")(hidden)[0]
         else:
+            # "canvas" style: value head is a separate parameter, but it reads a trunk shared with
+            # the actor - naming it "critic_..." only isolates its own final projection, not a
+            # genuinely independent network. Use critic_style="step_embedding" for real disjointness.
             pooled = jnp.concatenate([fine_logits, coarse_features], axis=-1).mean(axis=(0, 1))
-            value = nn.Dense(features=1)(pooled)[0]
+            value = nn.Dense(features=1, name="critic_value")(pooled)[0]
         return action_logits, value
