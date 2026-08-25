@@ -9,6 +9,7 @@ import time
 
 from placax.core import random_action, reset, step  # must precede jax imports
 from placax.extras.rewards import make_hpwl_reward
+from placax.log import Log
 from placax.netlist import load_netlist
 from placax.netlist.padding import build_padded_arrays
 from placax.types import EnvParams
@@ -81,27 +82,29 @@ def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
 if __name__ == "__main__":
     from placax._device import recommended_parallelism_mode
 
+    Log.configure()
+
     benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
     n_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 
-    print(f"JAX backend: {jax.default_backend()}")
-    print(f"placax.recommended_parallelism_mode(): {recommended_parallelism_mode()!r}")
-    print(f"loading {benchmark_dir}...")
+    Log.info(f"JAX backend: {jax.default_backend()}")
+    Log.info(f"placax.recommended_parallelism_mode(): {recommended_parallelism_mode()!r}")
+    Log.info(f"loading {benchmark_dir}...")
     macro_sizes, nets = load_netlist(benchmark_dir)
     _name_to_idx, _sizes, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )
     reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
     params = EnvParams(grid=64, n_macros=len(macro_sizes))
-    print(f"{params.n_macros} macros, {padded_pin_idx.shape[0]} nets, grid={params.grid}")
-    print()
+    Log.info(f"{params.n_macros} macros, {padded_pin_idx.shape[0]} nets, grid={params.grid}")
 
     seq_time = run_sequential(n_episodes, params, reward_fn)
-    print(f"sequential ({n_episodes} episodes, jit only): {seq_time:.3f}s")
-
     par_time = run_parallel(n_episodes, params, reward_fn)
-    print(f"parallel   ({n_episodes} episodes, vmap+jit):  {par_time:.3f}s")
 
+    # Results, not log messages - printed as a clean report.
+    print()
+    print(f"sequential ({n_episodes} episodes, jit only): {seq_time:.3f}s")
+    print(f"parallel   ({n_episodes} episodes, vmap+jit):  {par_time:.3f}s")
     print()
     if par_time < seq_time:
         print(f"vmap is {seq_time / par_time:.1f}x FASTER - parallel hardware paying off")

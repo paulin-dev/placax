@@ -6,6 +6,8 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 
+from placax.log import Log
+
 
 def is_oom(e: Exception) -> bool:
     """True if e is a genuine out-of-memory error."""
@@ -41,15 +43,15 @@ def _rlimit_as(memory_limit_bytes: int | None) -> Iterator[None]:
 def _attempt(try_fn: Callable[[int], None], n: int, cleanup_fn: Callable[[], None] | None) -> bool:
     """Runs try_fn(n) once; True on success, False on OOM. Non-OOM
     exceptions propagate - a real bug isn't a capacity limit."""
-    print(f"Trying n={n}...", flush=True)
+    Log.info(f"Trying n={n}...")
     start = time.monotonic()
     try:
         try_fn(n)
-        print(f"  n={n}: ok ({time.monotonic() - start:.1f}s)", flush=True)
+        Log.info(f"  n={n}: ok ({time.monotonic() - start:.1f}s)")
         return True
     except Exception as e:
         if is_oom(e):
-            print(f"  n={n}: OOM ({time.monotonic() - start:.1f}s)", flush=True)
+            Log.info(f"  n={n}: OOM ({time.monotonic() - start:.1f}s)")
             return False
         raise
     finally:

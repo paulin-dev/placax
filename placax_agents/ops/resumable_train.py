@@ -5,6 +5,7 @@ import json
 import pathlib
 
 from placax._device import recommended_parallelism_mode  # must precede jax imports
+from placax.log import Log
 from placax.types import EnvParams, RewardFn
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.policy.observation import observation
@@ -114,6 +115,8 @@ def resumable_train(
             padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
         )
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
+        hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
+        Log.info(f"iter {current_iteration:>6}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 
         # 4. periodic checkpoint (overwritten) + 5. periodic snapshot (never overwritten)
         checkpoint_every_n(

@@ -7,6 +7,8 @@ import tarfile
 import urllib.request
 from dataclasses import dataclass
 
+from placax.log import Log
+
 
 class Format(enum.Enum):
     """What a downloaded benchmark actually is - these are not interchangeable."""
@@ -123,17 +125,19 @@ if __name__ == "__main__":
     import argparse
     import sys
 
+    Log.configure()
+
     parser = argparse.ArgumentParser()
     parser.add_argument("benchmarks", nargs="*", default=list(BENCHMARKS))
     args = parser.parse_args()
 
     unknown = [name for name in args.benchmarks if name not in BENCHMARKS]
     if unknown:
-        print(f"unknown benchmark(s): {unknown}, available: {list(BENCHMARKS)}", file=sys.stderr)
+        Log.error(f"unknown benchmark(s): {unknown}, available: {list(BENCHMARKS)}")
         sys.exit(1)
 
     for name in args.benchmarks:
         benchmark = BENCHMARKS[name]
-        print(f"fetching {name} ({benchmark.format.value})...")
+        Log.info(f"fetching {name} ({benchmark.format.value})...")
         download_benchmark(name)
-        print(f"  -> {BENCHMARKS_DIR / name}")
+        Log.info(f"  -> {BENCHMARKS_DIR / name}")
