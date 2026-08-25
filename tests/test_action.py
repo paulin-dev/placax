@@ -59,6 +59,26 @@ def test_legal_action_logits_falls_back_when_genuinely_no_room() -> None:
     assert jnp.isfinite(jax.nn.log_softmax(masked.ravel())).all()
 
 
+def test_legal_action_logits_composes_with_an_extra_illegal_mask() -> None:
+    # A wirelength-quality cutoff (or anything else) can restrict actions
+    # beyond bare legality - generic, not tied to any one scoring signal.
+    params = EnvParams(grid=4, n_macros=1)
+    occupied = jnp.zeros((4, 4), dtype=bool)
+    logits = jnp.zeros((4, 4))
+    extra_illegal = jnp.zeros((4, 4), dtype=bool).at[2, 2].set(True)
+
+    masked = legal_action_logits(logits, occupied, params, macro_size=(1, 1), extra_illegal=extra_illegal)
+    assert masked[2, 2] == -jnp.inf  # illegal only via extra_illegal, not occupancy/boundary
+    assert masked[0, 0] == 0.0
+
+
+def test_legal_action_logits_extra_illegal_defaults_to_no_effect() -> None:
+    params = EnvParams(grid=4, n_macros=1)
+    occupied = jnp.zeros((4, 4), dtype=bool)
+    logits = jnp.zeros((4, 4))
+    assert (legal_action_logits(logits, occupied, params, (1, 1)) == 0.0).all()
+
+
 def test_sample_action_only_picks_legal_cells() -> None:
     logits = jnp.full((4, 4), -jnp.inf)
     logits = logits.at[2, 3].set(0.0)  # exactly one legal cell

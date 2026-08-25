@@ -7,9 +7,12 @@ import jax.numpy as jnp
 from jax import random
 
 
-def _dummy_reward(positions: jax.Array) -> jax.Array:
-    """Trivial reward, only used to exercise step()'s control flow."""
-    return -positions.sum().astype(jax.numpy.float32)
+def _dummy_reward(
+    old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+) -> jax.Array:
+    """Terminal-style reward, only used to exercise step()'s control flow -
+    fires once every macro is placed, matching the historical default."""
+    return jnp.where(new_placed.all(), -new_positions.sum().astype(jnp.float32), 0.0)
 
 
 def test_reset_shape() -> None:
@@ -66,6 +69,21 @@ def test_reward_only_fires_on_done() -> None:
         key, subkey = random.split(key)
         state, reward, done = step(state, random_action(subkey, params), _dummy_reward, params)
         assert reward == 0.0 and not done
+
+
+def test_dense_reward_fn_can_fire_before_done() -> None:
+    # Generalization check: step() no longer gates reward on done itself -
+    # a reward_fn that wants a non-zero reward mid-episode gets one.
+    def dense_reward(old_positions, new_positions, old_placed, new_placed):
+        return jnp.where(new_placed.any(), 1.0, 0.0)
+
+    params = EnvParams()
+    key = random.PRNGKey(2)
+    state = reset(params)
+    key, subkey = random.split(key)
+    _state, reward, done = step(state, random_action(subkey, params), dense_reward, params)
+    assert reward == 1.0  # fired on the very first step, well before done
+    assert not done
 
 
 def test_envstate_is_immutable() -> None:

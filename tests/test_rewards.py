@@ -27,9 +27,50 @@ def test_unmasked_padding_would_silently_corrupt_result() -> None:
     assert wrong != hpwl(POSITIONS, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK)
 
 
+ALL_PLACED = jnp.ones(4, dtype=bool)
+
+
 def test_reward_is_negative_hpwl() -> None:
     reward_fn = make_hpwl_reward(PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK)
-    assert reward_fn(POSITIONS) == -8.0
+    reward = reward_fn(POSITIONS, POSITIONS, ALL_PLACED, ALL_PLACED)
+    assert reward == -8.0
+
+
+def test_sparse_reward_is_zero_until_done() -> None:
+    reward_fn = make_hpwl_reward(PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK)
+    partly_placed = jnp.array([True, True, True, False])
+    reward = reward_fn(POSITIONS, POSITIONS, partly_placed, partly_placed)
+    assert reward == 0.0  # macro 3 not placed yet -> not done -> no reward
+
+
+def test_dense_reward_pays_the_hpwl_delta_at_each_step() -> None:
+    # Placing macro 1 (old: only macro 0 placed, new: macros 0,1 placed).
+    # Net A (macros 0,1): before, macro1 not placed -> only 1 real pin ->
+    # contributes 0. After, both placed -> width 3, height 0 -> 3.
+    # Net B (macros 1,2,3): fewer than 2 placed pins either way -> 0.
+    old_placed = jnp.array([True, False, False, False])
+    new_placed = jnp.array([True, True, False, False])
+    reward_fn = make_hpwl_reward(PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK, dense=True)
+    reward = reward_fn(POSITIONS, POSITIONS, old_placed, new_placed)
+    assert reward == -3.0  # -(3 - 0): wirelength grew by 3, reward is negative
+
+
+def test_dense_reward_sums_to_the_same_total_as_sparse() -> None:
+    # The core telescoping property: paying the delta every step must sum
+    # to exactly the same total as paying it all at once at the end.
+    dense_fn = make_hpwl_reward(PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK, dense=True)
+    placed_over_time = [
+        jnp.array([False, False, False, False]),
+        jnp.array([True, False, False, False]),
+        jnp.array([True, True, False, False]),
+        jnp.array([True, True, True, False]),
+        jnp.array([True, True, True, True]),
+    ]
+    total = sum(
+        float(dense_fn(POSITIONS, POSITIONS, placed_over_time[i], placed_over_time[i + 1]))
+        for i in range(len(placed_over_time) - 1)
+    )
+    assert abs(total - (-8.0)) < 1e-6
 
 
 def test_nonzero_offset_changes_result_correctly() -> None:

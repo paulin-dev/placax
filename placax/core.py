@@ -19,13 +19,16 @@ def reset(params: EnvParams, initial_positions: jax.Array | None = None) -> EnvS
 def step(
     state: EnvState, action: jax.Array, reward_fn: RewardFn, params: EnvParams
 ) -> tuple[EnvState, jax.Array, jax.Array]:
-    """Places the next macro; reward fires only once every macro is
-    placed. Returns (new_state, reward, done)."""
+    """Places the next macro, then calls reward_fn every step (see
+    placax.types.RewardFn) - sparse (terminal-only) and dense (per-step)
+    reward are both just reward_fn choices, not something step() special-
+    cases. Returns (new_state, reward, done)."""
     positions = state.positions.at[state.step].set(action)  # write this macro's chosen cell
     new_state = EnvState(positions=positions, step=state.step + 1)
     done = new_state.step == params.n_macros
-    # jax.lax.cond, not Python if: done is a traced value inside jit/scan.
-    reward = jax.lax.cond(done, lambda: reward_fn(positions), lambda: 0.0)
+    old_placed = state.positions[:, 0] >= 0
+    new_placed = positions[:, 0] >= 0
+    reward = reward_fn(state.positions, positions, old_placed, new_placed)
     return new_state, reward, done
 
 

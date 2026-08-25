@@ -20,8 +20,9 @@ def collect_rollout(
     state_fn: StateFn = observation,
 ):
     """Samples one full episode. Returns (trajectory, final_state);
-    trajectory maps obs/action/reward/log_prob/value/done to arrays
-    with a leading n_macros dimension. reward is 0 until placement."""
+    trajectory maps obs/action/reward/log_prob/value/done to arrays with a
+    leading n_macros dimension. Per-step reward shape (sparse/terminal vs
+    dense/every-step) is entirely reward_fn's choice - see placax.types.RewardFn."""
     initial_state = reset(params)
 
     def scan_step(state, step_key):

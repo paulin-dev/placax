@@ -22,4 +22,6 @@ of what policy you pair this with:
     macro being placed - convert with policy.scale.to_grid_units(...,
     cell_size) before passing to legal_action_logits, as rollout/evaluate do.
 Any other keys are yours to add for a custom policy (observation()'s
-positions/sizes_array/placed_mask/step are conventions, not requirements)."""
+positions/sizes_array/placed_mask/step/lookahead_sizes are conventions,
+not requirements - as is "wiremask", added by
+policy.observation.make_wiremask_observation)."""

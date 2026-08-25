@@ -1,5 +1,11 @@
-from placax.extras.masks import boundary_mask, compute_occupied, occupancy_mask  # noqa: F401
-from placax.types import EnvParams  # noqa: F401  both must precede jax imports
+from placax.extras.masks import (  # noqa: F401  both must precede jax imports
+    boundary_mask,
+    compute_occupied,
+    lookahead_illegal_masks,
+    occupancy_mask,
+    quality_mask,
+)
+from placax.types import EnvParams  # noqa: F401
 
 import jax
 import jax.numpy as jnp
@@ -88,6 +94,32 @@ def test_occupancy_mask_works_with_traced_macro_size_in_scan() -> None:
     sizes = jnp.array([[2, 2], [3, 1], [1, 4]])
     _, results = jax.lax.scan(scan_body, None, sizes)
     assert results.tolist() == [24, 24, 34]  # verified by hand for the first case
+
+
+def test_quality_mask_flags_cells_above_the_cutoff() -> None:
+    scores = jnp.array([[0.0, 5.0], [2.0, 10.0]])
+    mask = quality_mask(scores, max_score=jnp.array(2.0))
+    assert mask.tolist() == [[False, True], [False, True]]
+
+
+def test_quality_mask_composes_with_legality_masks() -> None:
+    params = EnvParams(grid=2)
+    occupied = jnp.zeros((2, 2), dtype=bool)
+    scores = jnp.array([[0.0, 5.0], [0.0, 0.0]])
+    combined = occupancy_mask(occupied, (1, 1)) | boundary_mask(params, (1, 1)) | quality_mask(scores, jnp.array(1.0))
+    assert combined.tolist() == [[False, True], [False, False]]
+
+
+def test_lookahead_illegal_masks_stacks_one_mask_per_macro_size() -> None:
+    params = EnvParams(grid=4)
+    occupied = jnp.zeros((4, 4), dtype=bool).at[0, 0].set(True)
+    macro_sizes = jnp.array([[1, 1], [2, 2]])
+    masks = lookahead_illegal_masks(occupied, params, macro_sizes)
+    assert masks.shape == (2, 4, 4)
+    assert masks[0, 0, 0]  # 1x1 macro: illegal exactly where occupied
+    assert masks[1, 0, 0]  # 2x2 macro's footprint also covers (0,0) -> illegal
+    assert not masks[0, 3, 3]  # 1x1 fits fine there
+    assert masks[1, 3, 3]  # 2x2 macro would overflow the grid there
 
 
 def test_boundary_mask_rectangular_grid() -> None:

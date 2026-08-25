@@ -7,11 +7,20 @@ import jax.numpy as jnp
 
 
 def legal_action_logits(
-    logits: jax.Array, occupied: jax.Array, params: EnvParams, macro_size: tuple[int, int]
+    logits: jax.Array,
+    occupied: jax.Array,
+    params: EnvParams,
+    macro_size: tuple[int, int],
+    extra_illegal: jax.Array | None = None,
 ) -> jax.Array:
-    """Masks illegal cells (overlap or out-of-bounds) to -inf. Skips
-    masking if every cell is illegal (all -inf would NaN log_softmax)."""
+    """Masks illegal cells (overlap or out-of-bounds) to -inf. extra_illegal,
+    if given, is OR'd in too - any other (grid_x, grid_y) bool cutoff, e.g.
+    extras.masks.quality_mask() over a wiremask/congestion score, for
+    algorithms that restrict actions beyond bare legality. Skips masking
+    if every cell is illegal (all -inf would NaN log_softmax)."""
     illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
+    if extra_illegal is not None:
+        illegal = illegal | extra_illegal
     illegal = jnp.where(illegal.all(), False, illegal)  # bail out of masking rather than go all -inf
     return jnp.where(illegal, -jnp.inf, logits)
 

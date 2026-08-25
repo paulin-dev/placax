@@ -18,7 +18,8 @@ def test_scaled_reward_matches_hand_calculation() -> None:
         padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size
     )
     positions = jnp.array([[10, 20], [15, 20]])
-    reward = reward_fn(positions)
+    all_placed = jnp.array([True, True])
+    reward = reward_fn(positions, positions, all_placed, all_placed)
 
     # macro 0 real center: (10*10+500/2, 20*10+2136/2) = (350, 1268)
     # macro 0 pin: (350-248.5, 1268+16) = (101.5, 1284.0)

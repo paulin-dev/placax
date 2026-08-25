@@ -1,4 +1,6 @@
 """PPO's loss: clipped surrogate objective + value loss - entropy bonus."""
+from typing import Callable
+
 from placax.types import EnvParams  # must precede jax imports
 from placax_agents.policy.action import action_log_prob, legal_action_logits
 from placax_agents.policy.scale import to_grid_units
@@ -17,6 +19,22 @@ def _entropy(masked_logits: jax.Array) -> jax.Array:
     return -jnp.sum(probs * safe_log_probs)
 
 
+def mse_value_loss(value: jax.Array, ret: jax.Array) -> jax.Array:
+    """(value - return)^2 - the default value loss."""
+    return (value - ret) ** 2
+
+
+def huber_value_loss(value: jax.Array, ret: jax.Array, delta: float = 1.0) -> jax.Array:
+    """Smooth-L1/Huber: quadratic within delta of the return, linear
+    beyond it - less sensitive to outlier returns than mse_value_loss."""
+    error = value - ret
+    abs_error = jnp.abs(error)
+    return jnp.where(abs_error <= delta, 0.5 * error**2, delta * (abs_error - 0.5 * delta))
+
+
+ValueLossFn = Callable[[jax.Array, jax.Array], jax.Array]
+
+
 def ppo_loss(
     policy_params,
     policy_apply_fn: AlgorithmFn,
@@ -29,9 +47,12 @@ def ppo_loss(
     clip_eps: float = 0.2,
     value_coef: float = 0.5,
     entropy_coef: float = 0.01,
+    value_loss_fn: ValueLossFn = mse_value_loss,
 ) -> jax.Array:
     """mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
-    over one trajectory dict (as produced by collect_rollout)."""
+    over one trajectory dict (as produced by collect_rollout). value_loss_fn
+    swaps the critic's loss (default mse_value_loss; huber_value_loss above
+    is a drop-in alternative)."""
     macro_sizes = to_grid_units(sizes_array, cell_size)
 
     def per_step(obs, action, old_log_prob, advantage, ret, macro_size):
@@ -45,7 +66,7 @@ def ppo_loss(
         clipped_ratio = jnp.clip(ratio, 1 - clip_eps, 1 + clip_eps)
         policy_loss = -jnp.minimum(ratio * advantage, clipped_ratio * advantage)  # PPO's clipped surrogate
 
-        value_loss = (value - ret) ** 2  # critic MSE against the actual return
+        value_loss = value_loss_fn(value, ret)
         return policy_loss, value_loss, _entropy(masked_logits)
 
     policy_losses, value_losses, entropies = jax.vmap(per_step)(

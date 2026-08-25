@@ -2,7 +2,12 @@ from placax.core import reset  # noqa: F401  must precede jax imports
 from placax.extras.rewards import make_hpwl_reward  # noqa: F401
 from placax.types import EnvParams  # noqa: F401
 from placax_agents.training.algorithm.gae import compute_gae  # noqa: F401
-from placax_agents.training.algorithm.loss import _entropy, ppo_loss  # noqa: F401
+from placax_agents.training.algorithm.loss import (  # noqa: F401
+    _entropy,
+    huber_value_loss,
+    mse_value_loss,
+    ppo_loss,
+)
 from placax_agents.policy.observation import observation  # noqa: F401
 from placax_agents.policy.architectures.cnn import CNNActorCritic  # noqa: F401
 from placax_agents.training.rollout import collect_rollout  # noqa: F401
@@ -53,6 +58,42 @@ def test_ppo_loss_is_finite() -> None:
     )
 
     loss = ppo_loss(variables, policy.apply, trajectory, advantages, returns, sizes_array, 1.0, params)
+    assert jnp.isfinite(loss)
+
+
+def test_huber_value_loss_is_half_mse_within_delta() -> None:
+    # Huber is quadratic (0.5*error^2) inside delta - mse_value_loss has
+    # no 0.5 factor, so they're related by exactly that constant there.
+    value, ret = jnp.array(0.5), jnp.array(0.6)
+    assert abs(0.5 * float(mse_value_loss(value, ret)) - float(huber_value_loss(value, ret))) < 1e-6
+
+
+def test_huber_value_loss_grows_linearly_not_quadratically_for_large_errors() -> None:
+    small = huber_value_loss(jnp.array(0.0), jnp.array(2.0), delta=1.0)
+    large = huber_value_loss(jnp.array(0.0), jnp.array(4.0), delta=1.0)
+    assert abs(float(large - small) - 1.0 * (4.0 - 2.0)) < 1e-6  # slope delta beyond the cutoff
+
+
+def test_ppo_loss_accepts_a_custom_value_loss_fn() -> None:
+    params, sizes_array, reward_fn = _toy_setup()
+    policy = CNNActorCritic()
+    key = random.PRNGKey(0)
+    key, init_key = random.split(key)
+    obs0 = observation(reset(params), params, sizes_array)
+    variables = policy.init(init_key, obs0)
+
+    key, rollout_key = random.split(key)
+    trajectory, _final_state = collect_rollout(
+        rollout_key, variables, policy.apply, params, reward_fn, sizes_array, cell_size=1.0
+    )
+    advantages, returns = compute_gae(
+        trajectory["reward"], trajectory["value"], trajectory["done"], next_value=jnp.array(0.0)
+    )
+
+    loss = ppo_loss(
+        variables, policy.apply, trajectory, advantages, returns, sizes_array, 1.0, params,
+        value_loss_fn=huber_value_loss,
+    )
     assert jnp.isfinite(loss)
 
 

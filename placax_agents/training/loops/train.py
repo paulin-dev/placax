@@ -48,7 +48,7 @@ def train_step(
             policy_params, policy_apply_fn, trajectory, normalized_advantages, normalized_returns,
             sizes_array, cell_size, params,
             clip_eps=ppo_config.clip_eps, value_coef=ppo_config.value_coef,
-            entropy_coef=ppo_config.entropy_coef,
+            entropy_coef=ppo_config.entropy_coef, value_loss_fn=ppo_config.value_loss_fn,
         )
 
     new_variables, new_opt_state, new_running_stats, loss = apply_gradient_update(

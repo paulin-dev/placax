@@ -6,7 +6,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from placax.types import Nets, SizeMap
+from placax.netlist.order import alphabetical_order
+from placax.types import Nets, OrderFn, SizeMap
 
 
 def _pack_groups(
@@ -28,11 +29,14 @@ def _pack_groups(
     return idx, offset, valid
 
 
-def build_padded_arrays(macro_sizes: SizeMap, nets: Nets):
+def build_padded_arrays(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn = alphabetical_order):
     """Returns (name_to_idx, sizes_array, padded_pin_idx,
     padded_pin_offset, valid_mask). Built with NumPy, then converted to
-    JAX arrays once - incremental .at[].set() would be far too slow."""
-    macro_names = sorted(macro_sizes)  # fixed order = each macro's row index everywhere else
+    JAX arrays once - incremental .at[].set() would be far too slow.
+    order_fn picks placement order (default: alphabetical) - see
+    placax.netlist.order for alternatives (largest-first, connectivity)."""
+    macro_names = order_fn(macro_sizes, nets)  # this order = each macro's row index everywhere else
+    assert set(macro_names) == set(macro_sizes), "order_fn must return every macro exactly once"
     name_to_idx = {name: i for i, name in enumerate(macro_names)}
 
     sizes_array = jnp.array(

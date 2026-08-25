@@ -12,14 +12,23 @@ def make_scaled_hpwl_reward(
     valid_mask: jax.Array,
     sizes_array: jax.Array,
     cell_size: float,
+    dense: bool = False,
 ) -> RewardFn:
-    """reward(positions) = -HPWL of real-unit macro centers (grid
-    positions converted via to_real_centers). Satisfies RewardFn's
-    grid-unit-input contract - safe to plug straight into training,
-    unlike make_hpwl_reward alone."""
-    base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
+    """-HPWL of real-unit macro centers (grid positions converted via
+    to_real_centers). Satisfies RewardFn's grid-unit-input contract -
+    safe to plug straight into training, unlike make_hpwl_reward alone.
+    dense: see make_hpwl_reward - sparse (terminal) by default, or a
+    dense per-step reward."""
+    base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask, dense=dense)
 
-    def reward_fn(positions: jax.Array) -> jax.Array:
-        return base_reward_fn(to_real_centers(positions, sizes_array, cell_size))
+    def reward_fn(
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+    ) -> jax.Array:
+        return base_reward_fn(
+            to_real_centers(old_positions, sizes_array, cell_size),
+            to_real_centers(new_positions, sizes_array, cell_size),
+            old_placed,
+            new_placed,
+        )
 
     return reward_fn
