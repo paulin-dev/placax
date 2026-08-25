@@ -51,8 +51,7 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults: gamma=0.95,
-    no GAE smoothing (lam=1.0), no entropy bonus, Huber value loss."""
+    """PPOConfig matching MaskPlace's own PPO2.py defaults (gamma=0.95, no GAE smoothing, no entropy bonus)."""
     return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
 
 
@@ -61,12 +60,11 @@ def maskplace_optimizer(
     max_grad_norm: float = MASKPLACE_MAX_GRAD_NORM,
     critic_param_prefix: str = "critic_",
 ) -> optax.GradientTransformation:
-    """Adam(learning_rate) for actor and critic separately, each with its
-    own clip-by-global-norm(max_grad_norm); matches MaskPlace's two
-    separate optimizers without needing a second backward pass. Requires
-    critic params named under critic_param_prefix and disjoint from the
-    actor's - true for critic_style="step_embedding", not "canvas"
-    (shared trunk)."""
+    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-optimizer setup.
+
+    Requires critic params named under critic_param_prefix and disjoint from the actor's
+    (true for critic_style="step_embedding", not the shared-trunk "canvas" style).
+    """
     per_network = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
     return make_grouped_optimizer(per_network, per_network, critic_param_prefix)
 
@@ -91,11 +89,15 @@ def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Be
 
 
 def _build_state_fn(benchmark: Benchmark):
-    """wiremask + 2-macro lookahead - MaskPlace's own observation channel set."""
+    """Builds the wiremask + 2-macro-lookahead observation function, MaskPlace's own channel set."""
+    # 1. Precompute, once, which nets touch each macro - the wiremask
+    #    observation needs this lookup on every step, so building it here
+    #    (outside the per-step hot path) avoids redoing the work per call.
     macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         n_macros=benchmark.params.n_macros,
     )
+    # 2. Build the actual observation function, closing over that index.
     return make_wiremask_observation(
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         macro_net_idx, macro_net_offset, macro_net_valid, lookahead=2,
@@ -103,11 +105,13 @@ def _build_state_fn(benchmark: Benchmark):
 
 
 def _resnet_backbone():
-    """Real ImageNet weights if placax[resnet] is installed; otherwise the
-    offline, same-shape stand-in, with a clear note about which was used."""
+    """Uses real ImageNet weights if placax[resnet] is installed, otherwise an offline same-shape stand-in."""
     try:
+        # Prefer real pretrained weights when the optional dependency is available.
         import flaxmodels  # noqa: F401
     except ImportError:
+        # Fall back to an untrained backbone with matching shapes, so training
+        # still works offline - just tell the user clearly which path was taken.
         Log.info("flaxmodels not installed (pip install placax[resnet]) - using an "
                   "offline, untrained ResNet backbone instead of real ImageNet weights.")
         return build_untrained_resnet_backbone()
@@ -129,6 +133,8 @@ def _train_and_eval_loop(
     """Runs n_iterations of buffered-PPO training in eval_every-sized chunks, logging real HPWL after each."""
     done, remaining = 0, n_iterations
     while remaining > 0:
+        # 1. Train for one chunk at a time (not all n_iterations at once) so
+        #    we can check in on real progress every eval_every iterations.
         chunk = min(eval_every, remaining)
         variables, losses = train_buffered(
             key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
@@ -139,42 +145,54 @@ def _train_and_eval_loop(
         done += chunk
         remaining -= chunk
 
+        # 2. Evaluate the current policy deterministically to get the actual
+        #    HPWL it achieves - training loss alone doesn't tell us that.
         _positions, real_hpwl = evaluate(
             variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
             benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
             state_fn, extra_illegal_fn,
         )
+        # 3. Report progress so a long training run isn't a silent black box.
         Log.info(f"iter {done:>5}/{n_iterations}  loss={losses[-1]:>10.4f}  real_hpwl={float(real_hpwl):.1f}")
     return variables
 
 
 def main() -> None:
+    """CLI entry point: wires up the MaskPlace-equivalent pipeline and runs/resumes training."""
     Log.configure()
 
+    # 1. Parse CLI args and make sure the requested benchmark actually exists.
     benchmark_dir, n_iterations, macro_budget = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
+    # 2. Load the netlist with MaskPlace's own ordering/reward choices.
     Log.info(f"loading {benchmark_dir} (connectivity order, macro_budget={macro_budget}, dense reward) ...")
     benchmark = _load_benchmark(benchmark_dir, macro_budget)
     Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
 
+    # 3. Build the observation function, illegal-action mask, and policy network.
     state_fn = _build_state_fn(benchmark)
     extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
     policy = _build_policy(benchmark)
 
+    # 4. Initialize the policy's parameters using one dummy observation, so
+    #    Flax can infer every layer's shape from real input.
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(init_key, obs0)
 
+    # 5. Set up the checkpoint location; if one already exists, training
+    #    below will resume from it instead of starting over.
     output_dir = benchmark_dir / "output_maskplace"
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "checkpoint.bin"
     resuming = checkpoint_path.exists()
     Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
 
+    # 6. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
     ppo_config = maskplace_ppo_config()
     optimizer = maskplace_optimizer()  # separately-clipped, separately-stepped actor/critic Adam
     Log.info(
@@ -183,6 +201,7 @@ def main() -> None:
         f"independent actor/critic optimizers) ..."
     )
 
+    # 7. Run the actual training/eval loop.
     variables = _train_and_eval_loop(
         key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
         checkpoint_path, n_iterations, eval_every=10,

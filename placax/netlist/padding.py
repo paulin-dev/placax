@@ -1,5 +1,4 @@
-"""Bridges load_netlist()'s named/dict output into the padded,
-index-based arrays hpwl()/wiremask()/render() consume."""
+"""Bridges load_netlist()'s named/dict output into the padded, index-based arrays hpwl()/wiremask()/render() consume."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
 
 import jax
@@ -13,8 +12,9 @@ from placax.types import Nets, OrderFn, SizeMap
 def _pack_groups(
     groups: list[list[tuple[int, float, float]]], n_groups: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Pads per-group (index, x_offset, y_offset) entries into aligned
-    (idx, offset, valid) arrays of shape (n_groups, max_len)."""
+    """Pads per-group (index, x_offset, y_offset) entries into aligned (idx, offset, valid) arrays."""
+    # Every group must end up the same length (max_len) so they form a rectangular
+    # array; groups shorter than that are padded with zeros and marked invalid.
     max_len = max((len(g) for g in groups), default=0)
     idx = np.zeros((n_groups, max_len), dtype=np.int32)
     offset = np.zeros((n_groups, max_len, 2), dtype=np.float32)
@@ -30,39 +30,38 @@ def _pack_groups(
 
 
 def _order_macros(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn) -> dict[str, int]:
-    """name -> row index, per order_fn - that row index is used everywhere else (sizes_array, positions)."""
+    """Returns name -> row index per order_fn; that same row index is reused in sizes_array/positions."""
     macro_names = order_fn(macro_sizes, nets)
     assert set(macro_names) == set(macro_sizes), "order_fn must return every macro exactly once"
     return {name: i for i, name in enumerate(macro_names)}
 
 
 def _remap_nets_to_indices(nets: Nets, name_to_idx: dict[str, int]) -> list[list[tuple[int, float, float]]]:
-    """Nets reference macros by name; remap to the index sizes_array/positions use."""
+    """Remaps each net's macro names to the row indices sizes_array/positions use."""
     return [[(name_to_idx[name], x_off, y_off) for name, x_off, y_off in net] for net in nets]
 
 
 def build_padded_arrays(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn = alphabetical_order):
-    """Returns (name_to_idx, sizes_array, padded_pin_idx,
-    padded_pin_offset, valid_mask). Built with NumPy, then converted to
-    JAX arrays once - incremental .at[].set() would be far too slow.
-    order_fn picks placement order (default: alphabetical) - see
-    placax.netlist.order for alternatives (largest-first, connectivity)."""
+    """Returns (name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask) for hpwl()/wiremask()/render()."""
+    # 1. Decide the macro-to-row-index mapping used by every array below.
     name_to_idx = _order_macros(macro_sizes, nets, order_fn)
     sizes_array = jnp.array(
         np.array([macro_sizes[name] for name in name_to_idx], dtype=np.float32)
     )
+    # 2. Remap nets from macro names to row indices, then pad them into rectangular arrays.
     net_groups = _remap_nets_to_indices(nets, name_to_idx)
     pin_idx, pin_offset, valid_mask = _pack_groups(net_groups, len(nets))
 
+    # 3. Everything is built with NumPy above and converted to JAX arrays only
+    #    once here - incremental .at[].set() on JAX arrays would be far too slow.
     return name_to_idx, sizes_array, jnp.array(pin_idx), jnp.array(pin_offset), jnp.array(valid_mask)
 
 
 def build_macro_net_index(
     padded_pin_idx: jax.Array, padded_pin_offset: jax.Array, valid_mask: jax.Array, n_macros: int
 ):
-    """Per-macro reverse index: which nets each macro participates in and
-    at what offset, padded to the most nets any single macro touches."""
-    # Flatten to just the real (valid) entries first - far fewer than the padded grid.
+    """Builds the per-macro reverse index of which nets each macro participates in, and at what offset."""
+    # 1. Drop back to just the real (valid) pin entries first - far fewer than the full padded grid.
     pin_idx_np, offset_np, valid_np = map(np.array, (padded_pin_idx, padded_pin_offset, valid_mask))
     n_nets = pin_idx_np.shape[0]
 
@@ -71,11 +70,14 @@ def build_macro_net_index(
     macro_ids = pin_idx_np.ravel()[valid_flat]
     offsets = offset_np.reshape(-1, 2)[valid_flat]
 
+    # 2. Invert the net->macro relationship into macro->nets: for each macro,
+    #    collect every (net, offset) pair it participates in.
     participations: list[list[tuple[int, float, float]]] = [[] for _ in range(n_macros)]
     for net_idx, macro_idx, x_off, y_off in zip(
         net_ids.tolist(), macro_ids.tolist(), offsets[:, 0].tolist(), offsets[:, 1].tolist()
     ):
         participations[macro_idx].append((net_idx, x_off, y_off))
 
+    # 3. Pad to a rectangular array again, sized to the busiest macro.
     macro_net_idx, macro_net_offset, macro_net_valid = _pack_groups(participations, n_macros)
     return jnp.array(macro_net_idx), jnp.array(macro_net_offset), jnp.array(macro_net_valid)

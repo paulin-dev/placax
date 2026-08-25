@@ -73,6 +73,8 @@ def _flatten_nested_dir(out_dir: pathlib.Path, name: str) -> None:
     """Some ISPD05 tarballs nest an extra <name>/ dir inside; others don't."""
     nested = out_dir / name
     if nested.is_dir():
+        # Move everything up one level so files always end up directly in
+        # out_dir, regardless of how the original tarball was packed.
         for item in nested.iterdir():
             item.rename(out_dir / item.name)
         nested.rmdir()
@@ -88,29 +90,37 @@ def _degzip_all(out_dir: pathlib.Path) -> None:
 
 def _fetch_ispd05_netlist(url: str, out_dir: pathlib.Path, name: str) -> None:
     """Downloads the tarball, extracts it, flattens and degzips in place."""
+    # 1. Download the tarball next to (not inside) the benchmark's own dir.
     tar_path = out_dir.parent / f"{name}.tar.gz"
     urllib.request.urlretrieve(url, tar_path)
+    # 2. Extract it, then discard the archive - we only want the contents.
     with tarfile.open(tar_path) as tar:
         tar.extractall(out_dir, filter="data")
     tar_path.unlink()
+    # 3. Normalize the directory layout and undo the extra gzip some
+    #    ISPD05 benchmarks apply on top of the tarball itself.
     _flatten_nested_dir(out_dir, name)
     _degzip_all(out_dir)
 
 
 def _fetch_single_file(url: str, out_dir: pathlib.Path) -> None:
+    """Downloads a single file (e.g. a .pb.txt netlist) with no extraction needed."""
     urllib.request.urlretrieve(url, out_dir / pathlib.Path(url).name)
 
 
 def download_benchmark(name: str, dest_dir: pathlib.Path = BENCHMARKS_DIR) -> None:
     """Fetches one benchmark, skipping if already present."""
+    # 1. Validate the name up front so typos fail fast with a helpful message.
     if name not in BENCHMARKS:
         raise ValueError(f"unknown benchmark {name!r}, available: {list(BENCHMARKS)}")
 
+    # 2. Skip re-downloading if this benchmark was already fetched before.
     out_dir = dest_dir / name
     if out_dir.exists() and any(out_dir.iterdir()):
         return  # already fetched
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # 3. Dispatch to the right fetch strategy for this benchmark's format.
     benchmark = BENCHMARKS[name]
     match benchmark.format:  # each format needs a different fetch strategy
         case Format.ISPD05_NETLIST:
@@ -127,15 +137,18 @@ if __name__ == "__main__":
 
     Log.configure()
 
+    # 1. Parse the requested benchmark names; default to fetching them all.
     parser = argparse.ArgumentParser()
     parser.add_argument("benchmarks", nargs="*", default=list(BENCHMARKS))
     args = parser.parse_args()
 
+    # 2. Fail fast on typos rather than partially downloading then erroring.
     unknown = [name for name in args.benchmarks if name not in BENCHMARKS]
     if unknown:
         Log.error(f"unknown benchmark(s): {unknown}, available: {list(BENCHMARKS)}")
         sys.exit(1)
 
+    # 3. Fetch each requested benchmark, one at a time.
     for name in args.benchmarks:
         benchmark = BENCHMARKS[name]
         Log.info(f"fetching {name} ({benchmark.format.value})...")

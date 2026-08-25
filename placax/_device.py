@@ -1,5 +1,4 @@
-"""Import first, before `import jax` anywhere - env vars are read once
-at JAX's first import."""
+"""Import first, before `import jax` anywhere - env vars are read once at JAX's first import."""
 import os
 import platform
 import subprocess
@@ -51,13 +50,15 @@ def warn_if_gpu_unused() -> None:
 
 
 def recommended_parallelism_mode(override: str | None = None) -> str:
-    """"sequential" or "parallel": override if given, else auto-detected
-    from the JAX backend (vmap is ~73x slower on CPU, ~3.8x faster on GPU)."""
+    """Returns "sequential" or "parallel", using override if given, else auto-detecting from the backend."""
+    # An explicit override always wins, but must still be one of the two valid modes.
     if override is not None:
         if override not in ("sequential", "parallel"):
             raise ValueError(f"mode must be 'sequential' or 'parallel', got {override!r}")
         return override
 
+    # Otherwise pick based on measured behavior: vmap is much slower than a
+    # sequential loop on CPU, but much faster on GPU.
     import jax
 
     return "sequential" if jax.default_backend() == "cpu" else "parallel"

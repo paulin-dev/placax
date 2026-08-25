@@ -1,5 +1,4 @@
-"""Reads DEF COMPONENTS/NETS + LEF geometry into the same shape the
-Bookshelf loader produces."""
+"""Reads DEF COMPONENTS/NETS + LEF geometry into the same shape the Bookshelf loader produces."""
 import pathlib
 import re
 
@@ -21,8 +20,7 @@ def parse_components(def_text: str) -> dict[str, tuple[str, float, float]]:
 
 
 def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
-    """Returns [(instance_name, port_name)] per net (a list, not a dict -
-    net names legitimately repeat across buffered segments)."""
+    """Returns [(instance_name, port_name)] per net, as a list since net names can legitimately repeat."""
     section = def_text[def_text.index("\nNETS") : def_text.index("\nEND NETS")]
 
     nets = []
@@ -30,6 +28,8 @@ def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
         match = _NET_LINE_RE.search(line)
         if not match:
             continue
+        # Drop the special top-level "PIN" pseudo-instance and keep only nets
+        # that actually connect two or more distinct instances.
         pins = [(inst, port) for inst, port in _NET_PIN_RE.findall(match.group(2)) if inst != "PIN"]
         if len({inst for inst, _port in pins}) >= 2:
             nets.append(pins)
@@ -52,12 +52,14 @@ def resolve_net_pin_offsets(
     components: dict[str, tuple[str, float, float]],
     pin_offsets: PinOffsets,
 ) -> Nets:
-    """(instance, port) -> (instance, x_offset, y_offset). Pins with no
-    matching LEF geometry fall back to (0, 0) rather than being dropped."""
+    """Resolves (instance, port) pairs to (instance, x_offset, y_offset), defaulting to (0, 0) if unknown."""
     resolved: Nets = []
     for net in nets:
         pins: list[NetPin] = []
         for inst, port in net:
+            # Look up this instance's cell type, then that type's LEF-declared pin
+            # offset; pins with no matching geometry fall back to (0, 0) rather than
+            # being dropped, since the net topology should still be preserved.
             cell_type = components[inst][0]
             x_off, y_off = pin_offsets.get(cell_type, {}).get(port, (0.0, 0.0))
             pins.append((inst, x_off, y_off))
@@ -66,17 +68,19 @@ def resolve_net_pin_offsets(
 
 
 def load_def(def_path: pathlib.Path, lef_paths: list[pathlib.Path]) -> tuple[SizeMap, Nets]:
-    """Returns (macro_sizes, nets) - same shape as load_bookshelf."""
+    """Returns (macro_sizes, nets) - the same shape as load_bookshelf."""
+    # 1. Parse instance placements/types and pin connectivity out of the DEF text.
     def_text = def_path.read_text()
     components = parse_components(def_text)
 
-    # Merge every LEF's cell geometry - a design can split cells across multiple LEFs.
+    # 2. Merge every LEF's cell geometry - a design can split cells across multiple LEFs.
     cell_sizes: SizeMap = {}
     pin_offsets: PinOffsets = {}
     for lef in lef_paths:
         cell_sizes.update(parse_lef_sizes(lef))
         pin_offsets.update(parse_lef_pin_offsets(lef))
 
+    # 3. Translate cell-type-keyed geometry into instance-keyed sizes/offsets.
     macro_sizes = resolve_macro_sizes(components, cell_sizes)
     nets = resolve_net_pin_offsets(parse_nets(def_text), components, pin_offsets)
     return macro_sizes, nets

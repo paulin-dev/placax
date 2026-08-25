@@ -1,5 +1,4 @@
-"""Reads Bookshelf .nodes/.nets into the same shape the DEF loader
-produces. Only terminal nodes (macros) are kept, not standard cells."""
+"""Reads Bookshelf .nodes/.nets into the same shape the DEF loader produces, keeping only macros."""
 import pathlib
 import re
 
@@ -22,17 +21,19 @@ def parse_nodes(nodes_path: pathlib.Path) -> SizeMap:
 
 
 def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
-    """Returns a list of (macro_name, x_offset, y_offset) pins per net.
-    Dropped if fewer than 2 distinct macros appear in it."""
+    """Returns a list of (macro_name, x_offset, y_offset) pins per net, dropping nets with < 2 macros."""
     nets: Nets = []
     current: list[NetPin] = []  # pins collected for the net being read right now
 
     def _flush() -> None:
+        # Only keep a net if it actually connects two or more distinct macros.
         if len({name for name, _x, _y in current}) >= 2:
             nets.append(current)
 
+    # Walk the file line by line: a "NetDegree :" line starts a new net, so we
+    # flush the previous one's pins and start collecting again.
     for line in nets_path.read_text().splitlines():
-        if _NET_HEADER_RE.search(line):  # "NetDegree :" starts a new net
+        if _NET_HEADER_RE.search(line):
             _flush()
             current = []
             continue
@@ -41,7 +42,7 @@ def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
             name, x_off, y_off = pin_match.groups()
             current.append((name, float(x_off), float(y_off)))
 
-    _flush()  # last net has no following header to trigger it
+    _flush()  # the last net in the file has no following header to trigger its flush
     return nets
 
 

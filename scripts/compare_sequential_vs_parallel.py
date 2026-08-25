@@ -20,12 +20,14 @@ from jax import random
 
 
 def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
-    """N episodes one after another, each step jit-compiled (warm-up done
-    outside the timed region)."""
+    """Runs n_episodes one after another, each step jit-compiled, and returns the wall-clock time."""
+    # 1. Compile the two hot functions once; JAX caches the compiled version.
     jitted_step = jax.jit(step, static_argnames=("reward_fn",))
     jitted_random_action = jax.jit(random_action)
 
-    # Warm-up: pay the one-time jit compile cost outside the timed region.
+    # 2. Warm-up: run one step so the (slow) jit compilation happens here,
+    #    outside the timed region below - otherwise we'd be timing compile
+    #    time, not actual step execution.
     state = reset(params)
     key = random.PRNGKey(0)
     key, subkey = random.split(key)
@@ -33,6 +35,8 @@ def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
     state, _reward, _done = jitted_step(state, action, reward_fn, params)
     jax.block_until_ready(state)
 
+    # 3. Now time the real work: n_episodes, each stepping through every macro
+    #    placement one at a time (no batching/parallelism here).
     t0 = time.perf_counter()
     for episode in range(n_episodes):
         state = reset(params)
@@ -41,12 +45,13 @@ def run_sequential(n_episodes: int, params: EnvParams, reward_fn) -> float:
             key, subkey = random.split(key)
             action = jitted_random_action(subkey, params)
             state, _reward, _done = jitted_step(state, action, reward_fn, params)
+    # block_until_ready forces JAX's async dispatch to finish before we stop the clock.
     jax.block_until_ready(state)
     return time.perf_counter() - t0
 
 
 def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
-    """N episodes at once via vmap, as a single jitted step function."""
+    """Runs n_episodes at once via vmap, as a single jitted step function, and returns the wall-clock time."""
     def one_batched_step(keys, batched_state):
         # Same step() as sequential, just vmapped over the leading batch dimension.
         keys, subkeys = jax.vmap(lambda k: tuple(random.split(k)))(keys)
@@ -56,19 +61,25 @@ def run_parallel(n_episodes: int, params: EnvParams, reward_fn) -> float:
         )
         return keys, new_state, reward, done
 
+    # 1. Compile the batched step once; every episode in the batch runs
+    #    through the same compiled program in lockstep.
     jitted_batched_step = jax.jit(one_batched_step)
 
     def make_batch():
+        # Turn one fresh env state into n_episodes identical copies stacked
+        # along a new leading axis - vmap treats that axis as "batch".
         return jax.tree_util.tree_map(
             lambda x: jnp.broadcast_to(x, (n_episodes,) + x.shape), reset(params)
         )
 
-    # warm-up
+    # 2. Warm-up: pay the jit compile cost here, outside the timed region.
     batched_state = make_batch()
     keys = random.split(random.PRNGKey(0), n_episodes)
     keys, batched_state, _reward, _done = jitted_batched_step(keys, batched_state)
     jax.block_until_ready(batched_state)
 
+    # 3. Now time the real work: n_macros steps, each advancing the whole
+    #    batch of n_episodes at once (this is where vmap's parallelism pays off).
     batched_state = make_batch()
     keys = random.split(random.PRNGKey(0), n_episodes)
     t0 = time.perf_counter()
@@ -86,8 +97,12 @@ if __name__ == "__main__":
     benchmark_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else "benchmarks/adaptec1")
     n_episodes = int(sys.argv[2]) if len(sys.argv) > 2 else 8
 
+    # 1. Report the hardware/backend so results are reproducible/comparable.
     Log.info(f"JAX backend: {jax.default_backend()}")
     Log.info(f"placax.recommended_parallelism_mode(): {recommended_parallelism_mode()!r}")
+
+    # 2. Load the real benchmark netlist and pad it into fixed-size arrays
+    #    (JAX needs static shapes), then build the reward function it implies.
     Log.info(f"loading {benchmark_dir}...")
     macro_sizes, nets = load_netlist(benchmark_dir)
     _name_to_idx, _sizes, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
@@ -97,6 +112,7 @@ if __name__ == "__main__":
     params = EnvParams(grid=64, n_macros=len(macro_sizes))
     Log.info(f"{params.n_macros} macros, {padded_pin_idx.shape[0]} nets, grid={params.grid}")
 
+    # 3. Run both strategies on the exact same benchmark and compare timings.
     seq_time = run_sequential(n_episodes, params, reward_fn)
     par_time = run_parallel(n_episodes, params, reward_fn)
 

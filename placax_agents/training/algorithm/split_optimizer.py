@@ -9,14 +9,16 @@ import optax
 def label_params_by_name_prefix(
     params, prefix: str, matched_label: Hashable = "matched", default_label: Hashable = "default"
 ):
-    """Labels every leaf matched_label if any key in its path starts with
-    prefix, else default_label. Returns a label pytree matching params'
-    structure, suitable for optax.multi_transform's param_labels."""
+    """Labels each param leaf matched_label if any key in its path starts with prefix, else default_label."""
 
     def label_leaf(path, _leaf):
+        # path is a sequence of pytree keys (e.g. dict keys) leading to this leaf;
+        # stringify each one so we can check it against the prefix.
         keys = (str(getattr(entry, "key", entry)) for entry in path)
         return matched_label if any(key.startswith(prefix) for key in keys) else default_label
 
+    # Walk the whole params pytree, replacing each leaf with its label - the result
+    # is a same-shaped pytree of labels, exactly what optax.multi_transform expects.
     return jax.tree_util.tree_map_with_path(label_leaf, params)
 
 
@@ -25,10 +27,7 @@ def make_grouped_optimizer(
     default_transform: optax.GradientTransformation,
     prefix: str,
 ) -> optax.GradientTransformation:
-    """Builds one optimizer applying matched_transform to params under
-    prefix and default_transform to the rest, each with independent
-    optimizer state; equivalent to a separate backward pass per group
-    since unrelated params have zero gradient."""
+    """Builds one optimizer applying matched_transform to params under prefix and default_transform to the rest."""
     return optax.multi_transform(
         {"matched": matched_transform, "default": default_transform},
         lambda params: label_params_by_name_prefix(params, prefix, "matched", "default"),

@@ -1,5 +1,4 @@
-"""Detects a benchmark's format, then routes to the right loader - all
-resolve to the identical (macro_sizes, nets) shape."""
+"""Detects a benchmark's format, then routes to the right loader - all resolve to the same shape."""
 import enum
 import pathlib
 
@@ -33,7 +32,9 @@ def detect_format(benchmark_dir: pathlib.Path) -> NetlistFormat:
 def load_netlist(
     benchmark_dir: pathlib.Path, lef_paths: list[pathlib.Path] | None = None
 ) -> tuple[SizeMap, Nets]:
-    """Returns (macro_sizes, nets), identical shape regardless of format."""
+    """Returns (macro_sizes, nets), the identical shape regardless of the detected source format."""
+    # Detect the format first, then dispatch to the loader that understands it;
+    # DEF additionally needs its companion .lef files for macro geometry.
     match detect_format(benchmark_dir):
         case NetlistFormat.DEF:
             def_path = next(benchmark_dir.glob("*.def"))
@@ -47,6 +48,7 @@ def load_netlist(
         case NetlistFormat.PROTOBUF:
             return load_protobuf(next(benchmark_dir.glob("*.pb.txt")))
         case NetlistFormat.VERILOG_RTL:
+            # Unsynthesized RTL has no macro geometry yet, so we can't load it directly.
             raise NotImplementedError(
                 f"{benchmark_dir} contains unconverted Verilog RTL. Synthesize it first "
                 "(yosys synth against a target cell library, e.g. NanGate45) to produce "

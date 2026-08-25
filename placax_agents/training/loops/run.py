@@ -1,5 +1,4 @@
-"""Entry point for training: dispatches to sequential or parallel based
-on recommended_parallelism_mode()."""
+"""Entry point for training: dispatches to sequential or parallel based on recommended_parallelism_mode()."""
 import pathlib
 
 from placax._device import recommended_parallelism_mode  # must precede jax imports
@@ -30,11 +29,12 @@ def train(
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_path: pathlib.Path | None = None,
 ):
-    """Runs n_iterations of training (mode=None auto-detects). Returns
-    (final_variables, losses). n_envs only matters if mode is parallel."""
+    """Runs n_iterations of training (mode=None auto-detects); n_envs only matters if mode is parallel."""
+    # Auto-detect sequential vs. parallel unless the caller pinned a mode, then fall
+    # back to sequential anyway if there's only one env to run (nothing to parallelize).
     resolved_mode = recommended_parallelism_mode(mode)
 
-    if resolved_mode == "sequential" or n_envs <= 1:  # n_envs<=1 has nothing to parallelize over
+    if resolved_mode == "sequential" or n_envs <= 1:
         return train_sequential(
             key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size,
             n_iterations, learning_rate, state_fn, optimizer, ppo_config, checkpoint_path,

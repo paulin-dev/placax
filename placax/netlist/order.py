@@ -1,19 +1,14 @@
-"""Pluggable OrderFns: what sequence macros get placed in. A macro's
-position in the returned list becomes its row index everywhere downstream
-(positions, sizes_array, pin indices); swap via
-build_padded_arrays(..., order_fn=...)."""
+"""Pluggable OrderFns deciding what sequence macros get placed in, swappable via build_padded_arrays(order_fn=...)."""
 from placax.types import Nets, SizeMap
 
 
 def alphabetical_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Deterministic, has no opinion on placement quality - the historical
-    default."""
+    """Deterministic, with no opinion on placement quality - the historical default."""
     return sorted(macro_sizes)
 
 
 def area_desc_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Largest footprint first - a common heuristic: place the hardest-to-
-    fit macros while the canvas is still emptiest."""
+    """Largest footprint first, a common heuristic to place the hardest-to-fit macros while the canvas is emptiest."""
     return sorted(macro_sizes, key=lambda name: -macro_sizes[name][0] * macro_sizes[name][1])
 
 
@@ -36,21 +31,23 @@ def _macro_nets(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[int]]:
 
 
 def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Breadth-first by connectivity: starts from the highest-degree macro,
-    then repeatedly adds whichever unplaced macro shares the most nets
-    with what's already ordered (ties: degree, then name). Keeps
-    connected macros close together in placement order."""
+    """Breadth-first by connectivity, keeping macros that share nets close together in placement order."""
     if not macro_sizes:
         return []
+    # Precompute how many nets each macro touches, and which net indices each macro is in.
     degree = _net_degree(nets)
     macro_nets = _macro_nets(macro_sizes, nets)
 
+    # Seed the order with the single most-connected macro.
     remaining = set(macro_sizes)
     first = min(remaining, key=lambda n: (-degree.get(n, 0), n))
     order = [first]
     remaining.discard(first)
     frontier_nets = set(macro_nets[first])
 
+    # Repeatedly grow the order by picking whichever remaining macro shares the most
+    # nets with everything placed so far (ties broken by degree, then name), and
+    # folding its nets into the "frontier" so later picks stay close to the whole group.
     while remaining:
         def sort_key(name: str) -> tuple[int, int, str]:
             shared = len(frontier_nets & macro_nets[name])

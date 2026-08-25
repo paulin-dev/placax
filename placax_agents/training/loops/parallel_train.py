@@ -1,5 +1,4 @@
-"""Parallel training: n_envs episodes collected and averaged into one
-gradient update per iteration, via vmap. See train.py for sequential."""
+"""Parallel training: n_envs episodes vmapped and averaged into one gradient update per iteration (see train.py for sequential)."""
 import pathlib
 
 from placax.types import EnvParams, RewardFn  # must precede jax imports
@@ -33,9 +32,8 @@ def parallel_train_step(
     ppo_config: PPOConfig = PPOConfig(),
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """Like train.train_step, but keys has a leading n_envs dimension:
-    n_envs episodes are collected and averaged into one update."""
-    # One episode per key, batched via vmap.
+    """Like train.train_step, but keys has a leading n_envs dimension: n_envs episodes are collected and averaged into one update."""
+    # 1. Run one episode per key, all at once via vmap instead of a Python loop.
     batched_rollout = jax.vmap(
         collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
     )
@@ -44,6 +42,8 @@ def parallel_train_step(
         extra_illegal_fn,
     )
 
+    # 2. Compute GAE independently per episode (each has its own reward/value/done
+    #    sequence), again batched via vmap rather than looping.
     batched_gae = jax.vmap(compute_gae, in_axes=(0, 0, 0, None, None, None))
     advantages, returns = batched_gae(
         trajectories["reward"], trajectories["value"], trajectories["done"], jnp.array(0.0),
@@ -62,6 +62,7 @@ def parallel_train_step(
         )(trajectories, normalized_advantages, normalized_returns)
         return per_episode_losses.mean()
 
+    # 3. One shared gradient update, averaged across all n_envs episodes' losses.
     new_variables, new_opt_state, new_running_stats, loss = apply_gradient_update(
         variables, opt_state, running_stats, optimizer, loss_fn, advantages, returns
     )
@@ -92,8 +93,7 @@ def train_parallel(
     checkpoint_path: pathlib.Path | None = None,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """Runs n_iterations of parallel_train_step, each collecting n_envs
-    episodes at once. Returns (final_variables, losses)."""
+    """Runs n_iterations of parallel_train_step, each collecting n_envs episodes at once, and returns (final_variables, losses)."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
@@ -102,7 +102,9 @@ def train_parallel(
 
     losses = []
     for i in range(n_iterations):
-        key, step_keys = make_step_input(key, n_envs)  # n_envs fresh keys, one per parallel episode
+        # n_envs fresh keys, one per parallel episode, then one jitted step covering
+        # rollout + GAE + gradient update for all of them.
+        key, step_keys = make_step_input(key, n_envs)
         variables, opt_state, running_stats, loss, _ = _jitted_parallel_train_step(
             step_keys, variables, opt_state, running_stats, optimizer, policy_apply_fn,
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config, extra_illegal_fn,

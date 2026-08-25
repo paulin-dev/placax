@@ -1,7 +1,4 @@
-"""Buffer + minibatch-epoch PPO training: collect n_episodes of rollout
-into one buffer, then run ppo_epochs passes of shuffled batch_size
-minibatch updates over it. Matches MaskPlace's own PPO2.py procedure
-(buffer_capacity/ppo_epoch/batch_size)."""
+"""Buffer + minibatch-epoch PPO training, matching MaskPlace's own PPO2.py procedure."""
 import pathlib
 
 from placax.types import EnvParams, RewardFn  # must precede jax imports
@@ -32,15 +29,17 @@ def collect_buffer(
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """n_episodes of collect_rollout, vmapped and flattened into one
-    buffer of (n_episodes * n_macros) transitions, in per-episode temporal
-    order; safe to run compute_gae() once over the whole buffer since GAE
-    resets on each episode's done flag."""
+    """Collects n_episodes of rollout (vmapped) and flattens them into one buffer of transitions."""
+    # 1. One fresh random key per episode, then run all episodes at once via vmap
+    #    instead of a slow Python loop.
     keys = jax.random.split(key, n_episodes)
     trajectories, _ = jax.vmap(
         collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
     )(keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn, extra_illegal_fn)
-    flatten = lambda x: x.reshape((-1,) + x.shape[2:])  # noqa: E731  (n_episodes, n_macros, ...) -> (n, ...)
+    # 2. Collapse the (n_episodes, n_macros, ...) batch dimensions into one flat buffer
+    #    axis; episodes stay in temporal order internally, which is what compute_gae
+    #    needs since it relies on each episode's done flag to reset advantages.
+    flatten = lambda x: x.reshape((-1,) + x.shape[2:])  # noqa: E731
     return jax.tree_util.tree_map(flatten, trajectories)
 
 
@@ -49,6 +48,7 @@ def _minibatch_update(
     batch_trajectory, batch_advantages, batch_returns, cell_size, ppo_config, extra_illegal_fn,
 ):
     """One gradient step over one minibatch slice of an already-built buffer."""
+
     def loss_fn(policy_params, normalized_advantages, normalized_returns):
         return ppo_loss(
             policy_params, policy_apply_fn, batch_trajectory, normalized_advantages, normalized_returns,
@@ -69,8 +69,9 @@ _jitted_minibatch_update = jax.jit(
 
 
 def _shuffled_batches(key: jax.Array, buffer_size: int, batch_size: int) -> jax.Array:
-    """(n_batches, batch_size) int array of shuffled buffer indices;
-    drops a short remainder, matching MaskPlace's BatchSampler(drop_last=True)."""
+    """Returns (n_batches, batch_size) shuffled buffer indices, dropping any short remainder."""
+    # Shuffle all buffer indices, then chop off any leftover that doesn't fill a full
+    # batch (matches MaskPlace's BatchSampler(drop_last=True)) before reshaping into batches.
     n_batches = buffer_size // batch_size
     perm = jax.random.permutation(key, buffer_size)
     return perm[: n_batches * batch_size].reshape(n_batches, batch_size)
@@ -94,18 +95,23 @@ def buffered_train_step(
     ppo_config: PPOConfig = PPOConfig(),
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """One full buffer-collect + multi-epoch-minibatch update cycle.
-    Returns (variables, opt_state, running_stats, last_minibatch_loss)."""
+    """One full buffer-collect + multi-epoch-minibatch update cycle, returning updated
+    (variables, opt_state, running_stats, last_minibatch_loss)."""
+    # 1. Fill the buffer with n_episodes of fresh rollout data using the current policy.
     key, buffer_key = jax.random.split(key)
     buffer = collect_buffer(
         buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes,
         state_fn, extra_illegal_fn,
     )
+    # 2. Compute advantages/returns once for the whole buffer - cheaper than per-minibatch,
+    #    and valid because GAE resets naturally at each episode's done flag.
     advantages, returns = compute_gae(
         buffer["reward"], buffer["value"], buffer["done"], next_value=jnp.array(0.0),
         gamma=ppo_config.gamma, lam=ppo_config.lam,
     )
 
+    # 3. Re-use this same buffer for several epochs, each time reshuffling into fresh
+    #    minibatches, so every transition contributes to several gradient steps.
     loss = jnp.array(0.0)
     for _epoch in range(ppo_epochs):
         key, shuffle_key = jax.random.split(key)
@@ -138,9 +144,8 @@ def train_buffered(
     checkpoint_path: pathlib.Path | None = None,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """Runs n_iterations of buffered_train_step. Returns (final_variables,
-    losses). Defaults (n_episodes=10, ppo_epochs=10, batch_size=64)
-    reproduce MaskPlace's own PPO2.py values."""
+    """Runs n_iterations of buffered_train_step and returns (final_variables, losses)."""
+    # Default optimizer, and either a fresh training state or one resumed from checkpoint_path.
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
@@ -149,6 +154,8 @@ def train_buffered(
 
     losses = []
     for i in range(n_iterations):
+        # Each iteration: fresh rollout buffer, several epochs of minibatch updates over
+        # it, then checkpoint so a crash never loses more than one iteration of progress.
         key, step_key = make_step_input(key)
         variables, opt_state, running_stats, loss = buffered_train_step(
             step_key, variables, opt_state, running_stats, optimizer, policy_apply_fn, params,

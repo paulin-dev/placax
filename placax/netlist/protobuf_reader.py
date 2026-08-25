@@ -1,5 +1,4 @@
-"""Reads Circuit Training's .pb.txt netlist format (a TensorFlow GraphDef
-text representation) into the same shape as the other loaders."""
+"""Reads Circuit Training's .pb.txt netlist format (a TensorFlow GraphDef text) into the shape the other loaders use."""
 import pathlib
 import re
 
@@ -33,13 +32,14 @@ def parse_macros(pb_text: str) -> SizeMap:
 
 
 def _macro_pin_entries(pb_text: str) -> list[tuple[str, float, float, str]]:
-    """(macro_name, x_offset, y_offset, pin_node_name) per MACRO_PIN node
-    - the node name is what other nodes' input: lists reference."""
+    """Returns (macro_name, x_offset, y_offset, pin_node_name) per MACRO_PIN node."""
     entries = []
     for block in _split_nodes(pb_text):
         type_match = _TYPE_RE.search(block)
         if not type_match or type_match.group(1) != "MACRO_PIN":
             continue
+        # The pin node's own name is what other nodes' input: lists reference,
+        # so we keep it alongside the macro it belongs to and its offset.
         pin_name = _NAME_RE.search(block).group(1)
         str_attrs = dict(_STR_ATTR_RE.findall(block))
         float_attrs = dict(_FLOAT_ATTR_RE.findall(block))
@@ -57,9 +57,7 @@ def parse_macro_pins(pb_text: str) -> list[NetPin]:
 
 
 def parse_nets(pb_text: str) -> Nets:
-    """Returns a list of pins per net, from `input:` references on hub
-    nodes (any node - only which macro pins it references matters).
-    Kept only if >= 2 distinct macros."""
+    """Returns a list of pins per net, built from any node's `input:` references, kept if >= 2 macros."""
     pin_lookup = {name: (macro, x, y) for macro, x, y, name in _macro_pin_entries(pb_text)}
 
     nets = []

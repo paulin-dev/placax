@@ -28,11 +28,10 @@ def save_train_state(path: pathlib.Path, variables, opt_state, running_stats, ke
 
 
 def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | None):
-    """Fresh optimizer/running stats, or resumed from checkpoint_path if
-    it exists. Returns (variables, opt_state, running_stats, key,
-    start_iteration)."""
+    """Returns fresh (variables, opt_state, running_stats, key, start_iteration), or resumed from checkpoint_path."""
+    # Build a fresh-state pytree first; it also serves as the deserialization
+    # template, giving load_checkpoint the shape to unpack saved data into.
     template = train_state_bundle(variables, optimizer.init(variables), init_running_stats(), key, 0)
-    # template doubles as the deserialization target, giving load_checkpoint a pytree to unpack into.
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
         state["variables"],

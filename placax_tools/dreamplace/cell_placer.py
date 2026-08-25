@@ -1,5 +1,4 @@
-"""DREAMPlace-specific CellPlacer. Not verified end-to-end here -
-DREAMPlace isn't installed in this environment."""
+"""DREAMPlace-specific CellPlacer (not verified end-to-end here since DREAMPlace isn't installed)."""
 import json
 import pathlib
 import subprocess
@@ -49,8 +48,7 @@ def build_dreamplace_config(
 
 
 class DREAMPlaceCellPlacer(CellPlacer):
-    """Default CellPlacer, requiring a real DREAMPlace install.
-    extra_config overrides/adds any DREAMPlace config field."""
+    """Default CellPlacer, requiring a real DREAMPlace install; extra_config overrides/adds any config field."""
 
     def __init__(
         self,
@@ -70,10 +68,13 @@ class DREAMPlaceCellPlacer(CellPlacer):
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> pathlib.Path:
         """Builds and writes the config DREAMPlace itself reads."""
+        # 1. Start from the standard config for this placement.
         config = build_dreamplace_config(
             def_path, lef_paths, output_dir, gpu=self.gpu, target_density=self.target_density
         )
+        # 2. Let any user-supplied overrides win (e.g. tuning knobs per design).
         config.update(self.extra_config)
+        # 3. Write it out as JSON - this is the file DREAMPlace's CLI expects.
         config_path = output_dir / "dreamplace_config.json"
         config_path.write_text(json.dumps(config, indent=2))
         return config_path
@@ -88,6 +89,8 @@ class DREAMPlaceCellPlacer(CellPlacer):
 
     def _expect_result_def(self, def_path: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
         """Confirms DREAMPlace actually produced the DEF we expect."""
+        # DREAMPlace names its output after the input DEF's stem, with a
+        # ".gp.def" suffix - fail loudly if that convention doesn't hold.
         result_def = output_dir / f"{def_path.stem}.gp.def"
         if not result_def.exists():
             raise FileNotFoundError(
@@ -100,7 +103,11 @@ class DREAMPlaceCellPlacer(CellPlacer):
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> pathlib.Path:
         """Writes the config, runs DREAMPlace, returns the placed DEF."""
+        # 1. Make sure the output directory exists before anything writes to it.
         output_dir.mkdir(parents=True, exist_ok=True)
+        # 2. Prepare the config file DREAMPlace will read.
         config_path = self._write_config(def_path, lef_paths, output_dir)
+        # 3. Hand off to the external DREAMPlace process to do the actual placement.
         self._run_dreamplace(config_path)
+        # 4. Confirm it produced output and return its path.
         return self._expect_result_def(def_path, output_dir)

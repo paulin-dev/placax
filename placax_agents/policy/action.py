@@ -14,20 +14,20 @@ def legal_action_logits(
     macro_size: tuple[int, int],
     extra_illegal: jax.Array | None = None,
 ) -> jax.Array:
-    """Masks illegal cells (overlap or out-of-bounds) to -inf; extra_illegal
-    is OR'd in if given. Skips masking if every cell is illegal (avoids
-    all -inf NaN'ing log_softmax)."""
+    """Sets illegal cells' logits to -inf so they're never sampled/argmax'd."""
+    # A cell is illegal if placing the macro there would overlap something, go out of bounds,
+    # or (optionally) violate an extra caller-supplied rule.
     illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
     if extra_illegal is not None:
         illegal = illegal | extra_illegal
-    illegal = jnp.where(illegal.all(), False, illegal)  # bail out of masking rather than go all -inf
+    # Safety valve: if literally every cell got marked illegal, masking everything to -inf
+    # would make log_softmax produce NaNs. Bail out and mask nothing instead.
+    illegal = jnp.where(illegal.all(), False, illegal)
     return jnp.where(illegal, -jnp.inf, logits)
 
 
 def make_wiremask_quality_illegal(margin: float, wiremask_key: str = "wiremask") -> ExtraIllegalFn:
-    """ExtraIllegalFn: cells whose wiremask exceeds wiremask.min() + margin
-    are illegal - MaskPlace's soft_coefficient cutoff. Needs
-    obs[wiremask_key]."""
+    """Builds an ExtraIllegalFn that rules out cells whose wiremask exceeds wiremask.min() + margin."""
 
     def extra_illegal_fn(obs: dict) -> jax.Array:
         wiremask = obs[wiremask_key]

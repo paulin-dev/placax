@@ -37,9 +37,10 @@ def _maybe_evaluate(
     valid_mask: jax.Array,
     state_fn: StateFn,
 ) -> float | None:
-    """Real HPWL at current_iteration, or None if not an eval iteration."""
+    """Returns real HPWL at current_iteration, or None if this isn't an eval iteration."""
     if current_iteration % eval_every != 0:
         return None
+    # Run a full greedy rollout with the current policy just to measure quality, not to train.
     _positions, hpwl_value = evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
@@ -84,17 +85,14 @@ def resumable_train(
     snapshot_dir: pathlib.Path | None = None,
     snapshot_every: int | None = None,
 ):
-    """Runs n_iterations more, resuming from checkpoint_path if it
-    exists. Returns (final_variables, log) for this call's iterations.
-    snapshot_dir/snapshot_every, if both given, also save a permanent,
-    never-overwritten copy every snapshot_every iterations. log_every
-    controls console progress via Log.info() - None disables it; this
-    is independent of log_path, which always gets every iteration."""
+    """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log)."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
+    # Pick the sequential or parallel training-step implementation based on hardware + n_envs.
     use_parallel = recommended_parallelism_mode(mode) == "parallel" and n_envs > 1
     jitted_step = _jitted_parallel_train_step if use_parallel else _jitted_train_step
 
+    # Resume from a checkpoint if one exists, otherwise start fresh from the given variables/key.
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path
     )
@@ -129,5 +127,6 @@ def resumable_train(
         snapshot_path = snapshot_dir / f"checkpoint_iter_{current_iteration}.bin" if snapshot_dir else None
         checkpoint_every_n(snapshot_path, snapshot_every, current_iteration, variables, opt_state, running_stats, key)
 
-    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)  # always checkpoint at the end
+    # Always checkpoint at the end, regardless of checkpoint_every.
+    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables, log

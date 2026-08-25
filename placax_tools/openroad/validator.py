@@ -1,6 +1,4 @@
-"""OpenROAD-specific Validator: area/utilization always computed, timing
-only if liberty + clock are given. Not verified end-to-end here -
-OpenROAD isn't installed."""
+"""OpenROAD-specific Validator: area/utilization always computed, timing only if liberty + clock are given."""
 import pathlib
 import re
 import subprocess
@@ -16,12 +14,15 @@ def build_openroad_script(
     wire_rc_layer: str = "metal3",
     clock_name: str = "core_clock",
 ) -> str:
-    """OpenROAD TCL for area (+ optional timing) reports. Timing lines
-    appear only if both liberty_path and clock_period_ns are given."""
+    """Builds OpenROAD TCL for area reports, plus timing if both liberty_path and clock_period_ns are given."""
+    # 1. Load the physical design: tech/cell LEFs, then the placed DEF.
     lines = [f"read_lef {p}" for p in lef_paths]
     lines.append(f"read_def {def_path}")
     lines.append("report_design_area")
 
+    # 2. Only attempt timing analysis if we have both a liberty file (cell
+    #    timing models) and a clock period - otherwise OpenROAD has nothing
+    #    to time against, so we skip these commands entirely.
     if liberty_path is not None and clock_period_ns is not None:
         lines.append(f"read_liberty {liberty_path}")
         lines.append(f"create_clock -period {clock_period_ns} [get_ports *] -name {clock_name}")
@@ -37,8 +38,9 @@ _SLACK_RE = re.compile(r"slack\s+\(?(?:MET|VIOLATED)?\)?\s*(-?[\d.]+)", re.IGNOR
 
 
 def parse_openroad_output(raw_output: str) -> PPAResult:
-    """Extracts what's actually there - area/utilization always, timing
-    slack only if a timing report ran."""
+    """Extracts what's actually there in raw_output: area/utilization always, timing slack only if it ran."""
+    # Search rather than require a match, since timing lines may simply be
+    # absent (no liberty/clock given) - that's a valid, expected case.
     area_match = _AREA_RE.search(raw_output)
     slack_match = _SLACK_RE.search(raw_output)
     return PPAResult(
@@ -91,7 +93,11 @@ class OpenROADValidator(Validator):
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
     ) -> PPAResult:
         """Writes the TCL script, runs OpenROAD, parses its output."""
+        # 1. Make sure the output directory exists before anything writes to it.
         output_dir.mkdir(parents=True, exist_ok=True)
+        # 2. Generate the TCL script driving this specific validation run.
         script_path = self._write_script(def_path, lef_paths, output_dir)
+        # 3. Run OpenROAD and capture its textual report.
         raw_output = self._run_openroad(script_path)
+        # 4. Turn that free-form text into structured numbers.
         return parse_openroad_output(raw_output)

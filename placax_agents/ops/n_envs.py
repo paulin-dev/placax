@@ -24,18 +24,10 @@ def _import(dotted_path: str):
 
 
 class NEnvsDetector:
-    """Auto-detects (mode, n_envs) for parallel training on this
-    hardware. policy_path/make_reward_fn_path are dotted import paths
-    ("module.Name") so a fresh subprocess can rebuild the exact same
-    policy/reward with nothing crossing the process boundary but
-    strings; policy_path must be zero-argument-constructible
-    (instantiated as policy_path()), make_reward_fn_path must resolve to
-    a RewardFnFactory.
+    """Auto-detects (mode, n_envs) for parallel training on this hardware by probing candidates in subprocesses.
 
-    Each candidate n_envs is tried for real in a disposable subprocess
-    (see probe_subprocess): JAX's memory accounting is unusable after the
-    first real GPU allocation, and a hung/crashing candidate can be
-    killed without losing the calling process."""
+    policy_path/make_reward_fn_path are dotted import paths ("module.Name") so each disposable
+    subprocess can rebuild the exact same policy/reward from nothing but strings."""
 
     def __init__(
         self,
@@ -54,8 +46,7 @@ class NEnvsDetector:
         self.verbose = verbose
 
     def detect(self) -> tuple[str, int]:
-        """Returns (mode, n_envs). Only searches if parallel is worth
-        trying on this hardware at all."""
+        """Auto-detects (mode, n_envs), only searching if parallel training is worth trying on this hardware."""
         mode = recommended_parallelism_mode()
         if mode == "sequential":
             return "sequential", 1
@@ -63,13 +54,13 @@ class NEnvsDetector:
         return "parallel", max(n_envs, 1)
 
     def resolve(self, override: int | None = None) -> tuple[str, int]:
-        """(mode, n_envs): override if given ("sequential" if <=1, else
-        "parallel"), otherwise auto-detected via detect()."""
+        """Returns (mode, n_envs): the override if given, otherwise auto-detected via detect()."""
         if override is not None:
             return ("sequential" if override <= 1 else "parallel"), override
         return self.detect()
 
     def _try_n_envs(self, n: int) -> None:
+        """Probes whether n parallel envs fit, by re-running this module in a fresh subprocess."""
         # preallocate=false: this fresh process must report real usage, not one big arena grab.
         env = {**os.environ, "XLA_PYTHON_CLIENT_PREALLOCATE": "false"}
         # Re-invoke this module as `python -m ...` - see the __main__ block below.
@@ -82,6 +73,7 @@ class NEnvsDetector:
 
 def _rebuild_benchmark_and_policy(benchmark_dir: str, policy_path: str, make_reward_fn_path: str):
     """Rebuilds (benchmark, policy, variables) from scratch - nothing crosses the process boundary but strings."""
+    # Only pass make_reward_fn through if the caller actually specified one - Benchmark.load has its own default.
     load_kwargs = {"make_reward_fn": _import(make_reward_fn_path)} if make_reward_fn_path else {}
     benchmark = Benchmark.load(pathlib.Path(benchmark_dir), **load_kwargs)
     policy = _import(policy_path)()
@@ -90,8 +82,7 @@ def _rebuild_benchmark_and_policy(benchmark_dir: str, policy_path: str, make_rew
 
 
 def _probe_entrypoint(benchmark_dir: str, policy_path: str, make_reward_fn_path: str, n: int) -> None:
-    """Subprocess entry point (see NEnvsDetector._try_n_envs): attempts
-    one n-env training step, reporting the outcome via exit code."""
+    """Subprocess entry point: attempts one n-env training step, reporting the outcome via exit code."""
     benchmark, policy, variables = _rebuild_benchmark_and_policy(benchmark_dir, policy_path, make_reward_fn_path)
     try:
         train_parallel(
