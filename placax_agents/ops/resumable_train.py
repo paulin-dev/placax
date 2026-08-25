@@ -77,6 +77,7 @@ def resumable_train(
     ppo_config: PPOConfig = PPOConfig(),
     checkpoint_every: int = 10,
     eval_every: int = 10,
+    log_every: int | None = 1,
     log_path: pathlib.Path | None = None,
     n_envs: int = 1,
     mode: str | None = None,
@@ -86,7 +87,9 @@ def resumable_train(
     """Runs n_iterations more, resuming from checkpoint_path if it
     exists. Returns (final_variables, log) for this call's iterations.
     snapshot_dir/snapshot_every, if both given, also save a permanent,
-    never-overwritten copy every snapshot_every iterations."""
+    never-overwritten copy every snapshot_every iterations. log_every
+    controls console progress via Log.info() - None disables it; this
+    is independent of log_path, which always gets every iteration."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     use_parallel = recommended_parallelism_mode(mode) == "parallel" and n_envs > 1
@@ -115,8 +118,9 @@ def resumable_train(
             padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
         )
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
-        hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
-        Log.info(f"iter {current_iteration:>6}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
+        if log_every is not None and current_iteration % log_every == 0:
+            hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
+            Log.info(f"iter {current_iteration:>6}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 
         # 4. periodic checkpoint (overwritten) + 5. periodic snapshot (never overwritten)
         checkpoint_every_n(
