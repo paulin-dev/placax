@@ -12,8 +12,10 @@ existing pluggable pieces (not a MaskPlace reimplementation):
   - maskplace_optimizer        independently-clipped, independently-stepped actor/critic Adam
   - train_buffered            its buffer-collect + minibatch-epoch PPO update procedure
 
-Usage: python scripts/run_maskplace.py [benchmark_dir] [n_iterations] [macro_budget] [n_episodes|auto]
+Usage: python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 \\
+           --n_episodes=auto   (run --help for all flags, including macro_budget)
 """
+import argparse
 import pathlib
 import sys
 from functools import partial
@@ -43,6 +45,9 @@ import optax
 from jax import random
 
 WIREMASK_MARGIN = 1.0  # MaskPlace's own --soft_coefficient default
+
+MASKPLACE_MACRO_BUDGET = 128
+"""MaskPlace's own --pnm default: place only its 128 most important macros, not the whole netlist."""
 
 MASKPLACE_N_EPISODES = 10
 """MaskPlace's own buffer size: 10 episodes collected (in parallel, via vmap) per PPO update."""
@@ -77,13 +82,31 @@ def maskplace_optimizer(
 
 
 def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str]:
-    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg) from sys.argv; n_episodes_arg
-    is either an int-as-string or the literal "auto" (see NEpisodesDetector)."""
-    benchmark_dir = pathlib.Path(argv[1] if len(argv) > 1 else "benchmarks/adaptec1")
-    n_iterations = int(argv[2]) if len(argv) > 2 else 100
-    macro_budget = int(argv[3]) if len(argv) > 3 else None
-    n_episodes_arg = argv[4] if len(argv) > 4 else str(MASKPLACE_N_EPISODES)
-    return benchmark_dir, n_iterations, macro_budget, n_episodes_arg
+    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg) from named --flag=value CLI args;
+    macro_budget is None if --macro_budget=all was given; n_episodes_arg is either an int-as-string
+    or the literal "auto" (see NEpisodesDetector)."""
+    parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
+    parser.add_argument(
+        "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
+        help="Path to a downloaded benchmark directory (default: benchmarks/adaptec1).",
+    )
+    parser.add_argument(
+        "--n_iterations", type=int, default=100,
+        help="Number of buffered-PPO update cycles to run (default: 100).",
+    )
+    parser.add_argument(
+        "--macro_budget", type=str, default=str(MASKPLACE_MACRO_BUDGET),
+        help='Place only the N most important macros, MaskPlace\'s --pnm (default: %(default)s, '
+             'MaskPlace\'s own value); pass "all" to place every macro in the netlist instead.',
+    )
+    parser.add_argument(
+        "--n_episodes", type=str, default=str(MASKPLACE_N_EPISODES),
+        help='Episodes collected per PPO update (default: %(default)s, MaskPlace\'s own value); '
+             'pass "auto" to auto-detect the largest that fits on this hardware (see NEpisodesDetector).',
+    )
+    args = parser.parse_args(argv[1:])
+    macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
+    return args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes
 
 
 def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
