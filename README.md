@@ -30,3 +30,16 @@ GitHub desc: A shared, differentiable JAX environment for chip macro placement
 ```sh
 pip install placax
 ```
+
+## Training (MaskPlace pipeline)
+
+```sh
+python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=auto
+```
+
+- `--benchmark_dir`: path to a downloaded benchmark (see `scripts/download_benchmarks.py`); default `benchmarks/adaptec1`.
+- `--n_iterations`: number of buffered-PPO update cycles to run; default `100`.
+- `--macro_budget`: place only the N most important macros (MaskPlace's `--pnm`); default `128`, MaskPlace's own value. Pass `all` to place every macro in the netlist instead - not yet verified to fit in memory or train well at that scale.
+- `--n_episodes`: episodes collected per PPO update (MaskPlace's own default is `10`); pass `auto` to auto-detect the largest that fits on your GPU instead of picking a number yourself.
+
+Run `python scripts/run_maskplace.py --help` for the full flag list. The script auto-resumes from its checkpoint on re-run, so it's safe to stop and restart with the same flags.
