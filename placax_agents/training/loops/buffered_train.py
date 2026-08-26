@@ -43,6 +43,20 @@ def collect_buffer(
     return jax.tree_util.tree_map(flatten, trajectories)
 
 
+# Built once at import: without this, the vmapped rollout above (which runs the entire
+# policy network, backbone included, n_episodes times) gets retraced and recompiled from
+# scratch on every call instead of being cached - both far slower than it should be, and,
+# on tightly memory-constrained hardware, a source of GPU memory growth every iteration
+# until the process OOMs.
+_jitted_collect_buffer = jax.jit(
+    collect_buffer, static_argnames=("policy_apply_fn", "reward_fn", "state_fn", "extra_illegal_fn", "n_episodes")
+)
+
+# Same reasoning as _jitted_collect_buffer above: without this, compute_gae's small scan
+# also recompiles from scratch on every call instead of being cached.
+_jitted_compute_gae = jax.jit(compute_gae)
+
+
 def _minibatch_update(
     variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
     batch_trajectory, batch_advantages, batch_returns, cell_size, ppo_config, extra_illegal_fn,
@@ -99,13 +113,13 @@ def buffered_train_step(
     (variables, opt_state, running_stats, last_minibatch_loss)."""
     # 1. Fill the buffer with n_episodes of fresh rollout data using the current policy.
     key, buffer_key = jax.random.split(key)
-    buffer = collect_buffer(
+    buffer = _jitted_collect_buffer(
         buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes,
         state_fn, extra_illegal_fn,
     )
     # 2. Compute advantages/returns once for the whole buffer - cheaper than per-minibatch,
     #    and valid because GAE resets naturally at each episode's done flag.
-    advantages, returns = compute_gae(
+    advantages, returns = _jitted_compute_gae(
         buffer["reward"], buffer["value"], buffer["done"], next_value=jnp.array(0.0),
         gamma=ppo_config.gamma, lam=ppo_config.lam,
     )
