@@ -27,7 +27,7 @@ from placax.netlist.order import connectivity_order
 from placax.netlist.padding import build_macro_net_index
 from placax_agents.benchmark import Benchmark
 from placax_agents.ops.autotune import find_max_via_subprocess, is_oom
-from placax_agents.ops.evaluate import evaluate
+from placax_agents.ops.resumable_train import _append_log_entry, _maybe_evaluate
 from placax_agents.policy.action import make_wiremask_quality_illegal
 from placax_agents.policy.architectures.resnet_cnn import (
     ResNetCoarseFineActorCritic,
@@ -38,7 +38,8 @@ from placax_agents.policy.observation import make_wiremask_observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.loss import huber_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
-from placax_agents.training.loops.buffered_train import train_buffered
+from placax_agents.training.loops.buffered_train import buffered_train_step, train_buffered
+from placax_agents.training.loops.common import checkpoint_every_n, open_train_state, save_train_state
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
 import optax
@@ -81,10 +82,10 @@ def maskplace_optimizer(
     return make_grouped_optimizer(per_network, per_network, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str]:
-    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg) from named --flag=value CLI args;
-    macro_budget is None if --macro_budget=all was given; n_episodes_arg is either an int-as-string
-    or the literal "auto" (see NEpisodesDetector)."""
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int]:
+    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every) from named
+    --flag=value CLI args; macro_budget is None if --macro_budget=all was given; n_episodes_arg is
+    either an int-as-string or the literal "auto" (see NEpisodesDetector)."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
         "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
@@ -104,9 +105,17 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str]:
         help='Episodes collected per PPO update (default: %(default)s, MaskPlace\'s own value); '
              'pass "auto" to auto-detect the largest that fits on this hardware (see NEpisodesDetector).',
     )
+    parser.add_argument(
+        "--log_every", type=int, default=1,
+        help="Print a progress line to the console every this many iterations (default: 1, every iteration).",
+    )
+    parser.add_argument(
+        "--eval_every", type=int, default=10,
+        help="Compute real HPWL (a full extra greedy rollout) every this many iterations (default: 10).",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
-    return args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes
+    return args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every, args.eval_every
 
 
 def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
@@ -221,32 +230,50 @@ class NEpisodesDetector:
 
 def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
-    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, eval_every: int, n_episodes: int,
+    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, n_episodes: int,
+    log_every: int, eval_every: int, log_path: pathlib.Path | None,
 ):
-    """Runs n_iterations of buffered-PPO training in eval_every-sized chunks, logging real HPWL after each."""
-    done, remaining = 0, n_iterations
-    while remaining > 0:
-        # 1. Train for one chunk at a time (not all n_iterations at once) so
-        #    we can check in on real progress every eval_every iterations.
-        chunk = min(eval_every, remaining)
-        variables, losses = train_buffered(
-            key, variables, policy.apply, benchmark.params, benchmark.reward_fn,
-            benchmark.sizes_array, benchmark.cell_size, n_iterations=chunk, n_episodes=n_episodes,
-            optimizer=optimizer, state_fn=state_fn, ppo_config=ppo_config,
-            extra_illegal_fn=extra_illegal_fn, checkpoint_path=checkpoint_path,
-        )
-        done += chunk
-        remaining -= chunk
+    """Runs n_iterations of buffered-PPO training one iteration at a time, resuming from
+    checkpoint_path if it exists. Real HPWL is computed every eval_every iterations (a full extra
+    greedy rollout, so not cheap); a progress line is printed every log_every iterations; every
+    iteration is appended to log_path as JSONL regardless of log_every."""
+    # Resume from checkpoint_path if it exists (read once here, not once per iteration below).
+    variables, opt_state, running_stats, key, start_iteration = open_train_state(
+        variables, key, optimizer, checkpoint_path
+    )
 
-        # 2. Evaluate the current policy deterministically to get the actual
-        #    HPWL it achieves - training loss alone doesn't tell us that.
-        _positions, real_hpwl = evaluate(
-            variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
-            benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-            state_fn, extra_illegal_fn,
+    log = []
+    for i in range(n_iterations):
+        current_iteration = start_iteration + i + 1
+
+        # 1. One buffered-PPO update: collect n_episodes fresh episodes, train on them.
+        #    ppo_epochs=10, batch_size=64 are train_buffered's own defaults, matching MaskPlace.
+        key, buffer_key = random.split(key)
+        variables, opt_state, running_stats, loss = buffered_train_step(
+            buffer_key, variables, opt_state, running_stats, optimizer, policy.apply,
+            benchmark.params, benchmark.reward_fn, benchmark.sizes_array, benchmark.cell_size,
+            n_episodes, ppo_epochs=10, batch_size=64, state_fn=state_fn, ppo_config=ppo_config,
+            extra_illegal_fn=extra_illegal_fn,
         )
-        # 3. Report progress so a long training run isn't a silent black box.
-        Log.info(f"iter {done:>5}/{n_iterations}  loss={losses[-1]:>10.4f}  real_hpwl={float(real_hpwl):.1f}")
+
+        # 2. Real-HPWL eval (only every eval_every iterations) + log entry (always, to
+        #    log_path; console only every log_every iterations).
+        real_hpwl = _maybe_evaluate(
+            current_iteration, eval_every, variables, policy.apply, benchmark.params,
+            benchmark.sizes_array, benchmark.cell_size, benchmark.padded_pin_idx,
+            benchmark.padded_pin_offset, benchmark.valid_mask, state_fn, extra_illegal_fn,
+        )
+        _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
+        if current_iteration % log_every == 0:
+            hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
+            Log.info(f"iter {current_iteration:>6}/{n_iterations}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
+
+        # 3. Checkpoint every iteration (episodes are expensive to recollect on this hardware,
+        #    so a crash should never lose more than one iteration of progress).
+        checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
+
+    # Always checkpoint at the end too, in case n_iterations was 0.
+    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables
 
 
@@ -255,7 +282,7 @@ def main() -> None:
     Log.configure()
 
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
-    benchmark_dir, n_iterations, macro_budget, n_episodes_arg = _parse_args(sys.argv)
+    benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
@@ -282,6 +309,7 @@ def main() -> None:
     output_dir = benchmark_dir / "output_maskplace"
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = output_dir / "checkpoint.bin"
+    log_path = output_dir / "training_log.jsonl"
     resuming = checkpoint_path.exists()
     Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
 
@@ -310,11 +338,13 @@ def main() -> None:
     # 8. Run the actual training/eval loop.
     variables = _train_and_eval_loop(
         key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
-        checkpoint_path, n_iterations, eval_every=10, n_episodes=n_episodes,
+        checkpoint_path, n_iterations, n_episodes=n_episodes,
+        log_every=log_every, eval_every=eval_every, log_path=log_path,
     )
 
     print()
     print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
+    print(f"full history saved to {log_path}")
 
 
 if __name__ == "__main__":

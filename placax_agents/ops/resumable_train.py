@@ -18,7 +18,7 @@ from placax_agents.training.loops.common import (
 )
 from placax_agents.training.loops.parallel_train import _jitted_parallel_train_step
 from placax_agents.training.loops.train import _jitted_train_step
-from placax_agents.types import AlgorithmFn, StateFn
+from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 import optax
@@ -36,6 +36,7 @@ def _maybe_evaluate(
     padded_pin_offset: jax.Array,
     valid_mask: jax.Array,
     state_fn: StateFn,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> float | None:
     """Returns real HPWL at current_iteration, or None if this isn't an eval iteration."""
     if current_iteration % eval_every != 0:
@@ -43,7 +44,7 @@ def _maybe_evaluate(
     # Run a full greedy rollout with the current policy just to measure quality, not to train.
     _positions, hpwl_value = evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
-        padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
+        padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
     )
     return float(hpwl_value)
 

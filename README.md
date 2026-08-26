@@ -41,5 +41,9 @@ python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iteratio
 - `--n_iterations`: number of buffered-PPO update cycles to run; default `100`.
 - `--macro_budget`: place only the N most important macros (MaskPlace's `--pnm`); default `128`, MaskPlace's own value. Pass `all` to place every macro in the netlist instead - not yet verified to fit in memory or train well at that scale.
 - `--n_episodes`: episodes collected per PPO update (MaskPlace's own default is `10`); pass `auto` to auto-detect the largest that fits on your GPU instead of picking a number yourself.
+- `--log_every`: print a progress line to the console every this many iterations; default `1` (every iteration).
+- `--eval_every`: compute real HPWL (a full extra greedy rollout, so not cheap) every this many iterations; default `10`.
+
+Every iteration is appended to `<benchmark_dir>/output_maskplace/training_log.jsonl` regardless of `--log_every`, so the full history survives even if the console only shows a fraction of it.
 
 Run `python scripts/run_maskplace.py --help` for the full flag list. The script auto-resumes from its checkpoint on re-run, so it's safe to stop and restart with the same flags.
