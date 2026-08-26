@@ -19,7 +19,10 @@ def apply_gradient_update(
     advantages: jax.Array,
     returns: jax.Array,
 ):
-    """One gradient step: normalizes advantages/returns, then applies loss_fn's gradient via optimizer."""
+    """One gradient step: normalizes advantages/returns, then applies loss_fn's gradient via optimizer.
+    Only variables["params"] is trained; any other collection (e.g. Flax BatchNorm's batch_stats) is
+    passed through unchanged - gradient-descending a running statistic isn't meaningful, and can drive
+    a variance negative, NaN-ing every forward pass from then on."""
     # 1. Fold this batch's returns into the running mean/var, then use the updated stats to
     #    standardize returns - keeps the value loss's scale stable as training progresses.
     new_running_stats = update_running_stats(running_stats, returns)
@@ -27,10 +30,19 @@ def apply_gradient_update(
     # 2. Advantages are normalized per-batch instead (no running stats needed for them).
     normalized_advantages = normalize_advantages(advantages)
 
-    # 3. Compute the loss and its gradient w.r.t. the policy/value network parameters.
-    loss, grads = jax.value_and_grad(loss_fn)(variables, normalized_advantages, normalized_returns)
-    # 4. Let the optimizer (e.g. Adam) turn raw gradients into parameter deltas, then apply them.
-    updates, new_opt_state = optimizer.update(grads, opt_state, variables)
-    new_variables = optax.apply_updates(variables, updates)
+    # 3. Split out the trainable params from any frozen collection, so only
+    #    params get differentiated and optimized below.
+    params = variables["params"]
+    frozen_collections = {k: v for k, v in variables.items() if k != "params"}
+
+    def params_loss_fn(params, na, nr):
+        return loss_fn({**frozen_collections, "params": params}, na, nr)
+
+    # 4. Compute the loss and its gradient w.r.t. params only.
+    loss, grads = jax.value_and_grad(params_loss_fn)(params, normalized_advantages, normalized_returns)
+    # 5. Let the optimizer (e.g. Adam) turn raw gradients into parameter deltas, then apply them.
+    updates, new_opt_state = optimizer.update(grads, opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    new_variables = {**frozen_collections, "params": new_params}
 
     return new_variables, new_opt_state, new_running_stats, loss

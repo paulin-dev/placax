@@ -31,7 +31,9 @@ def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | 
     """Returns fresh (variables, opt_state, running_stats, key, start_iteration), or resumed from checkpoint_path."""
     # Build a fresh-state pytree first; it also serves as the deserialization
     # template, giving load_checkpoint the shape to unpack saved data into.
-    template = train_state_bundle(variables, optimizer.init(variables), init_running_stats(), key, 0)
+    # optimizer state is shaped for params only, matching apply_gradient_update
+    # (which optimizes variables["params"] alone, leaving other collections frozen).
+    template = train_state_bundle(variables, optimizer.init(variables["params"]), init_running_stats(), key, 0)
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
         state["variables"],
