@@ -238,7 +238,10 @@ class NEpisodesDetector:
         macro_budget: int | None = None,
         max_candidate: int = MASKPLACE_N_EPISODES,  # no point searching past MaskPlace's own value
         eval_every: int = 10,  # must match the real run's --eval_every for the probe to be representative
-        timeout_s: float = 300.0,
+        # Generous: each probe subprocess compiles this ResNet-backed pipeline's shapes from cold (see
+        # placax._device's JAX_COMPILATION_CACHE_DIR), so most of this budget goes to compile time, not
+        # steady-state iteration time - too tight a timeout misreports a slow-to-compile n as infeasible.
+        timeout_s: float = 900.0,
         verbose: bool = True,
     ):
         self.benchmark_dir = benchmark_dir
