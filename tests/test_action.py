@@ -85,10 +85,11 @@ def test_legal_action_logits_extra_illegal_defaults_to_no_effect() -> None:
 
 def test_make_wiremask_quality_illegal_flags_cells_above_the_margin() -> None:
     wiremask = jnp.array([[0.0, 5.0], [2.0, 10.0]])
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=1.0)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.3)
     illegal = extra_illegal_fn({"wiremask": wiremask})
-    # min is 0.0, margin 1.0 -> cutoff 1.0 -> everything strictly above it is illegal
-    assert illegal.tolist() == [[False, True], [True, True]]
+    # Matches MaskPlace's own PPO2.py/place_env.py: normalized by its own max (10.0) to
+    # [[0, 0.5], [0.2, 1.0]] before the margin cutoff, min 0.0 + margin 0.3 -> cutoff 0.3.
+    assert illegal.tolist() == [[False, True], [False, True]]
 
 
 def test_make_wiremask_quality_illegal_uses_a_custom_key() -> None:
@@ -102,7 +103,7 @@ def test_make_wiremask_quality_illegal_composes_with_legal_action_logits() -> No
     occupied = jnp.zeros((2, 2), dtype=bool)
     logits = jnp.zeros((2, 2))
     obs = {"wiremask": jnp.array([[0.0, 5.0], [0.0, 0.0]])}
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=1.0)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5)
 
     masked = legal_action_logits(logits, occupied, params, (1, 1), extra_illegal_fn(obs))
     assert masked[0, 1] == -jnp.inf  # illegal via the wiremask cutoff, not occupancy/boundary

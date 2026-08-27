@@ -29,12 +29,25 @@ def legal_action_logits(
     return jnp.where(illegal, -jnp.inf, logits)
 
 
-def make_wiremask_quality_illegal(margin: float, wiremask_key: str = "wiremask") -> ExtraIllegalFn:
-    """Builds an ExtraIllegalFn that rules out cells whose wiremask exceeds wiremask.min() + margin."""
+def make_wiremask_quality_illegal(
+    margin: float, wiremask_key: str = "wiremask", lookahead_key: str = "lookahead_wiremasks"
+) -> ExtraIllegalFn:
+    """Builds an ExtraIllegalFn that rules out cells whose wiremask exceeds wiremask.min() + margin.
+
+    Matches MaskPlace's own PPO2.py/place_env.py: margin (its --soft_coefficient) is applied
+    after normalizing the wiremask into roughly [0, 1] by dividing by the larger of its own max
+    and the next-macro lookahead map's max - not against the wiremask's raw HPWL-delta scale,
+    which would make margin's usual ~1.0 default far too tight (near-zero tolerance instead of
+    the intended soft one) since raw values run into the thousands for real netlists.
+    """
 
     def extra_illegal_fn(obs: dict) -> jax.Array:
         wiremask = obs[wiremask_key]
-        return quality_mask(wiremask, wiremask.min() + margin)
+        lookahead = obs.get(lookahead_key)
+        next_wiremask = lookahead[1] if lookahead is not None and lookahead.shape[0] > 1 else wiremask
+        scale = jnp.maximum(wiremask.max(), next_wiremask.max())
+        normalized = jnp.where(scale > 0, wiremask / jnp.where(scale > 0, scale, 1.0), wiremask)
+        return quality_mask(normalized, normalized.min() + margin)
 
     return extra_illegal_fn
 
