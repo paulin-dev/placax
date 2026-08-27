@@ -52,3 +52,14 @@ def evaluate(
     # Convert grid positions to real-unit centers to score the final layout with true HPWL.
     real_centers = to_real_centers(final_state.positions, sizes_array, cell_size)
     return final_state.positions, hpwl(real_centers, padded_pin_idx, padded_pin_offset, valid_mask)
+
+
+# Built once at import: without this, the lax.scan rollout above (which runs the entire
+# policy network, backbone included, once per macro) gets retraced and recompiled from
+# scratch on every call instead of being cached - both far slower than it should be, and,
+# on tightly memory-constrained hardware, a source of GPU memory growth every time
+# evaluate() runs until the process OOMs. Same fix as buffered_train.py's
+# _jitted_collect_buffer/_jitted_compute_gae.
+_jitted_evaluate = jax.jit(
+    evaluate, static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn")
+)

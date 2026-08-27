@@ -72,7 +72,9 @@ def test_train_buffered_produces_finite_losses_and_changes_params() -> None:
     key, init_key = random.split(key)
     obs0 = observation(reset(params), params, sizes_array)
     variables = policy.init(init_key, obs0)
-    initial_leaves = jax.tree_util.tree_leaves(variables)
+    # Copy, not just reference: train_buffered's minibatch update donates its variables
+    # input for memory efficiency, so the original buffers get deleted once consumed.
+    initial_leaves = [leaf.copy() for leaf in jax.tree_util.tree_leaves(variables)]
 
     key, train_key = random.split(key)
     final_variables, losses = train_buffered(

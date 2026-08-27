@@ -7,7 +7,7 @@ import pathlib
 from placax._device import recommended_parallelism_mode  # must precede jax imports
 from placax.log import Log
 from placax.types import EnvParams, RewardFn
-from placax_agents.ops.evaluate import evaluate
+from placax_agents.ops.evaluate import _jitted_evaluate
 from placax_agents.policy.observation import observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.loops.common import (
@@ -42,7 +42,7 @@ def _maybe_evaluate(
     if current_iteration % eval_every != 0:
         return None
     # Run a full greedy rollout with the current policy just to measure quality, not to train.
-    _positions, hpwl_value = evaluate(
+    _positions, hpwl_value = _jitted_evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
     )

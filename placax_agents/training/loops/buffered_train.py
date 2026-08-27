@@ -77,8 +77,13 @@ def _minibatch_update(
     )
 
 
+# donate_argnums=(0, 1, 2): variables/opt_state/running_stats are always immediately
+# overwritten by this call's own output (see the loop below), so their old buffers are
+# dead the instant the call returns - donating lets XLA reuse that memory for the output
+# instead of transiently holding both old and new copies, which matters on small GPUs.
 _jitted_minibatch_update = jax.jit(
-    _minibatch_update, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn")
+    _minibatch_update, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn"),
+    donate_argnums=(0, 1, 2),
 )
 
 

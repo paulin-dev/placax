@@ -15,13 +15,16 @@ def legal_action_logits(
     extra_illegal: jax.Array | None = None,
 ) -> jax.Array:
     """Sets illegal cells' logits to -inf so they're never sampled/argmax'd."""
-    # A cell is illegal if placing the macro there would overlap something, go out of bounds,
-    # or (optionally) violate an extra caller-supplied rule.
-    illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
-    if extra_illegal is not None:
-        illegal = illegal | extra_illegal
-    # Safety valve: if literally every cell got marked illegal, masking everything to -inf
-    # would make log_softmax produce NaNs. Bail out and mask nothing instead.
+    # A cell is illegal if placing the macro there would overlap something or go out of
+    # bounds - these are hard physical constraints, never relaxed below.
+    base_illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
+    illegal = base_illegal | extra_illegal if extra_illegal is not None else base_illegal
+    # Safety valve: if the extra rule (e.g. wiremask quality) alone leaves zero legal
+    # cells, relax back to just the physical constraints rather than allowing genuinely
+    # illegal (overlapping/out-of-bounds) placements. Only if literally no cell is
+    # physically legal either (grid fully occupied) do we bail out to no mask at all,
+    # purely so log_softmax over all -inf doesn't produce NaNs.
+    illegal = jnp.where(illegal.all(), base_illegal, illegal)
     illegal = jnp.where(illegal.all(), False, illegal)
     return jnp.where(illegal, -jnp.inf, logits)
 
