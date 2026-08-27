@@ -127,8 +127,13 @@ def make_hpwl_reward(
     padded_pin_offset: jax.Array,
     valid_mask: jax.Array,
     dense: bool = False,
+    reward_scale: float = 1.0,
 ) -> RewardFn:
-    """Builds a RewardFn over -HPWL (real units); dense=True pays it out incrementally each step instead of at the end."""
+    """Builds a RewardFn over -HPWL (real units) * reward_scale; dense=True pays it out incrementally
+    each step instead of at the end. reward_scale is a plain magnitude knob - PPO's clip_eps/entropy_coef/
+    grad-norm-clip are all tuned against some assumed reward scale, so a caller matching a reference
+    hyperparameter set tuned on a different position/reward unit convention should rescale here rather
+    than expect the algorithm to be scale-invariant."""
 
     def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
         return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask)
@@ -139,7 +144,9 @@ def make_hpwl_reward(
         # dense: pay the change in -HPWL every step (sums to the same episode total as sparse).
         # sparse: 0 every step until the episode ends, then the whole -HPWL in one payout.
         if dense:
-            return value_of(new_positions, new_placed) - value_of(old_positions, old_placed)
-        return jnp.where(new_placed.all(), value_of(new_positions, new_placed), 0.0)
+            raw = value_of(new_positions, new_placed) - value_of(old_positions, old_placed)
+        else:
+            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed), 0.0)
+        return raw * reward_scale
 
     return reward_fn

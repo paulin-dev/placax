@@ -18,7 +18,6 @@ Usage: python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_i
 import argparse
 import pathlib
 import sys
-from functools import partial
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
@@ -47,6 +46,9 @@ from jax import random
 
 WIREMASK_MARGIN = 1.0  # MaskPlace's own --soft_coefficient default
 
+MASKPLACE_REWARD_DIVISOR = 200.0
+"""MaskPlace's own constant divisor on its (grid-unit) reward, applied per step in PPO2.py."""
+
 MASKPLACE_MACRO_BUDGET = 128
 """MaskPlace's own --pnm default: place only its 128 most important macros, not the whole netlist."""
 
@@ -72,14 +74,24 @@ def maskplace_optimizer(
     learning_rate: float = MASKPLACE_LEARNING_RATE,
     max_grad_norm: float = MASKPLACE_MAX_GRAD_NORM,
     critic_param_prefix: str = "critic_",
+    value_coef: float = PPOConfig().value_coef,
 ) -> optax.GradientTransformation:
-    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-optimizer setup.
+    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-independent-backward-pass setup.
 
     Requires critic params named under critic_param_prefix and disjoint from the actor's
     (true for critic_style="step_embedding", not the shared-trunk "canvas" style).
+
+    value_coef must match whatever value_coef the training loss uses: ppo_loss differentiates
+    policy_loss + value_coef*value_loss as one scalar, so the critic's gradient arrives here
+    already pre-scaled by value_coef. Left uncompensated, clipping that scaled gradient to
+    max_grad_norm silently turns the critic's real clip threshold into max_grad_norm/value_coef
+    instead of the intended max_grad_norm; dividing it back out here makes both networks clip
+    against their own true, unweighted gradient norm - matching MaskPlace's two fully independent
+    backward passes (each with its own untouched clip_grad_norm_(0.5), no value_coef involved).
     """
-    per_network = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
-    return make_grouped_optimizer(per_network, per_network, critic_param_prefix)
+    actor_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
+    critic_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm / value_coef), optax.adam(learning_rate))
+    return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
 def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int]:
@@ -118,6 +130,20 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
     return args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every, args.eval_every
 
 
+def _maskplace_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
+    """MaskPlace's own reward magnitude: its reward is accumulated in grid-cell units (pins rounded
+    to the nearest cell) then divided by 200 before being buffered (PPO2.py's `reward / 200.0`), not
+    the raw real-unit HPWL delta placax computes by default. Dividing by cell_size here converts our
+    real-unit delta back to that grid-unit-equivalent scale before applying the same /200; without
+    this, clip_eps/entropy_coef/max_grad_norm - all tuned against MaskPlace's own reward magnitude -
+    would be operating on rewards ~1000x too large for this benchmark's cell_size."""
+    reward_scale = 1.0 / (cell_size * MASKPLACE_REWARD_DIVISOR)
+    return make_scaled_hpwl_reward(
+        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+        dense=True, reward_scale=reward_scale,
+    )
+
+
 def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
     """Connectivity order, macro budget, dense reward - loaded once, shared everywhere below."""
     return Benchmark.load(
@@ -125,7 +151,7 @@ def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Be
         grid=224,  # MaskPlace's own grid resolution
         order_fn=connectivity_order,
         macro_budget=macro_budget,
-        make_reward_fn=partial(make_scaled_hpwl_reward, dense=True),
+        make_reward_fn=_maskplace_reward_fn,
     )
 
 
@@ -177,14 +203,15 @@ def _probe_buffer_fits(benchmark_dir: str, macro_budget: str, n_episodes: int) -
     policy = _build_policy(benchmark)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(random.PRNGKey(0), obs0)
+    ppo_config = maskplace_ppo_config()
     try:
         # ppo_epochs=1 already hits the same peak memory as a real run (rollout
         # collection and one gradient minibatch dominate; more epochs just repeat it).
         train_buffered(
             random.PRNGKey(0), variables, policy.apply, benchmark.params, benchmark.reward_fn,
             benchmark.sizes_array, benchmark.cell_size, n_iterations=1, n_episodes=n_episodes,
-            ppo_epochs=1, optimizer=maskplace_optimizer(), state_fn=state_fn,
-            ppo_config=maskplace_ppo_config(), extra_illegal_fn=extra_illegal_fn,
+            ppo_epochs=1, optimizer=maskplace_optimizer(value_coef=ppo_config.value_coef), state_fn=state_fn,
+            ppo_config=ppo_config, extra_illegal_fn=extra_illegal_fn,
         )
     except Exception as e:
         if is_oom(e):  # doesn't fit - report it and let the parent see the exit code
@@ -315,7 +342,7 @@ def main() -> None:
 
     # 6. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
     ppo_config = maskplace_ppo_config()
-    optimizer = maskplace_optimizer()  # separately-clipped, separately-stepped actor/critic Adam
+    optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)  # separately-clipped actor/critic Adam
 
     # 7. Resolve the buffer size: either MaskPlace's fixed 10, an explicit
     #    override, or - only if the CLI asked for "auto" - the largest that

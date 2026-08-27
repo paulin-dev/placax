@@ -13,10 +13,11 @@ def make_scaled_hpwl_reward(
     sizes_array: jax.Array,
     cell_size: float,
     dense: bool = False,
+    reward_scale: float = 1.0,
 ) -> RewardFn:
     """Wraps make_hpwl_reward so it scores real-unit macro centers instead of grid positions."""
     # Build the underlying -HPWL reward once; only its inputs get rescaled below.
-    base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask, dense=dense)
+    base_reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask, dense=dense, reward_scale=reward_scale)
 
     def reward_fn(
         old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
