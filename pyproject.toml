@@ -15,10 +15,11 @@ dev = ["pytest"]
 cuda = ["jax[cuda13]"]
 cuda12 = ["jax[cuda12]"]
 resnet = ["flaxmodels"]
+viz = ["matplotlib", "pillow"]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["placax*", "placax_agents*", "placax_tools*"]
+include = ["placax*", "placax_agents*", "placax_tools*", "placax_viz*"]

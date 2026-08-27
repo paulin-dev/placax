@@ -14,3 +14,7 @@ pytest
 
 [resnet]
 flaxmodels
+
+[viz]
+matplotlib
+pillow
