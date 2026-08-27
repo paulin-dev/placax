@@ -119,6 +119,15 @@ def probe_subprocess(
         return
     if oom_marker in result.stdout:
         raise MemoryError("probe reported OOM")
+    if result.returncode < 0:
+        # Killed by a signal (SIGABRT/SIGSEGV/...), not a graceful Python exit - this is what a
+        # GPU allocator under real memory pressure looks like when it hits a fatal internal
+        # check failure (e.g. XLA's BFC allocator) instead of raising a catchable exception, so
+        # the probed code never gets a chance to print oom_marker itself. A genuine bug in the
+        # probed code would surface as an uncaught Python exception (a positive exit code via
+        # the default excepthook), not a raw signal kill - treat this the same as "doesn't fit"
+        # rather than surfacing it as a hard failure.
+        raise MemoryError(f"probe was killed by signal {-result.returncode}, treating as infeasible")
     # Any other nonzero exit is a real bug in the probed code, not a capacity limit - surface it.
     raise RuntimeError(f"probe crashed (exit {result.returncode}):\n{result.stderr[-4000:]}")
 

@@ -37,7 +37,7 @@ from placax_agents.policy.observation import make_wiremask_observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.loss import huber_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
-from placax_agents.training.loops.buffered_train import buffered_train_step, train_buffered
+from placax_agents.training.loops.buffered_train import buffered_train_step
 from placax_agents.training.loops.common import checkpoint_every_n, open_train_state, save_train_state
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
@@ -193,9 +193,15 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
     )
 
 
-def _probe_buffer_fits(benchmark_dir: str, macro_budget: str, n_episodes: int) -> None:
-    """Subprocess entry point (see NEpisodesDetector): attempts one n_episodes-sized buffered-PPO
-    step of this exact pipeline, reporting the outcome via exit code."""
+def _probe_buffer_fits(benchmark_dir: str, macro_budget: str, n_episodes: int, eval_every: int) -> None:
+    """Subprocess entry point (see NEpisodesDetector): runs this exact pipeline (_train_and_eval_loop,
+    the same function the real run uses) for just over one eval_every window, reporting the outcome
+    via exit code. Running only a single iteration would systematically overestimate what n_episodes
+    actually fits: a GPU allocator running this close to its ceiling can fit fine for a while and then
+    fail several iterations later purely from ordinary allocator fragmentation drift, a real effect a
+    one-shot probe can't see at all - this needs to actually run long enough to cross at least one eval
+    (a separate compiled executable, with its own memory footprint on top of training's) plus a few
+    more iterations after it, not just prove the very first iteration doesn't immediately fail."""
     budget = None if macro_budget == "None" else int(macro_budget)
     benchmark = _load_benchmark(pathlib.Path(benchmark_dir), budget)
     state_fn = _build_state_fn(benchmark)
@@ -204,14 +210,13 @@ def _probe_buffer_fits(benchmark_dir: str, macro_budget: str, n_episodes: int) -
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(random.PRNGKey(0), obs0)
     ppo_config = maskplace_ppo_config()
+    optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)
     try:
-        # ppo_epochs=1 already hits the same peak memory as a real run (rollout
-        # collection and one gradient minibatch dominate; more epochs just repeat it).
-        train_buffered(
-            random.PRNGKey(0), variables, policy.apply, benchmark.params, benchmark.reward_fn,
-            benchmark.sizes_array, benchmark.cell_size, n_iterations=1, n_episodes=n_episodes,
-            ppo_epochs=1, optimizer=maskplace_optimizer(value_coef=ppo_config.value_coef), state_fn=state_fn,
-            ppo_config=ppo_config, extra_illegal_fn=extra_illegal_fn,
+        # checkpoint_path=None/log_path=None: exercise the exact real loop without touching disk.
+        _train_and_eval_loop(
+            random.PRNGKey(0), variables, policy, benchmark, optimizer, ppo_config, state_fn,
+            extra_illegal_fn, checkpoint_path=None, n_iterations=eval_every + 3, n_episodes=n_episodes,
+            log_every=eval_every + 3, eval_every=eval_every, log_path=None,
         )
     except Exception as e:
         if is_oom(e):  # doesn't fit - report it and let the parent see the exit code
@@ -232,12 +237,14 @@ class NEpisodesDetector:
         benchmark_dir: pathlib.Path,
         macro_budget: int | None = None,
         max_candidate: int = MASKPLACE_N_EPISODES,  # no point searching past MaskPlace's own value
-        timeout_s: float = 180.0,
+        eval_every: int = 10,  # must match the real run's --eval_every for the probe to be representative
+        timeout_s: float = 300.0,
         verbose: bool = True,
     ):
         self.benchmark_dir = benchmark_dir
         self.macro_budget = macro_budget
         self.max_candidate = max_candidate
+        self.eval_every = eval_every
         self.timeout_s = timeout_s
         self.verbose = verbose
 
@@ -249,7 +256,7 @@ class NEpisodesDetector:
         # allocator even when the real run - which uses the default preallocated
         # arena - fits fine. The probe must match what the real run actually does.
         return find_max_via_subprocess(
-            _MODULE, ["--probe", str(self.benchmark_dir), str(self.macro_budget)],
+            _MODULE, ["--probe", str(self.benchmark_dir), str(self.macro_budget), str(self.eval_every)],
             max_candidate=self.max_candidate, timeout_s=self.timeout_s, oom_marker=_OOM_MARKER,
             verbose=self.verbose,
         )
@@ -257,7 +264,7 @@ class NEpisodesDetector:
 
 def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
-    extra_illegal_fn, checkpoint_path: pathlib.Path, n_iterations: int, n_episodes: int,
+    extra_illegal_fn, checkpoint_path: pathlib.Path | None, n_iterations: int, n_episodes: int,
     log_every: int, eval_every: int, log_path: pathlib.Path | None,
 ):
     """Runs n_iterations of buffered-PPO training one iteration at a time, resuming from
@@ -299,8 +306,10 @@ def _train_and_eval_loop(
         #    so a crash should never lose more than one iteration of progress).
         checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
 
-    # Always checkpoint at the end too, in case n_iterations was 0.
-    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
+    # Always checkpoint at the end too (in case n_iterations was 0) - unless checkpoint_path is
+    # None, meaning the caller (e.g. the memory-fitting probe) doesn't want anything written.
+    if checkpoint_path is not None:
+        save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables
 
 
@@ -349,7 +358,7 @@ def main() -> None:
     #    actually fits on this hardware (see NEpisodesDetector).
     if n_episodes_arg.lower() == "auto":
         Log.info("auto-detecting n_episodes (probing candidates in disposable subprocesses) ...")
-        n_episodes = NEpisodesDetector(benchmark_dir, macro_budget).detect()
+        n_episodes = NEpisodesDetector(benchmark_dir, macro_budget, eval_every=eval_every).detect()
         if n_episodes < 1:
             Log.error("not even n_episodes=1 fits on this hardware - try a smaller macro_budget.")
             sys.exit(1)
@@ -376,6 +385,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--probe":
-        _probe_buffer_fits(sys.argv[2], sys.argv[3], int(sys.argv[4]))
+        # argv: --probe benchmark_dir macro_budget eval_every n_episodes (n_episodes is appended
+        # last by find_max_via_subprocess's try_fn, after NEpisodesDetector's own fixed_args).
+        _probe_buffer_fits(sys.argv[2], sys.argv[3], int(sys.argv[5]), int(sys.argv[4]))
     else:
         main()
