@@ -25,5 +25,9 @@ def test_scaled_reward_matches_hand_calculation() -> None:
     # macro 0 pin: (350-248.5, 1268+16) = (101.5, 1284.0)
     # macro 1 real center: (15*10+100/2, 20*10+100/2) = (200, 250)
     # macro 1 pin (no offset): (200, 250)
-    # HPWL = |101.5-200| + |1284.0-250| = 98.5 + 1034.0 = 1132.5
-    assert abs(float(reward) - (-1132.5)) < 1e-2
+    # make_scaled_hpwl_reward quantizes each pin to the nearest cell_size=10 multiple before
+    # computing HPWL (matching the reference's own per-step rounding - see hpwl()'s cell_size
+    # doc): pin 0 -> (round(101.5/10)*10, round(1284.0/10)*10) = (100.0, 1280.0); pin 1 is
+    # already on-lattice -> (200.0, 250.0) unchanged.
+    # HPWL = |100.0-200.0| + |1280.0-250.0| = 100.0 + 1030.0 = 1130.0
+    assert abs(float(reward) - (-1130.0)) < 1e-2

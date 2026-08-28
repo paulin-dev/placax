@@ -10,19 +10,35 @@ from placax.types import EnvParams, EnvState, RewardFn
 _BIG = jnp.float32(1e9)
 
 
+def _quantize(pin_xy: jax.Array, cell_size: float | None) -> jax.Array:
+    """Snaps a REAL-unit pin position to the nearest grid-cell-multiple lattice point, matching
+    MaskPlace's own place_env.py (every pin position it stores is round()-ed to the nearest grid
+    cell before being used for bounds arithmetic). cell_size=None (the default) skips this,
+    preserving exact continuous positions for callers with no grid notion at all."""
+    if cell_size is None:
+        return pin_xy
+    return jnp.round(pin_xy / cell_size) * cell_size
+
+
 def hpwl(
     positions: jax.Array,
     padded_pin_idx: jax.Array,
     padded_pin_offset: jax.Array,
     valid_mask: jax.Array,
     placed_mask: jax.Array | None = None,
+    cell_size: float | None = None,
 ) -> jax.Array:
-    """Sum over nets of (bbox width + height); positions must be REAL units, not grid cells."""
+    """Sum over nets of (bbox width + height); positions must be REAL units, not grid cells.
+
+    cell_size, if given, quantizes every pin position to the nearest grid-cell-multiple before
+    computing bounds (see _quantize) - MaskPlace's reference reward is computed this way; leave
+    it None for the plain continuous HPWL (e.g. final evaluation, which the reference also
+    reports unquantized via comp_res.py)."""
     # 1. Default to "everything is placed" when the caller doesn't pass a partial-placement mask.
     if placed_mask is None:
         placed_mask = jnp.ones(positions.shape[0], dtype=bool)
     # 2. Compute every pin's absolute (x, y) center from its macro's position plus its offset.
-    pin_xy = positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset
+    pin_xy = _quantize(positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset, cell_size)
     counted = valid_mask & placed_mask[padded_pin_idx]
     # 3. Push padding/unplaced pins to +-_BIG so they can never win the per-net min/max.
     lo = jnp.where(counted[..., None], pin_xy, _BIG).min(axis=1)
@@ -35,6 +51,7 @@ def hpwl(
 def _wiremask_baseline(
     state: EnvState, params: EnvParams, padded_pin_idx: jax.Array,
     padded_pin_offset: jax.Array, valid_mask: jax.Array,
+    cell_size: float | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Per-net (lo, hi, has_pins) bounds from already-placed macros only, computed once and reused
     across every macro previewed against this state (see lookahead_wiremasks)."""
@@ -43,8 +60,11 @@ def _wiremask_baseline(
     already_placed = jnp.arange(params.n_macros) < idx
     baseline_mask = valid_mask & already_placed[padded_pin_idx]
 
-    # 2. Same min/max-bounds trick as hpwl(): mask out uncounted pins with +-_BIG.
-    pin_xy = state.positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset
+    # 2. Same min/max-bounds trick as hpwl(): mask out uncounted pins with +-_BIG. Quantized the
+    #    same way as the candidate's own pin in _wiremask_from_baseline, so bounds built here stay
+    #    on the same lattice a candidate's cost_at() compares against (matching the reference,
+    #    whose net_min_max_ord is itself built from rounded pin positions).
+    pin_xy = _quantize(state.positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset, cell_size)
     lo = jnp.where(baseline_mask[..., None], pin_xy, _BIG).min(axis=1)
     hi = jnp.where(baseline_mask[..., None], pin_xy, -_BIG).max(axis=1)
     has_pins = baseline_mask.any(axis=1)
@@ -60,6 +80,8 @@ def _wiremask_from_baseline(
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
     macro_idx: jax.Array | int,
+    cell_size: float,
+    macro_size: jax.Array,
 ) -> jax.Array:
     """(grid_x, grid_y) HPWL-increase map for macro_idx against an already-computed baseline.
 
@@ -71,7 +93,12 @@ def _wiremask_from_baseline(
     doesn't touch are unaffected by its placement, so their HPWL contribution is identical to the
     baseline and would cancel out of a (full total) - (baseline total) subtraction anyway -
     summing only the touched nets' own (new - baseline) deltas is exactly that same result,
-    computed without ever materializing the full-width array."""
+    computed without ever materializing the full-width array.
+
+    cell_size/macro_size convert each candidate grid corner into the same REAL-unit macro CENTER
+    convention _wiremask_baseline()'s pin_xy already uses (center = corner*cell_size + size/2) -
+    without this, a raw grid index (0..grid-1) would be added directly to a REAL-unit pin offset
+    (often hundreds to thousands, for a real benchmark), swamping the position term entirely."""
     my_nets = macro_net_idx[macro_idx]
     my_offsets = macro_net_offset[macro_idx]
     my_valid = macro_net_valid[macro_idx]
@@ -91,8 +118,11 @@ def _wiremask_from_baseline(
     bucket_baseline_has_pins = baseline_has_pins[safe_ids] & bucket_is_real
 
     def cost_at(xy: jax.Array) -> jax.Array:
-        # This macro's own pins at candidate xy, folded into their local net buckets.
-        my_positions = xy + my_offsets
+        # This macro's own pins at candidate xy, folded into their local net buckets. Quantized
+        # the same way as the baseline's pins (see _wiremask_baseline) - matches the reference,
+        # which rounds every pin position (already-placed or candidate) to the nearest grid cell.
+        center = xy.astype(jnp.float32) * cell_size + macro_size / 2.0
+        my_positions = _quantize(center + my_offsets, cell_size)
         row_lo = jnp.where(my_valid[:, None], my_positions, _BIG)
         row_hi = jnp.where(my_valid[:, None], my_positions, -_BIG)
         bucket_lo = jax.ops.segment_min(row_lo, bucket_of, num_segments=n_slots)
@@ -121,20 +151,25 @@ def wiremask(
     macro_net_idx: jax.Array,
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
+    sizes_array: jax.Array,
+    cell_size: float = 1.0,
     macro_idx: jax.Array | int | None = None,
 ) -> jax.Array:
     """(grid_x, grid_y) array of HPWL(hypothetical placement at x, y) - HPWL(baseline) for macro_idx.
 
     macro_idx defaults to state.step; pass state.step + k to preview a macro further ahead
     (see lookahead_wiremasks) - the baseline always stays keyed to state.step, so a previewed
-    macro never appears already placed."""
+    macro never appears already placed. state.positions must already be REAL-unit centers (see
+    placax_agents.policy.scale.to_real_centers) - cell_size only converts the candidate grid
+    coordinates this function generates internally, not state.positions itself."""
     idx = state.step if macro_idx is None else macro_idx
     baseline_lo, baseline_hi, baseline_has_pins = _wiremask_baseline(
-        state, params, padded_pin_idx, padded_pin_offset, valid_mask
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask, cell_size
     )
     return _wiremask_from_baseline(
         baseline_lo, baseline_hi, baseline_has_pins, params,
         macro_net_idx, macro_net_offset, macro_net_valid, idx,
+        cell_size, sizes_array[idx],
     )
 
 
@@ -147,14 +182,18 @@ def lookahead_wiremasks(
     macro_net_idx: jax.Array,
     macro_net_offset: jax.Array,
     macro_net_valid: jax.Array,
+    sizes_array: jax.Array,
     horizon: int,
+    cell_size: float = 1.0,
 ) -> jax.Array:
-    """Returns wiremask() for each of the next `horizon` macros (a static Python int), sharing today's baseline."""
+    """Returns wiremask() for each of the next `horizon` macros (a static Python int), sharing today's baseline.
+
+    state.positions must already be REAL-unit centers, same as wiremask() - see its docstring."""
     # 1. The baseline (everything placed before state.step) is the same for every lookahead
     #    slot - compute it once here instead of once per slot (wiremask() would otherwise redo
     #    this full-netlist-scale computation `horizon` times over for identical results).
     baseline_lo, baseline_hi, baseline_has_pins = _wiremask_baseline(
-        state, params, padded_pin_idx, padded_pin_offset, valid_mask
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask, cell_size
     )
 
     # 2. Clip macro indices past the last real macro to a valid index (so shapes stay fixed
@@ -167,6 +206,7 @@ def lookahead_wiremasks(
         wm = _wiremask_from_baseline(
             baseline_lo, baseline_hi, baseline_has_pins, params,
             macro_net_idx, macro_net_offset, macro_net_valid, macro_idx,
+            cell_size, sizes_array[macro_idx],
         )
         return wm * keep
 
@@ -180,15 +220,20 @@ def make_hpwl_reward(
     valid_mask: jax.Array,
     dense: bool = False,
     reward_scale: float = 1.0,
+    cell_size: float | None = None,
 ) -> RewardFn:
     """Builds a RewardFn over -HPWL (real units) * reward_scale; dense=True pays it out incrementally
     each step instead of at the end. reward_scale is a plain magnitude knob - PPO's clip_eps/entropy_coef/
     grad-norm-clip are all tuned against some assumed reward scale, so a caller matching a reference
     hyperparameter set tuned on a different position/reward unit convention should rescale here rather
-    than expect the algorithm to be scale-invariant."""
+    than expect the algorithm to be scale-invariant.
+
+    cell_size, if given, quantizes pin positions to the nearest grid cell before computing HPWL
+    (see hpwl()'s own cell_size doc) - matches the reference's per-step reward exactly; leave it
+    None for a plain continuous reward."""
 
     def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
-        return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask)
+        return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask, cell_size)
 
     def reward_fn(
         old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array

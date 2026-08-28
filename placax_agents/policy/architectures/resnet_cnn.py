@@ -159,8 +159,11 @@ class ResNetCoarseFineActorCritic(nn.Module):
         if self.critic_style == "step_embedding":
             # MaskPlace's own design: the critic gets its own small MLP over just the step index,
             # sharing no parameters with the actor. "critic_" prefix lets split_optimizer isolate it.
+            # Two hidden Dense+ReLU stages, matching the reference's Critic exactly (PPO2.py:
+            # pos_emb -> fc1(64->64)+relu -> fc2(64->64)+relu -> state_value(64->1)).
             emb = nn.Embed(num_embeddings=self.max_episode_macros, features=64, name="critic_step_embed")(obs["step"])
-            hidden = nn.relu(nn.Dense(features=64, name="critic_hidden")(emb))
+            hidden = nn.relu(nn.Dense(features=64, name="critic_hidden1")(emb))
+            hidden = nn.relu(nn.Dense(features=64, name="critic_hidden2")(hidden))
             return nn.Dense(features=1, name="critic_value")(hidden)[0]
         # Default: read the same fine/coarse features the actor uses, pooled to one vector.
         pooled = jnp.concatenate([fine_logits, coarse_features], axis=-1).mean(axis=(0, 1))

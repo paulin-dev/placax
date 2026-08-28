@@ -87,6 +87,9 @@ def test_nonzero_offset_changes_result_correctly() -> None:
     assert result != hpwl(POSITIONS, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK)
 
 
+ZERO_SIZES = {n: jnp.zeros((n, 2)) for n in (2, 3)}  # macro_size=0 keeps these tests' hand-calc untouched by the size/2 term
+
+
 def test_wiremask_matches_hand_calculation() -> None:
     # 2 macros, macro 0 already placed at (1,1), macro 1 about to be
     # placed (state.step=1), one net connecting them, no offsets.
@@ -102,7 +105,7 @@ def test_wiremask_matches_hand_calculation() -> None:
 
     wm = wiremask(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[2],
     )
     assert wm[1, 1] == 0.0  # same position as macro 0 - zero added wirelength
     assert wm[3, 3] == 4.0  # |3-1| + |3-1|
@@ -126,7 +129,7 @@ def test_wiremask_excludes_not_yet_placed_macros() -> None:
 
     wm = wiremask(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[3],
     )
     # this net has fewer than 2 "relevant" pins (macro 2 excluded), so it
     # contributes nothing anywhere on the map - should be all zeros
@@ -150,7 +153,7 @@ def test_wiremask_macro_idx_previews_a_different_macro_than_state_step() -> None
 
     wm_1 = wiremask(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=1,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[3], macro_idx=1,
     )
     assert wm_1[1, 1] == 0.0 and wm_1[3, 3] == 4.0 and wm_1[0, 0] == 2.0  # Net A only, as before
 
@@ -160,7 +163,7 @@ def test_wiremask_macro_idx_previews_a_different_macro_than_state_step() -> None
     # still has fewer than 2 real pins and contributes nothing anywhere.
     wm_2 = wiremask(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=2,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[3], macro_idx=2,
     )
     assert (wm_2 == 0.0).all()
 
@@ -178,7 +181,7 @@ def test_lookahead_wiremasks_previews_multiple_macros_against_the_same_baseline(
 
     maps = lookahead_wiremasks(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid, horizon=2,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[3], horizon=2,
     )
     assert maps.shape == (2, 4, 4)
     assert maps[0, 1, 1] == 0.0 and maps[0, 3, 3] == 4.0  # macro 1's map, matches wiremask() directly
@@ -198,7 +201,7 @@ def test_lookahead_wiremasks_zero_pads_past_the_last_macro() -> None:
 
     maps = lookahead_wiremasks(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid, horizon=3,
+        macro_net_idx, macro_net_offset, macro_net_valid, ZERO_SIZES[2], horizon=3,
     )
     assert maps.shape == (3, 4, 4)
     assert maps[0, 3, 3] == 4.0  # macro 1's real map
@@ -229,7 +232,7 @@ def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> Non
         pytest.skip("real adaptec1 benchmark not available")
 
     macro_sizes, nets = load_netlist(adaptec1_dir)
-    _name_to_idx, _sizes, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
+    _name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )
     macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
@@ -243,7 +246,7 @@ def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> Non
     t0 = time.perf_counter()
     wm = wiremask(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid,
+        macro_net_idx, macro_net_offset, macro_net_valid, sizes_array,
     )
     elapsed = time.perf_counter() - t0
 

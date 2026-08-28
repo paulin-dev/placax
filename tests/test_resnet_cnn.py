@@ -83,7 +83,7 @@ def test_step_embedding_critic_params_are_disjoint_from_the_actor() -> None:
     top_level_names = set(variables["params"])
     critic_names = {name for name in top_level_names if name.startswith("critic_")}
     assert critic_names  # the critic really is named this way
-    assert critic_names <= {"critic_step_embed", "critic_hidden", "critic_value"}
+    assert critic_names <= {"critic_step_embed", "critic_hidden1", "critic_hidden2", "critic_value"}
     assert "resnet_backbone" not in critic_names  # the actor's backbone isn't accidentally swept in
 
 

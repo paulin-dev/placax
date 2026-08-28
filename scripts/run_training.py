@@ -18,6 +18,7 @@ allocator fragmentation drift) to be representative - forcing it every iteration
 footprint by iteration 1 instead of iteration 10, so 4 iterations suffice instead of 13.
 """
 import argparse
+import functools
 import pathlib
 import sys
 
@@ -26,6 +27,7 @@ from placax.log import Log
 from placax_agents.benchmark import Benchmark
 from placax_agents.ops.resumable_train import resumable_train
 from placax_agents.policy.architectures.cnn import CNNActorCritic
+from placax_agents.policy.observation import observation
 
 from jax import random
 
@@ -90,11 +92,18 @@ def main() -> None:
         Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
     Log.info(f"running {args.n_iterations} more iterations (n_envs={args.n_envs}, mode={args.mode or 'auto'}) ...")
 
+    # resumable_train's own default state_fn (plain observation()) would silently fall back to
+    # cell_size=1.0 on every actual rollout/eval call - observation() only gets the real
+    # cell_size where it's passed explicitly, and resumable_train never does that on its own.
+    # Binding it here once (the same pattern run_maskplace.py's _build_state_fn uses) is what
+    # keeps the canvas render at the correct grid scale for this benchmark.
+    state_fn = functools.partial(observation, cell_size=benchmark.cell_size)
+
     _final_variables, _log = resumable_train(
         checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
         benchmark.sizes_array, benchmark.cell_size, args.n_iterations,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-        checkpoint_every=10, eval_every=args.eval_every, log_path=log_path,
+        state_fn=state_fn, checkpoint_every=10, eval_every=args.eval_every, log_path=log_path,
         n_envs=args.n_envs, mode=args.mode, snapshot_dir=snapshot_dir, snapshot_every=50,
     )
 

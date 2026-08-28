@@ -2,11 +2,11 @@ import matplotlib
 
 matplotlib.use("Agg")
 
-import jax.numpy as jnp
-
 from placax.types import EnvParams
 from placax_agents.policy.observation import observation
 from placax_viz.rollout import collect_placement_history
+
+import jax.numpy as jnp
 
 
 def _fake_policy_apply(_variables, obs):

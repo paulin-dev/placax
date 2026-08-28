@@ -9,6 +9,7 @@ Works with either training script's output:
 Usage: python -m scripts.visualize --benchmark_dir=benchmarks/adaptec1 [--preset=maskplace] [--gif]
 """
 import argparse
+import functools
 import pathlib
 import sys
 
@@ -37,7 +38,9 @@ def _training_setup(benchmark_dir: pathlib.Path, _macro_budget: int | None):
     """scripts/run_training.py's own setup: full netlist, plain CNN policy/observation."""
     benchmark = Benchmark.load(benchmark_dir)
     policy = CNNActorCritic()
-    state_fn: StateFn = observation
+    # Bare `observation` defaults to cell_size=1.0 - bind the benchmark's real cell_size the same
+    # way scripts/run_training.py itself now does, so the canvas render matches its grid scale.
+    state_fn: StateFn = functools.partial(observation, cell_size=benchmark.cell_size)
     extra_illegal_fn: ExtraIllegalFn | None = None
     optimizer = optax.adam(3e-4)
     return benchmark, policy, state_fn, extra_illegal_fn, optimizer

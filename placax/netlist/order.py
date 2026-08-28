@@ -30,32 +30,57 @@ def _macro_nets(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[int]]:
     return result
 
 
+def _adjacency(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[str]]:
+    """macro name -> set of OTHER macro names it shares at least one net with (a plain graph,
+    not weighted by how many nets/pins connect a pair - two macros sharing 5 nets are exactly as
+    adjacent as two sharing 1)."""
+    adjacency: dict[str, set[str]] = {name: set() for name in macro_sizes}
+    for net in nets:
+        names = {name for name, _x, _y in net}
+        for name in names:
+            adjacency[name] |= names - {name}
+    return adjacency
+
+
 def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Breadth-first by connectivity, keeping macros that share nets close together in placement order."""
+    """Reproduces MaskPlace's own topology order (place_db.py's get_node_id_to_name_topology):
+    seed with the single highest-degree macro, then repeatedly add whichever remaining macro
+    maximizes (count of DISTINCT already-placed macros it's adjacent to) + degree*1000 + raw
+    area - so degree dominates over connectivity to what's already placed unless area swamps
+    both (real macro areas can run into the millions, same as the reference's own unnormalized
+    formula). "Adjacent" means sharing at least one net at all - a macro with 5 nets to the same
+    already-placed neighbor counts as adjacent to exactly 1 macro, not 5, same as the reference.
+
+    Ties broken by name (ascending) for determinism - the reference breaks ties via hash(name),
+    which is effectively arbitrary (varies with PYTHONHASHSEED) and not worth reproducing."""
     if not macro_sizes:
         return []
-    # Precompute how many nets each macro touches, and which net indices each macro is in.
     degree = _net_degree(nets)
-    macro_nets = _macro_nets(macro_sizes, nets)
+    adjacency = _adjacency(macro_sizes, nets)
+    area = {name: w * h for name, (w, h) in macro_sizes.items()}
 
-    # Seed the order with the single most-connected macro.
+    # Seed the order with the single most-connected macro (ties broken by name).
     remaining = set(macro_sizes)
     first = min(remaining, key=lambda n: (-degree.get(n, 0), n))
     order = [first]
     remaining.discard(first)
-    frontier_nets = set(macro_nets[first])
+    placed = {first}
 
-    # Repeatedly grow the order by picking whichever remaining macro shares the most
-    # nets with everything placed so far (ties broken by degree, then name), and
-    # folding its nets into the "frontier" so later picks stay close to the whole group.
     while remaining:
-        def sort_key(name: str) -> tuple[int, int, str]:
-            shared = len(frontier_nets & macro_nets[name])
-            return (-shared, -degree.get(name, 0), name)
+        # candidates[v] = how many DISTINCT already-placed macros v is adjacent to.
+        candidates: dict[str, int] = {}
+        for name in placed:
+            for neighbor in adjacency[name]:
+                if neighbor not in placed:
+                    candidates[neighbor] = candidates.get(neighbor, 0) + 1
+
+        def sort_key(name: str) -> tuple[float, str]:
+            score = candidates.get(name, 0) + degree.get(name, 0) * 1000 + area[name]
+            return (-score, name)
 
         next_name = min(remaining, key=sort_key)
         order.append(next_name)
         remaining.discard(next_name)
-        frontier_nets |= macro_nets[next_name]
+        placed.add(next_name)
 
     return order

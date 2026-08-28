@@ -192,7 +192,7 @@ def _build_state_fn(benchmark: Benchmark):
     # 2. Build the actual observation function, closing over that index.
     return make_wiremask_observation(
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-        macro_net_idx, macro_net_offset, macro_net_valid, lookahead=2,
+        macro_net_idx, macro_net_offset, macro_net_valid, cell_size=benchmark.cell_size, lookahead=2,
     )
 
 
