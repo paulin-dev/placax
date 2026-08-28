@@ -66,6 +66,12 @@ def _normalize_channel(x: jax.Array) -> jax.Array:
     return x / (x.max() + 1e-6)
 
 
+def _run_backbone(module: nn.Module, x: jax.Array) -> dict:
+    """A plain function taking the (already-instantiated) backbone module as its first argument,
+    so nn.remat (which only accepts a Module class or such a function) can wrap this specific call."""
+    return module(x, train=False)
+
+
 class _FineBranch(nn.Module):
     """MaskPlace's MyCNN: a shallow 1x1-conv stack with no receptive-field growth."""
 
@@ -135,7 +141,13 @@ class ResNetCoarseFineActorCritic(nn.Module):
         """Runs the frozen-BatchNorm ResNet backbone, then the coarse-branch projection/resize."""
         # Stack the 3 input channels and add a batch dim of 1 (the backbone expects a batch axis).
         coarse_input = jnp.stack([canvas, wiremask_cur, wiremask_next], axis=-1)[None]
-        backbone_out = self.resnet_backbone(coarse_input, train=False)
+        # Gradient checkpointing: only affects a differentiated (backward) call - the PPO
+        # minibatch update's batch=64 backward pass through this backbone at 224x224 is a large,
+        # fixed memory cost (independent of n_episodes), since without this every layer's forward
+        # activations must be kept alive for the whole backward pass. This trades that memory for
+        # recomputing the forward pass during backprop instead; the plain forward-only rollout
+        # collection path (never differentiated) is unaffected either way.
+        backbone_out = nn.remat(_run_backbone)(self.resnet_backbone, coarse_input)
         backbone_features = backbone_out[self.resnet_feature_key][0]  # drop the batch dim again
         # Project the backbone's feature map down to the action grid's resolution.
         return _CoarseBranch(

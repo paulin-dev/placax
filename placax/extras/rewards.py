@@ -36,7 +36,8 @@ def _wiremask_baseline(
     state: EnvState, params: EnvParams, padded_pin_idx: jax.Array,
     padded_pin_offset: jax.Array, valid_mask: jax.Array,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Per-net (lo, hi) bounds and total HPWL from already-placed macros only, computed once and reused."""
+    """Per-net (lo, hi, has_pins) bounds from already-placed macros only, computed once and reused
+    across every macro previewed against this state (see lookahead_wiremasks)."""
     # 1. Only macros placed before the current step count toward the baseline.
     idx = state.step
     already_placed = jnp.arange(params.n_macros) < idx
@@ -47,8 +48,68 @@ def _wiremask_baseline(
     lo = jnp.where(baseline_mask[..., None], pin_xy, _BIG).min(axis=1)
     hi = jnp.where(baseline_mask[..., None], pin_xy, -_BIG).max(axis=1)
     has_pins = baseline_mask.any(axis=1)
-    total = jnp.where(has_pins, (hi - lo).sum(axis=1), 0.0).sum()
-    return lo, hi, total
+    return lo, hi, has_pins
+
+
+def _wiremask_from_baseline(
+    baseline_lo: jax.Array,
+    baseline_hi: jax.Array,
+    baseline_has_pins: jax.Array,
+    params: EnvParams,
+    macro_net_idx: jax.Array,
+    macro_net_offset: jax.Array,
+    macro_net_valid: jax.Array,
+    macro_idx: jax.Array | int,
+) -> jax.Array:
+    """(grid_x, grid_y) HPWL-increase map for macro_idx against an already-computed baseline.
+
+    Only ever touches macro_idx's own (small) net list, never the full netlist: a macro can
+    have more than one pin on the same net, so its padded net list may contain duplicates -
+    jnp.unique (fixed `size`, so the output shape stays static under jit/vmap) collapses those
+    down to one local bucket per net this macro actually touches, and everything below operates
+    on that small per-macro bucket set instead of a full-width (n_nets,) array. Nets this macro
+    doesn't touch are unaffected by its placement, so their HPWL contribution is identical to the
+    baseline and would cancel out of a (full total) - (baseline total) subtraction anyway -
+    summing only the touched nets' own (new - baseline) deltas is exactly that same result,
+    computed without ever materializing the full-width array."""
+    my_nets = macro_net_idx[macro_idx]
+    my_offsets = macro_net_offset[macro_idx]
+    my_valid = macro_net_valid[macro_idx]
+    n_slots = my_nets.shape[0]
+
+    # 1. Collapse this macro's own padded (possibly duplicated) net list to unique local
+    #    buckets - independent of the candidate cell, so this runs once per macro, not once
+    #    per candidate cell. Invalid (padding) slots are marked -1 so they all collapse into
+    #    one shared, excluded bucket instead of colliding with a real net indexed 0.
+    local_net_ids, bucket_of = jnp.unique(
+        jnp.where(my_valid, my_nets, -1), size=n_slots, fill_value=-1, return_inverse=True
+    )
+    bucket_is_real = local_net_ids >= 0
+    safe_ids = jnp.where(bucket_is_real, local_net_ids, 0)
+    bucket_baseline_lo = baseline_lo[safe_ids]
+    bucket_baseline_hi = baseline_hi[safe_ids]
+    bucket_baseline_has_pins = baseline_has_pins[safe_ids] & bucket_is_real
+
+    def cost_at(xy: jax.Array) -> jax.Array:
+        # This macro's own pins at candidate xy, folded into their local net buckets.
+        my_positions = xy + my_offsets
+        row_lo = jnp.where(my_valid[:, None], my_positions, _BIG)
+        row_hi = jnp.where(my_valid[:, None], my_positions, -_BIG)
+        bucket_lo = jax.ops.segment_min(row_lo, bucket_of, num_segments=n_slots)
+        bucket_hi = jax.ops.segment_max(row_hi, bucket_of, num_segments=n_slots)
+        new_lo = jnp.minimum(bucket_baseline_lo, bucket_lo)
+        new_hi = jnp.maximum(bucket_baseline_hi, bucket_hi)
+        new_span = jnp.where(bucket_is_real, (new_hi - new_lo).sum(axis=-1), 0.0)
+        baseline_span = jnp.where(
+            bucket_baseline_has_pins, (bucket_baseline_hi - bucket_baseline_lo).sum(axis=-1), 0.0
+        )
+        return (new_span - baseline_span).sum()
+
+    # 2. Evaluate cost_at for every grid cell at once - each call now only touches this
+    #    macro's own small bucket set, not the whole netlist.
+    xs, ys = jnp.meshgrid(jnp.arange(params.grid_x), jnp.arange(params.effective_grid_y), indexing="ij")
+    coords = jnp.stack([xs.ravel(), ys.ravel()], axis=1)
+    return jax.vmap(cost_at)(coords).reshape(params.grid_x, params.effective_grid_y)
 
 
 def wiremask(
@@ -67,30 +128,14 @@ def wiremask(
     macro_idx defaults to state.step; pass state.step + k to preview a macro further ahead
     (see lookahead_wiremasks) - the baseline always stays keyed to state.step, so a previewed
     macro never appears already placed."""
-    # 1. Get the HPWL contribution of everything already placed, shared across all candidate cells.
     idx = state.step if macro_idx is None else macro_idx
-    baseline_lo, baseline_hi, baseline_total = _wiremask_baseline(
+    baseline_lo, baseline_hi, baseline_has_pins = _wiremask_baseline(
         state, params, padded_pin_idx, padded_pin_offset, valid_mask
     )
-    # 2. Look up just this macro's own (small) net participation list via the reverse
-    #    index - reprocessing the whole netlist per candidate cell wouldn't scale.
-    my_nets = macro_net_idx[idx]
-    my_offsets = macro_net_offset[idx]
-    my_valid = macro_net_valid[idx]
-
-    def cost_at(xy: jax.Array) -> jax.Array:
-        # Extend just this macro's nets' baseline bounds with its pins at candidate xy.
-        my_positions = xy + my_offsets
-        full_lo = baseline_lo.at[my_nets].min(jnp.where(my_valid[:, None], my_positions, _BIG))
-        full_hi = baseline_hi.at[my_nets].max(jnp.where(my_valid[:, None], my_positions, -_BIG))
-        full_has_pins = full_lo[:, 0] < _BIG
-        return jnp.where(full_has_pins, (full_hi - full_lo).sum(axis=1), 0.0).sum()
-
-    # 3. Evaluate cost_at for every grid cell at once, then subtract the shared baseline
-    #    to leave just the marginal cost of placing this macro at each cell.
-    xs, ys = jnp.meshgrid(jnp.arange(params.grid_x), jnp.arange(params.effective_grid_y), indexing="ij")
-    coords = jnp.stack([xs.ravel(), ys.ravel()], axis=1)
-    return jax.vmap(cost_at)(coords).reshape(params.grid_x, params.effective_grid_y) - baseline_total
+    return _wiremask_from_baseline(
+        baseline_lo, baseline_hi, baseline_has_pins, params,
+        macro_net_idx, macro_net_offset, macro_net_valid, idx,
+    )
 
 
 def lookahead_wiremasks(
@@ -105,20 +150,27 @@ def lookahead_wiremasks(
     horizon: int,
 ) -> jax.Array:
     """Returns wiremask() for each of the next `horizon` macros (a static Python int), sharing today's baseline."""
-    # 1. Clip macro indices past the last real macro to a valid index (so shapes stay fixed
+    # 1. The baseline (everything placed before state.step) is the same for every lookahead
+    #    slot - compute it once here instead of once per slot (wiremask() would otherwise redo
+    #    this full-netlist-scale computation `horizon` times over for identical results).
+    baseline_lo, baseline_hi, baseline_has_pins = _wiremask_baseline(
+        state, params, padded_pin_idx, padded_pin_offset, valid_mask
+    )
+
+    # 2. Clip macro indices past the last real macro to a valid index (so shapes stay fixed
     #    under jit), and separately track which slots are actually in range.
     offsets = jnp.arange(horizon)
     in_range = (state.step + offsets) < params.n_macros
     macro_idxs = jnp.clip(state.step + offsets, 0, params.n_macros - 1)
 
     def one(macro_idx: jax.Array, keep: jax.Array) -> jax.Array:
-        wm = wiremask(
-            state, params, padded_pin_idx, padded_pin_offset, valid_mask,
-            macro_net_idx, macro_net_offset, macro_net_valid, macro_idx=macro_idx,
+        wm = _wiremask_from_baseline(
+            baseline_lo, baseline_hi, baseline_has_pins, params,
+            macro_net_idx, macro_net_offset, macro_net_valid, macro_idx,
         )
         return wm * keep
 
-    # 2. Compute every lookahead slot's wiremask at once; out-of-range slots come out zeroed.
+    # 3. Compute every lookahead slot's wiremask at once; out-of-range slots come out zeroed.
     return jax.vmap(one)(macro_idxs, in_range)
 
 

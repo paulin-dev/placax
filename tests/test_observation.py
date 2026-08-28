@@ -70,7 +70,7 @@ def test_lookahead_sizes_zero_pads_past_the_last_macro() -> None:
     assert sizes.tolist() == [[1.0, 1.0], [0.0, 0.0], [0.0, 0.0]]
 
 
-def test_make_wiremask_observation_adds_a_wiremask_key_without_dropping_the_base() -> None:
+def test_make_wiremask_observation_adds_lookahead_wiremasks_without_dropping_the_base() -> None:
     params = EnvParams(grid=4, n_macros=2)
     sizes_array = jnp.array([[1.0, 1.0], [1.0, 1.0]])
     positions = jnp.array([[1, 1], [-1, -1]])
@@ -87,9 +87,8 @@ def test_make_wiremask_observation_adds_a_wiremask_key_without_dropping_the_base
         padded_pin_idx, padded_pin_offset, valid_mask, macro_net_idx, macro_net_offset, macro_net_valid
     )
     obs = state_fn(state, params, sizes_array)
-    assert obs["wiremask"].shape == (4, 4)
     assert obs["lookahead_wiremasks"].shape == (1, 4, 4)  # default lookahead=1
-    assert obs["lookahead_wiremasks"][0].tolist() == obs["wiremask"].tolist()
+    assert "wiremask" not in obs  # not buffered separately - it's just lookahead_wiremasks[0]
     assert obs["canvas"].shape == (4, 4)  # base observation() keys still present
 
 
@@ -112,4 +111,3 @@ def test_make_wiremask_observation_lookahead_previews_multiple_macros() -> None:
     )
     obs = state_fn(state, params, sizes_array)
     assert obs["lookahead_wiremasks"].shape == (2, 4, 4)
-    assert obs["wiremask"].tolist() == obs["lookahead_wiremasks"][0].tolist()

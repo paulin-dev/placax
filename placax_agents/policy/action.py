@@ -42,8 +42,12 @@ def make_wiremask_quality_illegal(
     """
 
     def extra_illegal_fn(obs: dict) -> jax.Array:
-        wiremask = obs[wiremask_key]
         lookahead = obs.get(lookahead_key)
+        # Falls back to the lookahead map's own current-macro slice when there's no separate
+        # wiremask_key entry - make_wiremask_observation deliberately doesn't buffer that as a
+        # redundant extra channel (it's identical to lookahead_wiremasks[0]) since it would
+        # otherwise double a full grid-resolution array's storage in every buffered trajectory.
+        wiremask = obs[wiremask_key] if wiremask_key in obs else lookahead[0]
         next_wiremask = lookahead[1] if lookahead is not None and lookahead.shape[0] > 1 else wiremask
         scale = jnp.maximum(wiremask.max(), next_wiremask.max())
         normalized = jnp.where(scale > 0, wiremask / jnp.where(scale > 0, scale, 1.0), wiremask)

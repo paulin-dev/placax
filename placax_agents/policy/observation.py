@@ -43,19 +43,23 @@ def make_wiremask_observation(
     base_state_fn=observation,
     lookahead: int = 1,
 ):
-    """Wraps a StateFn to add "wiremask"/"lookahead_wiremasks" (per-cell HPWL-increase previews); build once per benchmark."""
+    """Wraps a StateFn to add "lookahead_wiremasks" (per-cell HPWL-increase previews); build once per benchmark.
+
+    The current-macro slice is lookahead_wiremasks[0] - deliberately not also duplicated under a
+    separate "wiremask" key, since every full grid-resolution channel here gets buffered per step
+    of every episode in the PPO trajectory (see training.rollout.collect_rollout); a policy or
+    ExtraIllegalFn that only cares about one step ahead should read lookahead_wiremasks[0] directly
+    (placax_agents.policy.action.make_wiremask_quality_illegal already falls back to exactly that
+    when its "wiremask" key isn't present in obs)."""
 
     def state_fn(state: EnvState, params: EnvParams, sizes_array: jax.Array) -> dict:
         # Start from the base observation (canvas, sizes, etc.), then layer wiremask info on top.
         obs = base_state_fn(state, params, sizes_array)
         # For each of the next `lookahead` macros, compute the per-cell HPWL cost of placing it there.
-        maps = lookahead_wiremasks(
+        obs["lookahead_wiremasks"] = lookahead_wiremasks(
             state, params, padded_pin_idx, padded_pin_offset, valid_mask,
             macro_net_idx, macro_net_offset, macro_net_valid, lookahead,
         )
-        # "wiremask" is just the first (current-macro) slice, kept for policies that only look one step ahead.
-        obs["wiremask"] = maps[0]
-        obs["lookahead_wiremasks"] = maps
         return obs
 
     return state_fn
