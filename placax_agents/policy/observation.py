@@ -19,7 +19,13 @@ def lookahead_sizes(state: EnvState, params: EnvParams, sizes_array: jax.Array, 
 
 
 def observation(state: EnvState, params: EnvParams, sizes_array: jax.Array, lookahead: int = 1) -> dict:
-    """Builds the base observation dict (canvas, current/lookahead macro sizes, positions, step) any policy can read."""
+    """Builds the base observation dict (canvas, current/lookahead macro sizes, positions, step) any policy can read.
+
+    Deliberately excludes a "sizes_array" key: unlike positions/placed_mask (genuinely different
+    every step), sizes_array is the exact same (n_macros, 2) array on every single step of an
+    episode - buffering it per step (see training.rollout.collect_rollout) would replicate it
+    n_macros times over for zero new information. A policy that needs it has it available the
+    same way this function does: as its own sizes_array argument, not through obs."""
     # Render already-placed macros onto the grid; this is what the policy "sees" as the board state.
     canvas = render(state.positions, sizes_array, params.grid_x, params.effective_grid_y)
     return {
@@ -27,7 +33,6 @@ def observation(state: EnvState, params: EnvParams, sizes_array: jax.Array, look
         "current_macro_size": sizes_array[state.step],
         "lookahead_sizes": lookahead_sizes(state, params, sizes_array, lookahead),
         "positions": state.positions,
-        "sizes_array": sizes_array,
         "placed_mask": state.positions[:, 0] >= 0,
         "step": state.step,
     }

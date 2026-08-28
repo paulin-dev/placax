@@ -54,7 +54,11 @@ _jitted_collect_buffer = jax.jit(
 
 # Same reasoning as _jitted_collect_buffer above: without this, compute_gae's small scan
 # also recompiles from scratch on every call instead of being cached.
-_jitted_compute_gae = jax.jit(compute_gae)
+# donate_argnums=(0, 1, 2): buffer["reward"]/["value"]/["done"] are never read again after
+# this call (buffered_train_step only threads buffer["obs"]/["action"]/["log_prob"] onward via
+# batch_trajectory below) - donating them lets XLA reuse their memory for the output instead
+# of transiently holding both.
+_jitted_compute_gae = jax.jit(compute_gae, donate_argnums=(0, 1, 2))
 
 
 def _minibatch_update(
@@ -77,13 +81,52 @@ def _minibatch_update(
     )
 
 
-# donate_argnums=(0, 1, 2): variables/opt_state/running_stats are always immediately
-# overwritten by this call's own output (see the loop below), so their old buffers are
-# dead the instant the call returns - donating lets XLA reuse that memory for the output
-# instead of transiently holding both old and new copies, which matters on small GPUs.
-_jitted_minibatch_update = jax.jit(
-    _minibatch_update, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn"),
-    donate_argnums=(0, 1, 2),
+def _run_epochs(
+    variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
+    policy_trajectory, advantages, returns, flat_batch_idx, cell_size, ppo_config, extra_illegal_fn,
+):
+    """Runs every (epoch, minibatch) gradient step as one jax.lax.scan over flat_batch_idx
+    (shape (ppo_epochs*n_batches, batch_size)), instead of a Python-level double loop each
+    separately dispatching an un-jitted buffer gather followed by a jitted update call. Folding
+    both into one scanned, jitted program lets XLA fuse the per-minibatch gather with the update
+    step and dispatch the whole epoch/minibatch schedule as a single compiled program.
+
+    policy_trajectory only carries "obs"/"action"/"log_prob" - the fields ppo_loss actually
+    reads (it recomputes "value" fresh from the current policy params rather than reusing the
+    buffered one - see loss.py's per_step) - not the full buffer, so the caller's already-donated
+    buffer["reward"]/["value"]/["done"] (dead after compute_gae) are never touched again here."""
+
+    def step(carry, batch_idx):
+        variables, opt_state, running_stats = carry
+        batch_trajectory = jax.tree_util.tree_map(lambda x: x[batch_idx], policy_trajectory)
+        variables, opt_state, running_stats, loss = _minibatch_update(
+            variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
+            batch_trajectory, advantages[batch_idx], returns[batch_idx], cell_size, ppo_config,
+            extra_illegal_fn,
+        )
+        return (variables, opt_state, running_stats), loss
+
+    (variables, opt_state, running_stats), losses = jax.lax.scan(
+        step, (variables, opt_state, running_stats), flat_batch_idx
+    )
+    return variables, opt_state, running_stats, losses[-1]
+
+
+# donate_argnums=(0, 1, 2, 6, 7, 8): variables/opt_state/running_stats are always immediately
+# overwritten by this call's own output (see buffered_train_step below), and policy_trajectory/
+# advantages/returns are never read again afterward either - so all six are dead the instant
+# this call returns. Donating them lets XLA reuse that memory for the output instead of
+# transiently holding both old and new copies, which matters on small GPUs.
+#
+# ppo_config static: correct today, since these hyperparameters are fixed for an entire run -
+# baking them in as compile-time constants is strictly better than tracing them when they never
+# change. But it does mean a future entropy/clip-eps annealing schedule that builds a NEW
+# PPOConfig each iteration would silently trigger a full recompile every single iteration
+# instead of updating a traced value - if that's ever added, make the annealed field(s) plain
+# dynamic arguments instead of routing them through a static PPOConfig.
+_jitted_run_epochs = jax.jit(
+    _run_epochs, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn"),
+    donate_argnums=(0, 1, 2, 6, 7, 8),
 )
 
 
@@ -130,17 +173,35 @@ def buffered_train_step(
     )
 
     # 3. Re-use this same buffer for several epochs, each time reshuffling into fresh
-    #    minibatches, so every transition contributes to several gradient steps.
-    loss = jnp.array(0.0)
-    for _epoch in range(ppo_epochs):
-        key, shuffle_key = jax.random.split(key)
-        for batch_idx in _shuffled_batches(shuffle_key, advantages.shape[0], batch_size):
-            batch_trajectory = jax.tree_util.tree_map(lambda x: x[batch_idx], buffer)
-            variables, opt_state, running_stats, loss = _jitted_minibatch_update(
-                variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
-                batch_trajectory, advantages[batch_idx], returns[batch_idx], cell_size, ppo_config,
-                extra_illegal_fn,
-            )
+    #    minibatches, so every transition contributes to several gradient steps. ppo_epochs and
+    #    buffer_size//batch_size are both static Python ints by this point (advantages is a
+    #    concrete array, already returned from the jitted GAE call above), so an empty schedule
+    #    can be detected here in plain Python - matches the original loop's behavior of simply
+    #    never executing its body when there's nothing to shuffle into a full batch.
+    n_batches = advantages.shape[0] // batch_size
+    if ppo_epochs == 0 or n_batches == 0:
+        return variables, opt_state, running_stats, jnp.array(0.0)
+
+    # 4. Build every epoch's shuffled minibatch indices up front (one vmapped call instead of
+    #    ppo_epochs separate ones), then flatten to the single (ppo_epochs*n_batches, batch_size)
+    #    schedule _jitted_run_epochs scans over as one compiled program.
+    key, epochs_key = jax.random.split(key)
+    epoch_keys = jax.random.split(epochs_key, ppo_epochs)
+    per_epoch_batch_idx = jax.vmap(_shuffled_batches, in_axes=(0, None, None))(
+        epoch_keys, advantages.shape[0], batch_size
+    )
+    flat_batch_idx = per_epoch_batch_idx.reshape((-1, batch_size))
+
+    # Only the fields ppo_loss actually reads - see _run_epochs's docstring for why this
+    # matters beyond just trimming unused data: buffer["reward"]/["value"]/["done"] were
+    # just donated into the compute_gae call above, so they must not be touched again.
+    policy_trajectory = {
+        "obs": buffer["obs"], "action": buffer["action"], "log_prob": buffer["log_prob"],
+    }
+    variables, opt_state, running_stats, loss = _jitted_run_epochs(
+        variables, opt_state, running_stats, optimizer, policy_apply_fn, params,
+        policy_trajectory, advantages, returns, flat_batch_idx, cell_size, ppo_config, extra_illegal_fn,
+    )
     return variables, opt_state, running_stats, loss
 
 

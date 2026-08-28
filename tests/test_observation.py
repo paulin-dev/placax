@@ -34,6 +34,10 @@ def test_observation_canvas_shows_placed_macros_only() -> None:
 def test_observation_exposes_raw_facts_for_non_image_policies() -> None:
     # A GNN or any other non-image policy needs these, not canvas -
     # confirms the raw facts are genuinely present, not just canvas.
+    # sizes_array is deliberately NOT one of them - see observation()'s docstring: unlike
+    # positions/placed_mask, it's identical every step, so a policy that needs it should take
+    # it as its own argument (the same way observation() itself does) rather than have it
+    # buffered redundantly, once per step, in every episode's PPO trajectory.
     params = EnvParams(grid=8, n_macros=3)
     sizes_array = jnp.array([[2.0, 2.0], [1.0, 1.0], [3.0, 1.0]])
     positions = jnp.array([[1, 1], [-1, -1], [-1, -1]])
@@ -41,7 +45,7 @@ def test_observation_exposes_raw_facts_for_non_image_policies() -> None:
     obs = observation(state, params, sizes_array)
 
     assert obs["positions"].tolist() == positions.tolist()
-    assert obs["sizes_array"].tolist() == sizes_array.tolist()
+    assert "sizes_array" not in obs
     assert obs["placed_mask"].tolist() == [True, False, False]
     assert int(obs["step"]) == 1
 

@@ -18,7 +18,11 @@ class WiremaskCNNActorCritic(nn.Module):
         # 1. Canvas as float, and wiremask rescaled to roughly [0, 1] so it's on a similar
         #    footing to canvas rather than dominating with much larger raw values.
         canvas = obs["canvas"].astype(jnp.float32)
-        wiremask = obs["wiremask"]
+        # observation.make_wiremask_observation doesn't buffer a standalone "wiremask" key
+        # (it's identical to lookahead_wiremasks[0], so keeping both would double a full
+        # grid-resolution channel's storage in every buffered trajectory for nothing) -
+        # fall back to that slice, same pattern as action.make_wiremask_quality_illegal.
+        wiremask = obs["wiremask"] if "wiremask" in obs else obs["lookahead_wiremasks"][0]
         wiremask = wiremask / (wiremask.max() + 1e-6)
         # 2. Stack both as separate channels of one input image.
         x = jnp.stack([canvas, wiremask], axis=-1)
