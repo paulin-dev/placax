@@ -54,11 +54,13 @@ _jitted_collect_buffer = jax.jit(
 
 # Same reasoning as _jitted_collect_buffer above: without this, compute_gae's small scan
 # also recompiles from scratch on every call instead of being cached.
-# donate_argnums=(0, 1, 2): buffer["reward"]/["value"]/["done"] are never read again after
-# this call (buffered_train_step only threads buffer["obs"]/["action"]/["log_prob"] onward via
-# batch_trajectory below) - donating them lets XLA reuse their memory for the output instead
-# of transiently holding both.
-_jitted_compute_gae = jax.jit(compute_gae, donate_argnums=(0, 1, 2))
+# donate_argnums=(0, 1): donation only helps for an argument XLA can alias to a same-shape,
+# same-dtype OUTPUT of this exact call - it's buffer reuse, not a general "free whenever"
+# mechanism. compute_gae returns (advantages, returns), both float32 and shaped like
+# rewards/values, so donating those two lets XLA skip allocating fresh output buffers. dones
+# (bool) has no such counterpart in the output - not donated, since donating it could never
+# actually be honored and would just print a harmless-but-noisy "buffer not usable" warning.
+_jitted_compute_gae = jax.jit(compute_gae, donate_argnums=(0, 1))
 
 
 def _minibatch_update(
@@ -112,11 +114,15 @@ def _run_epochs(
     return variables, opt_state, running_stats, losses[-1]
 
 
-# donate_argnums=(0, 1, 2, 6, 7, 8): variables/opt_state/running_stats are always immediately
-# overwritten by this call's own output (see buffered_train_step below), and policy_trajectory/
-# advantages/returns are never read again afterward either - so all six are dead the instant
-# this call returns. Donating them lets XLA reuse that memory for the output instead of
-# transiently holding both old and new copies, which matters on small GPUs.
+# donate_argnums=(0, 1, 2): as with compute_gae above, donation only helps where XLA can alias
+# an input to a same-shape, same-dtype OUTPUT of this exact call. _run_epochs returns exactly
+# (variables, opt_state, running_stats, loss) - variables/opt_state/running_stats keep their
+# input pytree's shape/dtype throughout the scan, so donating them lets XLA reuse that memory for
+# the output instead of transiently holding both old and new copies, which matters on small GPUs.
+# policy_trajectory/advantages/returns are also dead after this call (never read again in
+# buffered_train_step below), but that doesn't make them donatable: nothing in this function's
+# output has their shape, so there's no output for XLA to alias them into - donating them would
+# only print a harmless-but-noisy "buffer not usable" warning for no actual benefit.
 #
 # ppo_config static: correct today, since these hyperparameters are fixed for an entire run -
 # baking them in as compile-time constants is strictly better than tracing them when they never
@@ -126,7 +132,7 @@ def _run_epochs(
 # dynamic arguments instead of routing them through a static PPOConfig.
 _jitted_run_epochs = jax.jit(
     _run_epochs, static_argnames=("optimizer", "policy_apply_fn", "ppo_config", "extra_illegal_fn"),
-    donate_argnums=(0, 1, 2, 6, 7, 8),
+    donate_argnums=(0, 1, 2),
 )
 
 
