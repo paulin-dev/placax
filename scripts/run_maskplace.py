@@ -326,39 +326,19 @@ def main() -> None:
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
-    # 2. Load the netlist with MaskPlace's own ordering/reward choices.
-    Log.info(f"loading {benchmark_dir} (connectivity order, macro_budget={macro_budget}, dense reward) ...")
-    benchmark = _load_benchmark(benchmark_dir, macro_budget)
-    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
-
-    # 3. Build the observation function, illegal-action mask, and policy network.
-    state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
-    policy = _build_policy(benchmark)
-
-    # 4. Initialize the policy's parameters using one dummy observation, so
-    #    Flax can infer every layer's shape from real input.
-    key = random.PRNGKey(0)
-    key, init_key = random.split(key)
-    obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
-    variables = policy.init(init_key, obs0)
-
-    # 5. Set up the checkpoint location; if one already exists, training
-    #    below will resume from it instead of starting over.
-    output_dir = benchmark_dir / "output_maskplace"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_path = output_dir / "checkpoint.bin"
-    log_path = output_dir / "training_log.jsonl"
-    resuming = checkpoint_path.exists()
-    Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
-
-    # 6. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
-    ppo_config = maskplace_ppo_config()
-    optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)  # separately-clipped actor/critic Adam
-
-    # 7. Resolve the buffer size: either MaskPlace's fixed 10, an explicit
-    #    override, or - only if the CLI asked for "auto" - the largest that
-    #    actually fits on this hardware (see NEpisodesDetector).
+    # 2. Resolve the buffer size FIRST, before this process touches JAX/the GPU at all: either
+    #    MaskPlace's fixed 10, an explicit override, or - only if the CLI asked for "auto" - the
+    #    largest that actually fits on this hardware (see NEpisodesDetector). This ordering
+    #    matters, not just style - JAX's default GPU allocator preallocates a large fraction
+    #    (75% by default, see placax._device) of the device as one arena on its FIRST allocation
+    #    and never gives it back. If this process had already loaded the benchmark/built the
+    #    policy (both real GPU ops) before probing, its own ~75% would still be reserved and
+    #    alive while each disposable probe subprocess ALSO tries to preallocate its own ~75% of
+    #    the same physical device - the two compete for one GPU's worth of memory, making every
+    #    probe look far more memory-constrained than the real (single-process) training run ever
+    #    will be, and can throttle n_episodes down for no reason related to actual training cost.
+    #    Resolving n_episodes here, before this process's own first GPU allocation, means each
+    #    probe subprocess runs against an otherwise-idle GPU, same as the real run.
     if n_episodes_arg.lower() == "auto":
         Log.info("auto-detecting n_episodes (probing candidates in disposable subprocesses) ...")
         n_episodes = NEpisodesDetector(benchmark_dir, macro_budget, eval_every=eval_every).detect()
@@ -368,6 +348,39 @@ def main() -> None:
         Log.info(f"  -> n_episodes={n_episodes} (auto-detected, MaskPlace's own default is {MASKPLACE_N_EPISODES})")
     else:
         n_episodes = int(n_episodes_arg)
+
+    # 3. Load the netlist with MaskPlace's own ordering/reward choices. This is this process's
+    #    own first real GPU-touching JAX call - see step 2's comment for why it must come after
+    #    n_episodes is resolved, not before.
+    Log.info(f"loading {benchmark_dir} (connectivity order, macro_budget={macro_budget}, dense reward) ...")
+    benchmark = _load_benchmark(benchmark_dir, macro_budget)
+    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
+
+    # 4. Build the observation function, illegal-action mask, and policy network.
+    state_fn = _build_state_fn(benchmark)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
+    policy = _build_policy(benchmark)
+
+    # 5. Initialize the policy's parameters using one dummy observation, so
+    #    Flax can infer every layer's shape from real input.
+    key = random.PRNGKey(0)
+    key, init_key = random.split(key)
+    obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
+    variables = policy.init(init_key, obs0)
+
+    # 6. Set up the checkpoint location; if one already exists, training
+    #    below will resume from it instead of starting over.
+    output_dir = benchmark_dir / "output_maskplace"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = output_dir / "checkpoint.bin"
+    log_path = output_dir / "training_log.jsonl"
+    resuming = checkpoint_path.exists()
+    Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+
+    # 7. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
+    ppo_config = maskplace_ppo_config()
+    optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)  # separately-clipped actor/critic Adam
+
     Log.info(
         f"running {n_iterations} more buffered-PPO iterations "
         f"({n_episodes} episodes/buffer, 10 minibatch epochs, batch 64, "
