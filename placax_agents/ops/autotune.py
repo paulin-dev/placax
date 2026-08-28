@@ -144,8 +144,16 @@ def find_max_batch_size(
     with _rlimit_as(memory_limit_bytes):
         # 1. Grow exponentially to cheaply find a (last_good, first_bad) bracket around the boundary.
         last_good, first_bad = _grow_to_bracket(try_fn, start, max_candidate, cleanup_fn, verbose)
-        if first_bad is None:  # never failed within max_candidate - nothing left to narrow
-            return last_good
+        if first_bad is None:
+            # Doubling overshot max_candidate without ever finding a real failure - last_good is
+            # some power-of-two-ish value below the cap (e.g. 8 when max_candidate=10), and
+            # everything strictly between it and the cap (9, 10 in that example) was never
+            # actually tried, only skipped over. Narrow that gap too, treating max_candidate+1 as
+            # an assumed (untested) upper bound - this is a no-op when last_good already equals
+            # max_candidate.
+            if last_good == max_candidate:
+                return last_good
+            return _binary_search(try_fn, last_good, max_candidate + 1, cleanup_fn, verbose)
         # 2. Binary-search inside that bracket to pin down the exact boundary.
         return _binary_search(try_fn, last_good, first_bad, cleanup_fn, verbose)
 

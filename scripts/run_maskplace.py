@@ -94,10 +94,11 @@ def maskplace_optimizer(
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int]:
-    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every) from named
-    --flag=value CLI args; macro_budget is None if --macro_budget=all was given; n_episodes_arg is
-    either an int-as-string or the literal "auto" (see NEpisodesDetector)."""
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, int]:
+    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every,
+    max_episodes) from named --flag=value CLI args; macro_budget is None if --macro_budget=all
+    was given; n_episodes_arg is either an int-as-string or the literal "auto" (see
+    NEpisodesDetector)."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
         "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
@@ -125,9 +126,20 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
         "--eval_every", type=int, default=10,
         help="Compute real HPWL (a full extra greedy rollout) every this many iterations (default: 10).",
     )
+    parser.add_argument(
+        "--max_episodes", type=int, default=MASKPLACE_N_EPISODES,
+        help='Only used with --n_episodes=auto: the largest n_episodes the search is allowed to try '
+             '(default: %(default)s, MaskPlace\'s own value - going higher deviates from what the '
+             'paper\'s hyperparameters were tuned against, so this script keeps that as the default '
+             "ceiling rather than searching purely by hardware capability). Raise this explicitly if "
+             "you deliberately want a bigger buffer than MaskPlace's own and have the GPU memory for it.",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
-    return args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every, args.eval_every
+    return (
+        args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
+        args.eval_every, args.max_episodes,
+    )
 
 
 def _maskplace_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
@@ -236,7 +248,11 @@ class NEpisodesDetector:
         self,
         benchmark_dir: pathlib.Path,
         macro_budget: int | None = None,
-        max_candidate: int = MASKPLACE_N_EPISODES,  # no point searching past MaskPlace's own value
+        # 32 is a generic "how far is worth probing" ceiling, not tied to MaskPlace's own
+        # n_episodes default - this class just answers "how much fits on this hardware";
+        # whether staying at MaskPlace's own buffer size matters is the caller's call (see
+        # --max_episodes, which run_maskplace.py's own CLI defaults to MASKPLACE_N_EPISODES).
+        max_candidate: int = 32,
         eval_every: int = 10,  # must match the real run's --eval_every for the probe to be representative
         # Generous: each probe subprocess compiles this ResNet-backed pipeline's shapes from cold (see
         # placax._device's JAX_COMPILATION_CACHE_DIR), so most of this budget goes to compile time, not
@@ -321,7 +337,9 @@ def main() -> None:
     Log.configure()
 
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
-    benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every = _parse_args(sys.argv)
+    benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, max_episodes = _parse_args(
+        sys.argv
+    )
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
@@ -341,7 +359,9 @@ def main() -> None:
     #    probe subprocess runs against an otherwise-idle GPU, same as the real run.
     if n_episodes_arg.lower() == "auto":
         Log.info("auto-detecting n_episodes (probing candidates in disposable subprocesses) ...")
-        n_episodes = NEpisodesDetector(benchmark_dir, macro_budget, eval_every=eval_every).detect()
+        n_episodes = NEpisodesDetector(
+            benchmark_dir, macro_budget, max_candidate=max_episodes, eval_every=eval_every,
+        ).detect()
         if n_episodes < 1:
             Log.error("not even n_episodes=1 fits on this hardware - try a smaller macro_budget.")
             sys.exit(1)

@@ -26,6 +26,29 @@ def test_respects_max_candidate_ceiling() -> None:
     assert find_max_batch_size(always_succeeds, max_candidate=8) == 8
 
 
+def test_max_candidate_not_a_power_of_two_still_reaches_the_ceiling() -> None:
+    # Regression test: doubling from 1 lands on last_good=8 then overshoots straight to 16,
+    # which is > max_candidate=10 - an earlier version treated "doubling overshot the cap
+    # without ever finding a real failure" the same as "genuinely nothing left to narrow" and
+    # returned 8 outright, silently never even trying 9 or 10 even though everything up to the
+    # cap succeeds (this is exactly what scripts.run_maskplace's NEpisodesDetector hit with its
+    # own max_candidate=10, MaskPlace's own n_episodes default).
+    def always_succeeds(n: int) -> None:
+        pass
+
+    assert find_max_batch_size(always_succeeds, max_candidate=10) == 10
+
+
+def test_max_candidate_not_a_power_of_two_with_a_real_boundary_inside_the_gap() -> None:
+    # Same shape as above, but the true boundary (9) falls inside the (last_good=8,
+    # max_candidate=10] gap that doubling alone would have skipped over entirely.
+    def fake_op(n: int) -> None:
+        if n > 9:
+            raise RuntimeError("RESOURCE_EXHAUSTED: simulated")
+
+    assert find_max_batch_size(fake_op, max_candidate=10) == 9
+
+
 def test_memory_limit_prevents_crash_on_real_allocation() -> None:
     # Regression test for a real crash found this session: an earlier
     # version of this search was killed outright (SIGKILL, exit 137) by
