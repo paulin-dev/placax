@@ -364,7 +364,11 @@ def main() -> None:
             output_dir / "placements" if want_placement_images else None
         )
     if placement_images_dir is not None:
-        Log.info(f"writing a placement snapshot every {eval_every} iterations to {placement_images_dir}")
+        if eval_every == log_every:
+            cadence = f"every {eval_every} iterations"
+        else:
+            cadence = f"on iterations that are multiples of both --eval_every={eval_every} and --log_every={log_every}"
+        Log.info(f"writing a placement snapshot {cadence} to {placement_images_dir}")
 
     # 7. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
     ppo_config = maskplace_ppo_config()
