@@ -1,60 +1,64 @@
 """Runs (or resumes) extended training on a real benchmark, checkpointing
 and evaluating real HPWL along the way.
 
-Usage: python scripts/run_training.py [benchmark_dir] [n_iterations] [n_envs]"""
+Usage: python -m scripts.run_training --benchmark_dir=benchmarks/adaptec1 --n_iterations=100
+
+To find the largest --n_envs your hardware supports, use scripts/subprocess_search.py
+*separately first* (not a flag of this script - see that module's docstring for why: this
+process's own GPU memory reservation, just from starting up, would otherwise compete with the
+disposable subprocesses being probed):
+
+    python -m scripts.subprocess_search scripts.run_training '--n_envs=[1,2,4,8,16]' \\
+        --benchmark_dir=benchmarks/adaptec1 --eval_every=1 --n_iterations=4 --no_checkpoint
+
+--eval_every=1/--n_iterations=4 there deliberately don't match a real run's --eval_every=10: the
+eval rollout is a separately-compiled executable with its own memory footprint, so a probe needs
+to cross at least one eval boundary (plus a couple more iterations, to catch ordinary GPU
+allocator fragmentation drift) to be representative - forcing it every iteration reaches that
+footprint by iteration 1 instead of iteration 10, so 4 iterations suffice instead of 13.
+"""
+import argparse
 import pathlib
 import sys
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.log import Log
 from placax_agents.benchmark import Benchmark
-from placax_agents.ops.n_envs import NEnvsDetector
 from placax_agents.ops.resumable_train import resumable_train
 from placax_agents.policy.architectures.cnn import CNNActorCritic
 
 from jax import random
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None]:
-    """(benchmark_dir, n_iterations, n_envs_override) from sys.argv."""
-    benchmark_dir = pathlib.Path(argv[1] if len(argv) > 1 else "benchmarks/adaptec1")
-    n_iterations = int(argv[2]) if len(argv) > 2 else 100
-    n_envs_override = int(argv[3]) if len(argv) > 3 else None
-    return benchmark_dir, n_iterations, n_envs_override
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run (or resume) training on a real benchmark.")
+    parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
+    parser.add_argument("--n_iterations", type=int, default=100)
+    parser.add_argument(
+        "--n_envs", type=int, default=1,
+        help="Parallel envs per training step (default: 1). See this module's docstring for how "
+             "to find the largest value your hardware supports.",
+    )
+    parser.add_argument(
+        "--mode", choices=["sequential", "parallel"], default=None,
+        help="Force sequential/parallel training-step implementation (default: auto-detected "
+             "from the JAX backend - CPU picks sequential, GPU/TPU picks parallel).",
+    )
+    parser.add_argument(
+        "--eval_every", type=int, default=10,
+        help="Compute real HPWL (a full extra greedy rollout) every this many iterations (default: 10).",
+    )
+    parser.add_argument(
+        "--no_checkpoint", action="store_true",
+        help="Don't read or write checkpoint.bin - useful for a quick, disposable run (e.g. "
+             "when probing via scripts/subprocess_search.py) that shouldn't resume from or "
+             "leave behind any state.",
+    )
+    return parser.parse_args(argv[1:])
 
 
-def _resolve_n_envs(benchmark_dir: pathlib.Path, n_envs_override: int | None) -> tuple[str, int]:
-    """Returns (mode, n_envs) via NEnvsDetector.resolve(), logging progress since auto-detect can be slow."""
-    # Auto-detection probes candidate configs in subprocesses, which can take
-    # a while - let the user know it's working, not stuck.
-    if n_envs_override is None:
-        Log.info("auto-detecting mode and n_envs (probing candidates in disposable subprocesses) ...")
-    mode, n_envs = NEnvsDetector(benchmark_dir).resolve(n_envs_override)
-    source = "given explicitly" if n_envs_override is not None else "auto-detected"
-    Log.info(f"  -> mode={mode}, n_envs={n_envs} ({source})")
-    return mode, n_envs
-
-
-def _print_summary(checkpoint_path: pathlib.Path, snapshot_dir: pathlib.Path, log_path: pathlib.Path) -> None:
-    """Prints the closing summary of where training artifacts were saved."""
-    # Closing report, not log messages - each iteration already streamed live
-    # via resumable_train's Log.info(), so this isn't a duplicate recap.
-    print()
-    print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
-    print(f"snapshots (never overwritten) saved to {snapshot_dir}/")
-    print(f"full history saved to {log_path}")
-
-
-def _load_benchmark(benchmark_dir: pathlib.Path) -> Benchmark:
-    """Loads the benchmark netlist, logging its size once loaded."""
-    Log.info(f"loading {benchmark_dir} ...")
-    benchmark = Benchmark.load(benchmark_dir)
-    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
-    return benchmark
-
-
-def _output_paths(benchmark_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Returns (checkpoint_path, snapshot_dir, log_path) under a dedicated output subdirectory."""
+def _output_paths(benchmark_dir: pathlib.Path) -> tuple[pathlib.Path | None, pathlib.Path, pathlib.Path]:
+    """Returns (checkpoint_path, snapshot_dir, log_path); checkpoint_path is None if --no_checkpoint."""
     output_dir = benchmark_dir / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
     return output_dir / "checkpoint.bin", output_dir / "snapshots", output_dir / "training_log.jsonl"
@@ -63,39 +67,42 @@ def _output_paths(benchmark_dir: pathlib.Path) -> tuple[pathlib.Path, pathlib.Pa
 def main() -> None:
     """CLI entry point: loads a benchmark, builds a policy, and runs/resumes training on it."""
     Log.configure()
-
-    # 1. Parse CLI args and make sure the requested benchmark actually exists.
-    benchmark_dir, n_iterations, n_envs_override = _parse_args(sys.argv)
-    if not benchmark_dir.exists():
-        Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
+    args = _parse_args(sys.argv)
+    if not args.benchmark_dir.exists():
+        Log.error(f"'{args.benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
-    benchmark = _load_benchmark(benchmark_dir)
+    Log.info(f"loading {args.benchmark_dir} ...")
+    benchmark = Benchmark.load(args.benchmark_dir)
+    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
 
-    # 2. Build a fresh policy and initialize its parameters (any resuming
-    #    from a checkpoint happens later, inside resumable_train itself).
+    # A fresh policy; any resuming from a checkpoint happens later, inside resumable_train itself.
     policy = CNNActorCritic()
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     variables = benchmark.init_policy(policy, init_key)
 
-    # 3. Decide where outputs go and how many parallel envs to run.
-    checkpoint_path, snapshot_dir, log_path = _output_paths(benchmark_dir)
-    mode, n_envs = _resolve_n_envs(benchmark_dir, n_envs_override)
+    checkpoint_path, snapshot_dir, log_path = _output_paths(args.benchmark_dir)
+    if args.no_checkpoint:
+        checkpoint_path = None
+    else:
+        resuming = checkpoint_path.exists()
+        Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+    Log.info(f"running {args.n_iterations} more iterations (n_envs={args.n_envs}, mode={args.mode or 'auto'}) ...")
 
-    resuming = checkpoint_path.exists()
-    Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
-    Log.info(f"running {n_iterations} more iterations ...")
-
-    # 4. Run the actual training loop (it checkpoints/snapshots/logs internally).
     _final_variables, _log = resumable_train(
         checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
-        benchmark.sizes_array, benchmark.cell_size, n_iterations,
+        benchmark.sizes_array, benchmark.cell_size, args.n_iterations,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-        checkpoint_every=10, eval_every=10, log_path=log_path,
-        n_envs=n_envs, mode=mode, snapshot_dir=snapshot_dir, snapshot_every=50,
+        checkpoint_every=10, eval_every=args.eval_every, log_path=log_path,
+        n_envs=args.n_envs, mode=args.mode, snapshot_dir=snapshot_dir, snapshot_every=50,
     )
-    _print_summary(checkpoint_path, snapshot_dir, log_path)
+
+    print()
+    if checkpoint_path is not None:
+        print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
+        print(f"snapshots (never overwritten) saved to {snapshot_dir}/")
+    print(f"full history saved to {log_path}")
 
 
 if __name__ == "__main__":

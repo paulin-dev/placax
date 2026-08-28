@@ -61,7 +61,7 @@ def _append_log_entry(
 
 
 def resumable_train(
-    checkpoint_path: pathlib.Path,
+    checkpoint_path: pathlib.Path | None,
     variables,
     key: jax.Array,
     policy_apply_fn: AlgorithmFn,
@@ -128,6 +128,8 @@ def resumable_train(
         snapshot_path = snapshot_dir / f"checkpoint_iter_{current_iteration}.bin" if snapshot_dir else None
         checkpoint_every_n(snapshot_path, snapshot_every, current_iteration, variables, opt_state, running_stats, key)
 
-    # Always checkpoint at the end, regardless of checkpoint_every.
-    save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
+    # Always checkpoint at the end, regardless of checkpoint_every - unless checkpoint_path is
+    # None, meaning the caller doesn't want anything written (e.g. a disposable probe run).
+    if checkpoint_path is not None:
+        save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables, log

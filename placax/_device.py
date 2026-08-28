@@ -32,9 +32,9 @@ if _is_wsl():
     os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.70")
 
 # Persist compiled XLA executables across process runs: without this, every fresh process (in
-# particular every disposable subprocess spawned by ops.autotune's probes) recompiles this
-# ResNet-backed pipeline's shapes from scratch, which is slow enough to spuriously time out a
-# probe and get it misreported as "doesn't fit" (see scripts.run_maskplace.NEpisodesDetector).
+# particular every disposable subprocess spawned by scripts.subprocess_search's sweeps)
+# recompiles this ResNet-backed pipeline's shapes from scratch, which is slow enough to
+# spuriously time out a probe and get it misreported as "doesn't fit".
 os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/placax/jax_compilation_cache"))
 
 # Silences XLA/cuDNN's C++ logging (routine kernel-search noise, not

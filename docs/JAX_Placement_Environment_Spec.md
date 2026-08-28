@@ -189,7 +189,7 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
                                          generalized - Section 8)
             run.py, common.py
     ops/
-        evaluate.py, checkpoint.py, resumable_train.py, autotune.py, n_envs.py
+        evaluate.py, checkpoint.py, resumable_train.py
 
 placax_tools/                    # Cell placer / validator wrappers (Section 5.4-5.5)
     dreamplace/cell_placer.py
