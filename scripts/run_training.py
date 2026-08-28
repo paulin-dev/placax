@@ -56,6 +56,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
              "when probing via scripts/subprocess_search.py) that shouldn't resume from or "
              "leave behind any state.",
     )
+    parser.add_argument(
+        "--placement_images", action="store_true",
+        help="Also write a placement snapshot PNG on every --eval_every iteration (default "
+             "location: <output_dir>/placements/<iteration>.png) - reuses that iteration's "
+             "already-scheduled eval rollout, so this adds no extra rollout, just one image write "
+             "per eval.",
+    )
+    parser.add_argument(
+        "--placement_images_dir", type=pathlib.Path, default=None,
+        help="Where to write placement snapshots (implies --placement_images; default: "
+             "<output_dir>/placements).",
+    )
     return parser.parse_args(argv[1:])
 
 
@@ -85,11 +97,18 @@ def main() -> None:
     variables = benchmark.init_policy(policy, init_key)
 
     checkpoint_path, snapshot_dir, log_path = _output_paths(args.benchmark_dir)
+    output_dir = checkpoint_path.parent
     if args.no_checkpoint:
         checkpoint_path = None
+        placement_images_dir = args.placement_images_dir  # only if explicit - no output_dir to default into
     else:
         resuming = checkpoint_path.exists()
         Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+        placement_images_dir = args.placement_images_dir or (
+            output_dir / "placements" if args.placement_images else None
+        )
+    if placement_images_dir is not None:
+        Log.info(f"writing a placement snapshot every {args.eval_every} iterations to {placement_images_dir}")
     Log.info(f"running {args.n_iterations} more iterations (n_envs={args.n_envs}, mode={args.mode or 'auto'}) ...")
 
     # resumable_train's own default state_fn (plain observation()) would silently fall back to
@@ -105,6 +124,7 @@ def main() -> None:
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         state_fn=state_fn, checkpoint_every=10, eval_every=args.eval_every, log_path=log_path,
         n_envs=args.n_envs, mode=args.mode, snapshot_dir=snapshot_dir, snapshot_every=50,
+        placement_images_dir=placement_images_dir,
     )
 
     print()

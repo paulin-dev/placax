@@ -9,6 +9,7 @@ from placax.log import Log
 from placax.types import EnvParams, RewardFn
 from placax_agents.ops.evaluate import _jitted_evaluate
 from placax_agents.policy.observation import observation
+from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.loops.common import (
     checkpoint_every_n,
@@ -24,9 +25,7 @@ import jax
 import optax
 
 
-def _maybe_evaluate(
-    current_iteration: int,
-    eval_every: int,
+def _evaluate(
     variables,
     policy_apply_fn: AlgorithmFn,
     params: EnvParams,
@@ -37,16 +36,35 @@ def _maybe_evaluate(
     valid_mask: jax.Array,
     state_fn: StateFn,
     extra_illegal_fn: ExtraIllegalFn | None = None,
-) -> float | None:
-    """Returns real HPWL at current_iteration, or None if this isn't an eval iteration."""
-    if current_iteration % eval_every != 0:
-        return None
-    # Run a full greedy rollout with the current policy just to measure quality, not to train.
-    _positions, hpwl_value = _jitted_evaluate(
+) -> tuple[float, jax.Array]:
+    """Runs one full greedy rollout with the current policy and returns (real HPWL, final grid
+    positions) - not cheap (an entire extra rollout on top of training), so the caller decides
+    when to call this (see eval_every in resumable_train's loop) rather than gating itself."""
+    positions, hpwl_value = _jitted_evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
     )
-    return float(hpwl_value)
+    return float(hpwl_value), positions
+
+
+def _save_placement_image(
+    placement_images_dir: pathlib.Path,
+    iteration: int,
+    positions: jax.Array,
+    grid_sizes: jax.Array,
+    params: EnvParams,
+) -> None:
+    """Writes <placement_images_dir>/<iteration>.png from an eval rollout's final positions.
+    Caller decides when to call this (see placement_images_dir/log_every in resumable_train's
+    loop). Imports placax_viz/matplotlib lazily - training has no hard dependency on either
+    otherwise."""
+    from placax_viz.placement import save_placement_image
+
+    placement_images_dir.mkdir(parents=True, exist_ok=True)
+    save_placement_image(
+        positions, grid_sizes, params.grid_x, params.effective_grid_y,
+        placement_images_dir / f"{iteration}.png",
+    )
 
 
 def _append_log_entry(
@@ -85,10 +103,18 @@ def resumable_train(
     mode: str | None = None,
     snapshot_dir: pathlib.Path | None = None,
     snapshot_every: int | None = None,
+    placement_images_dir: pathlib.Path | None = None,
 ):
-    """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log)."""
+    """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log).
+
+    placement_images_dir, if given, writes <iteration>.png (the eval rollout's final placement) -
+    eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
+    log_every - the same condition that gates the console print below - controls which of those
+    eval iterations actually get an image kept, so a smaller eval_every for a finer real_hpwl
+    curve doesn't also imply writing an image on every single one of those rollouts."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
+    grid_sizes = to_grid_units(sizes_array, cell_size)
     # Pick the sequential or parallel training-step implementation based on hardware + n_envs.
     use_parallel = recommended_parallelism_mode(mode) == "parallel" and n_envs > 1
     jitted_step = _jitted_parallel_train_step if use_parallel else _jitted_train_step
@@ -111,13 +137,19 @@ def resumable_train(
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
         )
 
-        # 2. periodic real-HPWL eval + 3. log entry (always, eval or not)
-        real_hpwl = _maybe_evaluate(
-            current_iteration, eval_every, variables, policy_apply_fn, params, sizes_array, cell_size,
-            padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
-        )
+        # 2. periodic real-HPWL eval (only every eval_every iterations - not cheap, so gated
+        #    explicitly here rather than inside _evaluate itself) + 3. log entry (always, eval or not).
+        is_log_iteration = log_every is not None and current_iteration % log_every == 0
+        real_hpwl = None
+        if current_iteration % eval_every == 0:
+            real_hpwl, eval_positions = _evaluate(
+                variables, policy_apply_fn, params, sizes_array, cell_size,
+                padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
+            )
+            if placement_images_dir is not None and is_log_iteration:
+                _save_placement_image(placement_images_dir, current_iteration, eval_positions, grid_sizes, params)
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
-        if log_every is not None and current_iteration % log_every == 0:
+        if is_log_iteration:
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
             Log.info(f"iter {current_iteration:>6}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 

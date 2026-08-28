@@ -40,7 +40,7 @@ from placax.log import Log
 from placax.netlist.order import connectivity_order
 from placax.netlist.padding import build_macro_net_index
 from placax_agents.benchmark import Benchmark
-from placax_agents.ops.resumable_train import _append_log_entry, _maybe_evaluate
+from placax_agents.ops.resumable_train import _append_log_entry, _evaluate, _save_placement_image
 from placax_agents.policy.action import make_wiremask_quality_illegal
 from placax_agents.policy.architectures.resnet_cnn import (
     ResNetCoarseFineActorCritic,
@@ -48,6 +48,7 @@ from placax_agents.policy.architectures.resnet_cnn import (
     build_untrained_resnet_backbone,
 )
 from placax_agents.policy.observation import make_wiremask_observation
+from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.loss import huber_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
@@ -105,12 +106,12 @@ def maskplace_optimizer(
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int]:
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None]:
     """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every,
-    no_checkpoint) from named --flag=value CLI args; macro_budget is None if --macro_budget=all
-    was given; n_episodes_arg is an int-as-string (auto-detection is a separate step - see
-    scripts/subprocess_search.py and this module's own docstring for why it isn't a flag of this
-    script)."""
+    no_checkpoint, placement_images, placement_images_dir) from named --flag=value CLI args;
+    macro_budget is None if --macro_budget=all was given; n_episodes_arg is an int-as-string
+    (auto-detection is a separate step - see scripts/subprocess_search.py and this module's own
+    docstring for why it isn't a flag of this script)."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
         "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
@@ -147,11 +148,23 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
              "when probing via scripts/subprocess_search.py) that shouldn't resume from or "
              "leave behind any state.",
     )
+    parser.add_argument(
+        "--placement_images", action="store_true",
+        help="Also write a placement snapshot PNG on every --eval_every iteration (default "
+             "location: <output_dir>/placements/<iteration>.png) - reuses that iteration's "
+             "already-scheduled eval rollout, so this adds no extra rollout, just one image write "
+             "per eval.",
+    )
+    parser.add_argument(
+        "--placement_images_dir", type=pathlib.Path, default=None,
+        help="Where to write placement snapshots (implies --placement_images; default: "
+             "<output_dir>/placements).",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
-        args.eval_every, args.no_checkpoint,
+        args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
     )
 
 
@@ -222,15 +235,22 @@ def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
     extra_illegal_fn, checkpoint_path: pathlib.Path | None, n_iterations: int, n_episodes: int,
     log_every: int, eval_every: int, log_path: pathlib.Path | None,
+    placement_images_dir: pathlib.Path | None = None,
 ):
     """Runs n_iterations of buffered-PPO training one iteration at a time, resuming from
     checkpoint_path if it exists. Real HPWL is computed every eval_every iterations (a full extra
     greedy rollout, so not cheap); a progress line is printed every log_every iterations; every
-    iteration is appended to log_path as JSONL regardless of log_every."""
+    iteration is appended to log_path as JSONL regardless of log_every.
+
+    placement_images_dir, if given, writes <iteration>.png (that eval rollout's final placement) -
+    eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
+    log_every - the same condition that gates the console print below - controls which of those
+    eval iterations actually get an image kept."""
     # Resume from checkpoint_path if it exists (read once here, not once per iteration below).
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path
     )
+    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
 
     log = []
     for i in range(n_iterations):
@@ -246,13 +266,20 @@ def _train_and_eval_loop(
             extra_illegal_fn=extra_illegal_fn,
         )
 
-        # 2. Real-HPWL eval (only every eval_every iterations) + log entry (always, to
-        #    log_path; console only every log_every iterations).
-        real_hpwl = _maybe_evaluate(
-            current_iteration, eval_every, variables, policy.apply, benchmark.params,
-            benchmark.sizes_array, benchmark.cell_size, benchmark.padded_pin_idx,
-            benchmark.padded_pin_offset, benchmark.valid_mask, state_fn, extra_illegal_fn,
-        )
+        # 2. Real-HPWL eval (only every eval_every iterations - not cheap, so gated explicitly
+        #    here rather than inside _evaluate itself) + log entry (always, to log_path; console
+        #    only every log_every iterations).
+        real_hpwl = None
+        if current_iteration % eval_every == 0:
+            real_hpwl, eval_positions = _evaluate(
+                variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
+                benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
+                state_fn, extra_illegal_fn,
+            )
+            if placement_images_dir is not None:
+                _save_placement_image(
+                    placement_images_dir, current_iteration, eval_positions, grid_sizes, benchmark.params
+                )
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
         if current_iteration % log_every == 0:
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
@@ -274,9 +301,10 @@ def main() -> None:
     Log.configure()
 
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
-    benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint = _parse_args(
-        sys.argv
-    )
+    (
+        benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
+        want_placement_images, placement_images_dir_arg,
+    ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
@@ -324,6 +352,7 @@ def main() -> None:
     #    write any state at all (a quick, disposable run, e.g. a scripts/subprocess_search.py probe).
     if no_checkpoint:
         checkpoint_path = log_path = None
+        placement_images_dir = placement_images_dir_arg  # only if explicitly given - no output_dir to default into
     else:
         output_dir = benchmark_dir / "output_maskplace"
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -331,6 +360,11 @@ def main() -> None:
         log_path = output_dir / "training_log.jsonl"
         resuming = checkpoint_path.exists()
         Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+        placement_images_dir = placement_images_dir_arg or (
+            output_dir / "placements" if want_placement_images else None
+        )
+    if placement_images_dir is not None:
+        Log.info(f"writing a placement snapshot every {eval_every} iterations to {placement_images_dir}")
 
     # 7. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
     ppo_config = maskplace_ppo_config()
@@ -347,6 +381,7 @@ def main() -> None:
         key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
         checkpoint_path, n_iterations, n_episodes=n_episodes,
         log_every=log_every, eval_every=eval_every, log_path=log_path,
+        placement_images_dir=placement_images_dir,
     )
 
     if checkpoint_path is not None:
