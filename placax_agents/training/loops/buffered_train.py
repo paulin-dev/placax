@@ -79,7 +79,7 @@ def _minibatch_update(
         )
 
     return apply_gradient_update(
-        variables, opt_state, running_stats, optimizer, loss_fn, batch_advantages, batch_returns
+        variables, opt_state, running_stats, optimizer, loss_fn, batch_advantages, batch_returns, ppo_config
     )
 
 

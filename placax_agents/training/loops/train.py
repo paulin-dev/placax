@@ -58,7 +58,7 @@ def train_step(
 
     # 4. Normalize advantages/returns and take one gradient step.
     new_variables, new_opt_state, new_running_stats, loss = apply_gradient_update(
-        variables, opt_state, running_stats, optimizer, loss_fn, advantages, returns
+        variables, opt_state, running_stats, optimizer, loss_fn, advantages, returns, ppo_config
     )
     return new_variables, new_opt_state, new_running_stats, loss, final_state
 

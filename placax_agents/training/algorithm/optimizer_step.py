@@ -1,6 +1,7 @@
 """The optimizer-update tail shared by sequential and parallel training."""
 from collections.abc import Callable
 
+from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.normalize import normalize_advantages  # must precede jax imports
 from placax_agents.training.algorithm.running_stats import (
     RunningStats, normalize_with_stats, update_running_stats,
@@ -18,17 +19,26 @@ def apply_gradient_update(
     loss_fn: Callable[[object, jax.Array, jax.Array], jax.Array],
     advantages: jax.Array,
     returns: jax.Array,
+    ppo_config: PPOConfig = PPOConfig(),
 ):
-    """One gradient step: normalizes advantages/returns, then applies loss_fn's gradient via optimizer.
-    Only variables["params"] is trained; any other collection (e.g. Flax BatchNorm's batch_stats) is
-    passed through unchanged - gradient-descending a running statistic isn't meaningful, and can drive
-    a variance negative, NaN-ing every forward pass from then on."""
-    # 1. Fold this batch's returns into the running mean/var, then use the updated stats to
-    #    standardize returns - keeps the value loss's scale stable as training progresses.
+    """One gradient step: optionally normalizes advantages/returns (per ppo_config), then applies
+    loss_fn's gradient via optimizer. Only variables["params"] is trained; any other collection
+    (e.g. Flax BatchNorm's batch_stats) is passed through unchanged - gradient-descending a running
+    statistic isn't meaningful, and can drive a variance negative, NaN-ing every forward pass from
+    then on.
+
+    Both normalizations are standard PPO tricks, but neither is in MaskPlace's own reference PPO2.py
+    (it trains on the raw advantage/return, scaled only by its fixed reward/200 divisor) - ppo_config
+    lets a caller matching that reference (see run_maskplace.py's maskplace_ppo_config) disable them.
+    They're also actively dangerous with a small buffer and no entropy bonus: if a batch's episodes
+    happen to be low-variance, dividing by advantages.std() + eps amplifies ordinary floating-point-
+    scale noise into huge gradient spikes instead of failing safely."""
+    # 1. Fold this batch's returns into the running mean/var, then optionally use the updated stats
+    #    to standardize returns - keeps the value loss's scale stable as training progresses.
     new_running_stats = update_running_stats(running_stats, returns)
-    normalized_returns = normalize_with_stats(new_running_stats, returns)
-    # 2. Advantages are normalized per-batch instead (no running stats needed for them).
-    normalized_advantages = normalize_advantages(advantages)
+    normalized_returns = normalize_with_stats(new_running_stats, returns) if ppo_config.normalize_returns else returns
+    # 2. Advantages are optionally normalized per-batch instead (no running stats needed for them).
+    normalized_advantages = normalize_advantages(advantages) if ppo_config.normalize_advantages else advantages
 
     # 3. Split out the trainable params from any frozen collection, so only
     #    params get differentiated and optimized below.

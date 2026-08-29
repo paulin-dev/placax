@@ -78,8 +78,18 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults (gamma=0.95, no GAE smoothing, no entropy bonus)."""
-    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
+    """PPOConfig matching MaskPlace's own PPO2.py defaults (gamma=0.95, no GAE smoothing, no entropy
+    bonus, and - crucially - no advantage/return normalization: its update() trains on the raw
+    (target_v - critic_net_output) advantage and raw target_v return, relying only on its fixed
+    reward/200 divisor for scale. With entropy_coef=0.0 and a small buffer, normalizing here instead
+    is actively dangerous: a low-variance batch drives advantages.std() near zero, and dividing by
+    std + eps amplifies ordinary floating-point-scale noise into huge gradient spikes - which is
+    exactly what was observed collapsing this run's policy to a saturated, deterministic one by
+    iteration ~18 (see training_log.jsonl: loss and real_hpwl both go flat from there on)."""
+    return PPOConfig(
+        gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss,
+        normalize_advantages=False, normalize_returns=False,
+    )
 
 
 def maskplace_optimizer(

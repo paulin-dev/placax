@@ -64,7 +64,7 @@ def parallel_train_step(
 
     # 3. One shared gradient update, averaged across all n_envs episodes' losses.
     new_variables, new_opt_state, new_running_stats, loss = apply_gradient_update(
-        variables, opt_state, running_stats, optimizer, loss_fn, advantages, returns
+        variables, opt_state, running_stats, optimizer, loss_fn, advantages, returns, ppo_config
     )
     return new_variables, new_opt_state, new_running_stats, loss, final_states
 
