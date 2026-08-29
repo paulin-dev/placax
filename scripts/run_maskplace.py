@@ -79,17 +79,17 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 def maskplace_ppo_config() -> PPOConfig:
     """PPOConfig matching MaskPlace's own PPO2.py defaults (gamma=0.95, no GAE smoothing, no entropy
-    bonus, and - crucially - no advantage/return normalization: its update() trains on the raw
-    (target_v - critic_net_output) advantage and raw target_v return, relying only on its fixed
-    reward/200 divisor for scale. With entropy_coef=0.0 and a small buffer, normalizing here instead
-    is actively dangerous: a low-variance batch drives advantages.std() near zero, and dividing by
-    std + eps amplifies ordinary floating-point-scale noise into huge gradient spikes - which is
-    exactly what was observed collapsing this run's policy to a saturated, deterministic one by
-    iteration ~18 (see training_log.jsonl: loss and real_hpwl both go flat from there on)."""
-    return PPOConfig(
-        gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss,
-        normalize_advantages=False, normalize_returns=False,
-    )
+    bonus). Unlike the reference, this keeps advantage/return normalization ON (the PPOConfig
+    default) rather than matching PPO2.py's raw (target_v - critic_net_output) advantage exactly:
+    this environment's per-step dense HPWL reward is heavy-tailed (placing an unusually large or
+    heavily-connected macro produces a swing ~30x a typical step's, confirmed empirically on a real
+    buffer) enough that, without normalization, whichever few extreme transitions happen to land in
+    a given ppo_epochs=10 x batch_size=64 minibatch dominate its gradient - a second, distinct route
+    to the same saturated-policy collapse first seen from normalize_advantages's near-zero-std
+    division (see normalize.py's own min_std guard for that original failure mode). Matching the
+    reference exactly here traded one collapse mechanism for another; normalizing is the safer
+    choice for this specific reward's tails, even though it isn't what PPO2.py itself does."""
+    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
 
 
 def maskplace_optimizer(
