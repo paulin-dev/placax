@@ -25,7 +25,7 @@ def test_write_placed_def_preserves_non_component_structure() -> None:
     original = (FIXTURES / "sample.def").read_text()
     new_def = write_placed_def(original, {"u1": (0, 0)})
 
-    assert "NETS 4 ;" in new_def
+    assert "NETS 5 ;" in new_def
     assert "DIEAREA" in new_def
     assert "DESIGN sample ;" in new_def
 

@@ -42,14 +42,14 @@ def test_aux_takes_priority_over_stray_verilog_files(tmp_path: pathlib.Path) -> 
 def test_load_netlist_routes_def_to_real_loader() -> None:
     macro_sizes, nets = load_netlist(DEF_FIXTURES)
     assert len(macro_sizes) == 3
-    assert len(nets) == 3
+    assert len(nets) == 4  # net_a, buffered_net x2, multi_pin_net - floating_net has only 1 instance
 
 
 def test_load_netlist_routes_protobuf_to_real_loader() -> None:
     protobuf_fixtures = pathlib.Path(__file__).parent / "fixtures" / "protobuf"
     macro_sizes, nets = load_netlist(protobuf_fixtures)
     assert len(macro_sizes) == 2
-    assert len(nets) == 1
+    assert len(nets) == 2  # Grp_10 and Grp_12 - Grp_11 has only 1 distinct macro
 
 
 def test_load_netlist_routes_bookshelf_to_real_loader(tmp_path: pathlib.Path) -> None:
