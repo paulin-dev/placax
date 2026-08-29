@@ -8,6 +8,7 @@ requires `placax[resnet]` (only the backbone-building/loading helpers do).
 Needs obs to carry "canvas", "wiremask", "lookahead_wiremasks" (horizon>=2),
 and "lookahead_sizes" (horizon>=2) - pair with
 policy.observation.make_wiremask_observation(..., lookahead=2)."""
+import math
 import pathlib
 
 from placax.extras.masks import lookahead_illegal_masks
@@ -88,19 +89,49 @@ class _FineBranch(nn.Module):
 
 
 class _CoarseBranch(nn.Module):
-    """Projects backbone features down to 1 channel, then resizes them onto the action grid."""
+    """Reproduces MaskPlace's own MyCNNCoarse - confirmed against a real torchvision.models.resnet18
+    forward pass (not just reading the code): it globally average-pools the backbone's spatial
+    features down to a single vector via the resnet's own avgpool+flatten (its `self.cnn.fc` is
+    Linear(512, 16*7*7), so `self.cnn(x)` still runs the WHOLE resnet including avgpool before
+    that fc - the 7x7 the deconv chain starts from is a fresh tensor decoded from that one
+    pooled vector, not the resnet's own spatial layer4 feature map). This throws away all of the
+    backbone's own spatial resolution on purpose (the reference's design, not an oversight the
+    fix should route around) and instead LEARNS to reconstruct a small spatial seed from that
+    global summary, then upsamples it back to the action grid via a stack of learned transposed
+    convolutions - not a fixed, non-trainable resize.
+
+    MaskPlace's own deconv chain is exactly 5 stages (16->8->4->2->1->1 channels) because its
+    grid is always 224 = seed * 2**5; this generalizes that same seed-and-decode idea to any
+    grid size the caller asks for, ending with an exact resize (only ever a same-or-larger,
+    integer-doubling step away from the target, unlike the old approach's arbitrary jump straight
+    from backbone resolution to grid resolution) so a non-power-of-two grid still comes out at
+    exactly (grid_x, grid_y)."""
 
     grid_x: int
     grid_y: int
-    features: int = 16
+    seed: int = 7
+    seed_features: int = 16
+    channel_schedule: tuple[int, ...] = (8, 4, 2, 1, 1)  # MaskPlace's own, past which the last count repeats
 
     @nn.compact
     def __call__(self, backbone_features: jax.Array) -> jax.Array:
-        # 1x1 conv to squeeze the backbone's many channels down to `features`.
-        x = nn.Conv(features=self.features, kernel_size=(1, 1))(backbone_features)
-        # Backbone feature maps are lower-resolution than the action grid; resize up to match
-        # (bilinear so it works for any grid/backbone resolution, unlike a fixed deconv chain).
-        return jax.image.resize(x, (self.grid_x, self.grid_y, self.features), method="bilinear")
+        # 1. Global-average-pool the backbone's spatial feature map into one vector - the same
+        #    information bottleneck the reference's avgpool+flatten enforces.
+        pooled = backbone_features.mean(axis=(0, 1))
+        # 2. Learn a small spatial seed from that pooled vector (the reference's fc(512 -> 16*7*7)).
+        seed_flat = nn.Dense(features=self.seed_features * self.seed * self.seed)(pooled)
+        x = seed_flat.reshape(self.seed, self.seed, self.seed_features)
+        # 3. Learned transposed-conv upsampling, doubling spatial size each stage - as many
+        #    stages as it takes to reach or pass the larger grid dimension from the seed.
+        n_doublings = max(1, math.ceil(math.log2(max(self.grid_x, self.grid_y) / self.seed)))
+        for i in range(n_doublings):
+            out_features = self.channel_schedule[min(i, len(self.channel_schedule) - 1)]
+            x = nn.ConvTranspose(features=out_features, kernel_size=(3, 3), strides=(2, 2), padding="SAME")(x)
+            if i < n_doublings - 1:
+                x = nn.relu(x)
+        # 4. The doubling stages only land exactly on (grid_x, grid_y) when both are seed * 2**n
+        #    (e.g. MaskPlace's own 224 = 7*2**5) - resize to the exact target so any grid size works.
+        return jax.image.resize(x, (self.grid_x, self.grid_y, x.shape[-1]), method="bilinear")
 
 
 class ResNetCoarseFineActorCritic(nn.Module):
@@ -116,7 +147,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
     resnet_feature_key: str = "block4_1"
     fine_features: int = 8
     fine_layers: int = 2
-    coarse_features: int = 16
+    coarse_seed_features: int = 16  # channel count of _CoarseBranch's learned (seed, seed) starting tensor
     critic_style: str = "canvas"  # "canvas" (default) or "step_embedding" (MaskPlace's own)
     max_episode_macros: int = 2048  # only used if critic_style == "step_embedding"
 
@@ -149,9 +180,9 @@ class ResNetCoarseFineActorCritic(nn.Module):
         # collection path (never differentiated) is unaffected either way.
         backbone_out = nn.remat(_run_backbone)(self.resnet_backbone, coarse_input)
         backbone_features = backbone_out[self.resnet_feature_key][0]  # drop the batch dim again
-        # Project the backbone's feature map down to the action grid's resolution.
+        # Pool the backbone's feature map, decode a small seed, upsample to the action grid.
         return _CoarseBranch(
-            grid_x=self.params.grid_x, grid_y=self.params.effective_grid_y, features=self.coarse_features
+            grid_x=self.params.grid_x, grid_y=self.params.effective_grid_y, seed_features=self.coarse_seed_features
         )(backbone_features)
 
     def _critic_value(self, obs: dict, fine_logits: jax.Array, coarse_features: jax.Array) -> jax.Array:
