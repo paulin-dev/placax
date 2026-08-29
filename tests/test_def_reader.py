@@ -38,9 +38,21 @@ def test_parse_nets_keeps_duplicate_names_as_separate_nets() -> None:
     # 261 when nets were keyed by name in a dict. Must stay two nets.
     def_text = (FIXTURES / "sample.def").read_text()
     nets = parse_nets(def_text)
-    assert len(nets) == 3  # net_a, buffered_net x2 - floating_net has only 1 instance
+    # net_a, buffered_net x2, multi_pin_net - floating_net has only 1 instance
+    assert len(nets) == 4
     net_instance_sets = [{inst for inst, _port in net} for net in nets]
     assert {"u1", "u2"} in net_instance_sets
+
+
+def test_parse_nets_dedupes_multiple_pins_on_one_instance() -> None:
+    # "multi_pin_net" (the fixture's last NETS entry) connects u1 twice (ports
+    # I1 and I2) and u2 once - only the first port seen for u1 (I1) should
+    # survive, matching load_bookshelf's parse_nets convention: one macro-net
+    # connection contributes one point, not one per physical pin.
+    def_text = (FIXTURES / "sample.def").read_text()
+    nets = parse_nets(def_text)
+    multi_pin_net = nets[-1]  # net_a, buffered_net x2, then multi_pin_net, in file order
+    assert sorted(multi_pin_net) == [("u1", "I1"), ("u2", "I1")]
 
 
 def test_parse_nets_drops_single_instance_nets() -> None:
@@ -69,7 +81,7 @@ def test_resolve_net_pin_offsets_uses_real_lef_geometry() -> None:
 def test_load_def_resolves_to_same_shape_as_bookshelf() -> None:
     macro_sizes, nets = load_def(FIXTURES / "sample.def", [FIXTURES / "sample.lef"])
     assert len(macro_sizes) == 3
-    assert len(nets) == 3
+    assert len(nets) == 4
     # instance name maps straight to size now, matching load_bookshelf exactly -
     # no separate cell_sizes-by-type lookup needed by callers
     assert macro_sizes["u1"] == (0.38, 1.4)

@@ -57,7 +57,12 @@ def parse_macro_pins(pb_text: str) -> list[NetPin]:
 
 
 def parse_nets(pb_text: str) -> Nets:
-    """Returns a list of pins per net, built from any node's `input:` references, kept if >= 2 macros."""
+    """Returns a list of pins per net, built from any node's `input:` references, kept if >= 2 macros.
+
+    A macro can have more than one MACRO_PIN node wired into the same net (multiple physical pins
+    on the same wire) - only the FIRST offset seen for a given (net, macro) pair is kept, same
+    convention as load_bookshelf's parse_nets (see its docstring): one macro-net connection
+    contributes one bounding-box point, not one per physical pin."""
     pin_lookup = {name: (macro, x, y) for macro, x, y, name in _macro_pin_entries(pb_text)}
 
     nets = []
@@ -69,9 +74,15 @@ def parse_nets(pb_text: str) -> Nets:
         if hub_name_match:
             referenced = referenced + [hub_name_match.group(1)]
 
-        pins = [pin_lookup[n] for n in referenced if n in pin_lookup]
-        if len({macro for macro, _x, _y in pins}) >= 2:
-            nets.append(pins)
+        seen: dict[str, tuple[float, float]] = {}
+        for n in referenced:
+            if n not in pin_lookup:
+                continue
+            macro, x, y = pin_lookup[n]
+            if macro not in seen:
+                seen[macro] = (x, y)
+        if len(seen) >= 2:
+            nets.append([(macro, x, y) for macro, (x, y) in seen.items()])
     return nets
 
 

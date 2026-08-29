@@ -167,3 +167,15 @@ node {
     }
   }
 }
+node {
+  name: "Grp_12/Poutput_multi_8"
+  input: "macroA/ADR[0]"
+  input: "macroA/ADR[1]"
+  input: "macroB/ADR[0]"
+  attr {
+    key: "type"
+    value {
+      placeholder: "Grp"
+    }
+  }
+}

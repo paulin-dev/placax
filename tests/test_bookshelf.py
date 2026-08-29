@@ -32,16 +32,20 @@ def test_parse_nets_drops_net_whose_pins_collapse_to_one_macro() -> None:
     assert all(len({name for name, _x, _y in net}) >= 2 for net in nets)
 
 
-def test_parse_nets_keeps_every_pin_not_deduped_by_macro() -> None:
-    # n2 has 2 distinct macros (m2, m3) but m3 appears twice with different
-    # offsets (0.0,0.0) and (1.0,1.0) - both are real, separate connection
-    # points and must both survive, not collapse to one m3 entry.
+def test_parse_nets_dedupes_multiple_pins_on_one_macro() -> None:
+    # n2 has 2 distinct macros (m2, m3) but m3 appears twice, at offsets
+    # (0.0,0.0) and (1.0,1.0) - only the FIRST offset survives, matching
+    # MaskPlace's own reference loader (place_db.py's read_net_file) and
+    # DREAMPlace's Bookshelf parser, both of which keep one pin per
+    # (net, macro) pair. Keeping every duplicate instead inflates that net's
+    # bounding box and any degree-based ordering built from it - confirmed
+    # against real adaptec1 data, where ~20% of nets have a macro like this.
     macros = parse_nodes(FIXTURES / "sample.nodes")
     nets = parse_nets(FIXTURES / "sample.nets", set(macros))
     n2 = next(net for net in nets if {name for name, _x, _y in net} == {"m2", "m3"})
-    assert len(n2) == 3
+    assert len(n2) == 2
     m3_pins = [(x, y) for name, x, y in n2 if name == "m3"]
-    assert sorted(m3_pins) == [(0.0, 0.0), (1.0, 1.0)]
+    assert m3_pins == [(0.0, 0.0)]
 
 
 @pytest.mark.skipif(not REAL_ADAPTEC1.exists(), reason="real adaptec1 benchmark not available")
@@ -53,18 +57,16 @@ def test_load_bookshelf_matches_independent_placedb_reference() -> None:
     assert len(macros) == 543
     assert len(nets) == 693
 
-    # distinct-macro degree (what "degree" meant before offsets) still
-    # matches the original cross-check exactly
+    # distinct-macro degree matches the original cross-check exactly
     macro_degrees = [len({name for name, _x, _y in net}) for net in nets]
     assert min(macro_degrees) == 2
     assert max(macro_degrees) == 349
 
-    # pin count (raw, not deduped) can be larger - the highest-degree net
-    # has 349 distinct macros but 1313 individual pins, since some macros
-    # have multiple pins on the same high-fanout net and every pin is now
-    # kept, not collapsed
+    # pin count now equals macro degree everywhere - deduping to one pin per
+    # (net, macro) pair means a net can never have more pins than distinct
+    # macros, matching the reference parser exactly.
     pin_counts = [len(net) for net in nets]
-    assert max(pin_counts) == 1313
+    assert pin_counts == macro_degrees
 
     # real offset, not a placeholder - matches the o211430 example used
     # throughout the conversation exactly

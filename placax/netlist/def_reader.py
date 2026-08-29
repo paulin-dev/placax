@@ -20,7 +20,12 @@ def parse_components(def_text: str) -> dict[str, tuple[str, float, float]]:
 
 
 def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
-    """Returns [(instance_name, port_name)] per net, as a list since net names can legitimately repeat."""
+    """Returns [(instance_name, port_name)] per net, as a list since net names can legitimately repeat.
+
+    An instance can appear more than once in one net (multiple physical pins on the same wire) -
+    only the FIRST port seen for a given (net, instance) pair is kept, same convention as
+    load_bookshelf's parse_nets (see its docstring): one macro-net connection contributes one
+    bounding-box point, not one per physical pin."""
     section = def_text[def_text.index("\nNETS") : def_text.index("\nEND NETS")]
 
     nets = []
@@ -28,11 +33,15 @@ def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
         match = _NET_LINE_RE.search(line)
         if not match:
             continue
-        # Drop the special top-level "PIN" pseudo-instance and keep only nets
-        # that actually connect two or more distinct instances.
-        pins = [(inst, port) for inst, port in _NET_PIN_RE.findall(match.group(2)) if inst != "PIN"]
-        if len({inst for inst, _port in pins}) >= 2:
-            nets.append(pins)
+        # Drop the special top-level "PIN" pseudo-instance and dedupe by instance, keeping
+        # only the first port seen for each.
+        seen: dict[str, str] = {}
+        for inst, port in _NET_PIN_RE.findall(match.group(2)):
+            if inst != "PIN" and inst not in seen:
+                seen[inst] = port
+        # Keep only nets that actually connect two or more distinct instances.
+        if len(seen) >= 2:
+            nets.append(list(seen.items()))
     return nets
 
 
