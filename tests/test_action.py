@@ -85,16 +85,22 @@ def test_legal_action_logits_extra_illegal_defaults_to_no_effect() -> None:
 
 def test_make_wiremask_quality_illegal_flags_cells_above_the_margin() -> None:
     wiremask = jnp.array([[0.0, 5.0], [2.0, 10.0]])
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.3)
-    illegal = extra_illegal_fn({"wiremask": wiremask})
+    obs = {"wiremask": wiremask, "canvas": jnp.zeros((2, 2), dtype=bool), "current_macro_size": jnp.array([1.0, 1.0])}
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.3, cell_size=1.0)
+    illegal = extra_illegal_fn(obs)
     # Matches MaskPlace's own PPO2.py/place_env.py: normalized by its own max (10.0) to
     # [[0, 0.5], [0.2, 1.0]] before the margin cutoff, min 0.0 + margin 0.3 -> cutoff 0.3.
     assert illegal.tolist() == [[False, True], [False, True]]
 
 
 def test_make_wiremask_quality_illegal_uses_a_custom_key() -> None:
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5, wiremask_key="score")
-    illegal = extra_illegal_fn({"score": jnp.array([[0.0, 1.0]])})
+    obs = {
+        "score": jnp.array([[0.0, 1.0]]),
+        "canvas": jnp.zeros((1, 2), dtype=bool),
+        "current_macro_size": jnp.array([1.0, 1.0]),
+    }
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5, cell_size=1.0, wiremask_key="score")
+    illegal = extra_illegal_fn(obs)
     assert illegal.tolist() == [[False, True]]
 
 
@@ -102,12 +108,42 @@ def test_make_wiremask_quality_illegal_composes_with_legal_action_logits() -> No
     params = EnvParams(grid=2, n_macros=1)
     occupied = jnp.zeros((2, 2), dtype=bool)
     logits = jnp.zeros((2, 2))
-    obs = {"wiremask": jnp.array([[0.0, 5.0], [0.0, 0.0]])}
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5)
+    obs = {
+        "wiremask": jnp.array([[0.0, 5.0], [0.0, 0.0]]),
+        "canvas": occupied,
+        "current_macro_size": jnp.array([1.0, 1.0]),
+    }
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.5, cell_size=1.0)
 
     masked = legal_action_logits(logits, occupied, params, (1, 1), extra_illegal_fn(obs))
     assert masked[0, 1] == -jnp.inf  # illegal via the wiremask cutoff, not occupancy/boundary
     assert masked[0, 0] == 0.0
+
+
+def test_make_wiremask_quality_illegal_excludes_occupied_cells_from_the_minimum() -> None:
+    # Regression test for a confirmed discrepancy against MaskPlace's reference (PPO2.py's
+    # Actor.forward): the wiremask's cheapest cell (0.0) sits exactly on an already-occupied
+    # macro, cell (1, 1). The reference never lets an occupied cell win the minimum used to set
+    # the quality threshold (it adds a large constant to occupied cells before taking `.min()`);
+    # without that exclusion, the threshold comes out lower than it should and wrongly excludes
+    # cells the reference would still accept.
+    wiremask = jnp.array(
+        [[5.0, 4.0, 3.0, 4.0, 5.0],
+         [4.0, 0.0, 1.0, 2.0, 3.0],  # (1, 1) is occupied but has the lowest raw value, 0.0
+         [5.0, 4.0, 3.0, 4.0, 5.0]]
+    )
+    canvas = jnp.zeros((3, 5), dtype=bool).at[1, 1].set(True)  # occupied at (1, 1) only
+    obs = {"wiremask": wiremask, "canvas": canvas, "current_macro_size": jnp.array([1.0, 1.0])}
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=0.3, cell_size=1.0)
+
+    illegal = extra_illegal_fn(obs)
+    # scale = wiremask.max() = 5.0; the minimum used for the threshold must come from the
+    # cheapest LEGAL cell, (1, 2) at normalized 0.2, not the occupied cell's 0.0 - giving
+    # threshold = 0.2 + 0.3 = 0.5. Without the fix, the threshold would be 0.0 + 0.3 = 0.3
+    # instead, wrongly flagging (1, 3) (normalized 0.4) as illegal even though 0.4 <= 0.5.
+    assert illegal[1, 3].item() is False  # normalized 0.4: legal under the correct 0.5 threshold
+    assert illegal[0, 0].item() is True  # normalized 1.0: illegal under either threshold
+    assert illegal[1, 1].item() is False  # occupied cell itself: a separate occupancy check handles it
 
 
 def test_sample_action_only_picks_legal_cells() -> None:

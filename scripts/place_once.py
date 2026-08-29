@@ -53,7 +53,7 @@ def main() -> None:
     Log.info(f"loading {benchmark_dir} (macro_budget={macro_budget}) ...")
     benchmark = _load_benchmark(benchmark_dir, macro_budget)
     state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
     policy = _build_policy(benchmark)
 
     # 2. Build a template pytree (weights + optimizer + running-stats shapes) matching what

@@ -337,7 +337,7 @@ def main() -> None:
 
     # 4. Build the observation function, illegal-action mask, and policy network.
     state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
     policy = _build_policy(benchmark)
 
     # 5. Initialize the policy's parameters using one dummy observation, so

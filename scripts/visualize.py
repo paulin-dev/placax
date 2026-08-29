@@ -63,7 +63,7 @@ def _maskplace_setup(benchmark_dir: pathlib.Path, macro_budget: int | None):
     benchmark = _load_benchmark(benchmark_dir, macro_budget)
     policy = _build_policy(benchmark)
     state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN)
+    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
     optimizer = maskplace_optimizer(value_coef=maskplace_ppo_config().value_coef)
     return benchmark, policy, state_fn, extra_illegal_fn, optimizer
 
