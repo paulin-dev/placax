@@ -128,12 +128,20 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
              "checkpoint.bin already holds a previous run's state - that state is overwritten "
              "going forward, not loaded from.",
     )
+    parser.add_argument(
+        "--patience", type=int, default=0,
+        help="Stop early once real_hpwl (see --eval_every) hasn't beaten its best value for this "
+             "many consecutive evals (default: 0, disabled - always run the full --n_iterations). "
+             "MaskPlace's own stopping rule is a fixed reward threshold tuned to its own reward "
+             "scaling/macro budget, which doesn't generalize across benchmarks/configs, so this "
+             "uses best-real_hpwl patience instead.",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
         args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
-        args.init_from,
+        args.init_from, args.patience,
     )
 
 
@@ -210,9 +218,9 @@ def _train_and_eval_loop(
     extra_illegal_fn, checkpoint_path: pathlib.Path | None, n_iterations: int, n_episodes: int,
     log_every: int, eval_every: int, log_path: pathlib.Path | None,
     placement_images_dir: pathlib.Path | None = None, best_checkpoint_path: pathlib.Path | None = None,
-    resume: bool = True,
+    resume: bool = True, patience: int = 0,
 ):
-    """Runs n_iterations more PPO update cycles, resuming from checkpoint_path unless resume=False, with periodic eval/logging/checkpointing."""
+    """Runs n_iterations more PPO update cycles, resuming from checkpoint_path unless resume=False, with periodic eval/logging/checkpointing. Stops early if patience>0 and real_hpwl hasn't beaten its best in that many consecutive evals."""
     # Resume from checkpoint_path if it exists and resume=True (read once here, not per iteration).
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path if resume else None
@@ -224,6 +232,9 @@ def _train_and_eval_loop(
     best_real_hpwl = _read_best_real_hpwl(variables, best_checkpoint_path)
     if best_real_hpwl < float("inf"):
         Log.info(f"  best real_hpwl so far: {best_real_hpwl:.1f} -> {best_checkpoint_path}")
+    # Resets each run: a resumed best_checkpoint doesn't carry over how many evals-without-
+    # improvement preceded it, so patience is counted only against evals in this invocation.
+    evals_without_improvement = 0
 
     log = []
     for i in range(n_iterations):
@@ -250,10 +261,14 @@ def _train_and_eval_loop(
                 _save_placement_image(
                     placement_images_dir, current_iteration, eval_positions, grid_sizes, benchmark.params
                 )
-            if best_checkpoint_path is not None and real_hpwl < best_real_hpwl:
+            if real_hpwl < best_real_hpwl:
                 best_real_hpwl = real_hpwl
-                _save_best_checkpoint(best_checkpoint_path, variables, best_real_hpwl)
-                Log.info(f"  new best real_hpwl={best_real_hpwl:.1f} at iteration {current_iteration} -> {best_checkpoint_path}")
+                evals_without_improvement = 0
+                if best_checkpoint_path is not None:
+                    _save_best_checkpoint(best_checkpoint_path, variables, best_real_hpwl)
+                    Log.info(f"  new best real_hpwl={best_real_hpwl:.1f} at iteration {current_iteration} -> {best_checkpoint_path}")
+            else:
+                evals_without_improvement += 1
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
         if current_iteration % log_every == 0:
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
@@ -261,6 +276,14 @@ def _train_and_eval_loop(
 
         # 3. Checkpoint every iteration so a crash never loses more than one iteration of progress.
         checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
+
+        # 4. Early stop once real_hpwl has stalled for `patience` consecutive evals.
+        if patience > 0 and evals_without_improvement >= patience:
+            Log.info(
+                f"  stopping early at iteration {current_iteration}: real_hpwl hasn't beaten "
+                f"{best_real_hpwl:.1f} in {evals_without_improvement} evals (--patience={patience})"
+            )
+            break
 
     return variables
 
@@ -272,7 +295,7 @@ def main() -> None:
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
     (
         benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
-        want_placement_images, placement_images_dir_arg, init_from,
+        want_placement_images, placement_images_dir_arg, init_from, patience,
     ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -354,7 +377,7 @@ def main() -> None:
         checkpoint_path, n_iterations, n_episodes=n_episodes,
         log_every=log_every, eval_every=eval_every, log_path=log_path,
         placement_images_dir=placement_images_dir, best_checkpoint_path=best_checkpoint_path,
-        resume=resume,
+        resume=resume, patience=patience,
     )
 
     if checkpoint_path is not None:
