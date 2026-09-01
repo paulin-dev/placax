@@ -8,6 +8,21 @@ from placax.types import NetPin, Nets, PinOffsets, SizeMap
 _COMPONENT_RE = re.compile(r"-\s+(\S+)\s+(\S+)\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")
 _NET_LINE_RE = re.compile(r"-\s+(\S+)\s+(.*)\+\s+USE\s+SIGNAL\s*;")
 _NET_PIN_RE = re.compile(r"\(\s*(\S+)\s+(\S+)\s*\)")
+_UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)")
+_DIEAREA_RE = re.compile(
+    r"DIEAREA\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)\s*\(\s*(-?\d+)\s+(-?\d+)\s*\)"
+)
+
+
+def parse_die_size(def_text: str) -> float | None:
+    """The real (square) die side length from DEF's own DIEAREA statement, converted from database units to microns (matching LEF's macro sizes) via UNITS DISTANCE MICRONS. None if DIEAREA is absent."""
+    diearea_match = _DIEAREA_RE.search(def_text)
+    if not diearea_match:
+        return None
+    units_match = _UNITS_RE.search(def_text)
+    db_units_per_micron = float(units_match.group(1)) if units_match else 1.0
+    x1, y1, x2, y2 = (float(v) for v in diearea_match.groups())
+    return max(x2 - x1, y2 - y1) / db_units_per_micron
 
 
 def parse_components(def_text: str) -> dict[str, tuple[str, float, float]]:

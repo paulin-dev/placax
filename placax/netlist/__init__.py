@@ -2,8 +2,8 @@
 import enum
 import pathlib
 
-from placax.netlist.bookshelf import load_bookshelf
-from placax.netlist.def_reader import load_def
+from placax.netlist.bookshelf import load_bookshelf, parse_pl_die_size
+from placax.netlist.def_reader import load_def, parse_die_size as parse_def_die_size
 from placax.netlist.protobuf_reader import load_protobuf
 from placax.types import Nets, SizeMap
 
@@ -59,3 +59,20 @@ def load_netlist(
                 f"no recognizable netlist format (.aux, .def, .pb.txt, .v, .sv) "
                 f"found in {benchmark_dir}"
             )
+
+
+def load_die_size(benchmark_dir: pathlib.Path, macro_sizes: SizeMap) -> float | None:
+    """The real (square) die side length for benchmark_dir, from whichever source format carries physical
+    dimensions: Bookshelf's .pl file (MaskPlace's own die-sizing source) or DEF's own DIEAREA statement.
+    None for protobuf (upstream itself has no general derivation there - see parse_macros's docstring
+    discussion) or a Bookshelf dir missing its .pl file, so callers can fall back to an area-based
+    heuristic instead of inventing a physically-meaningless canvas size."""
+    match detect_format(benchmark_dir):
+        case NetlistFormat.BOOKSHELF:
+            aux_path = next(benchmark_dir.glob("*.aux"))
+            return parse_pl_die_size(benchmark_dir / f"{aux_path.stem}.pl", macro_sizes)
+        case NetlistFormat.DEF:
+            def_path = next(benchmark_dir.glob("*.def"))
+            return parse_def_die_size(def_path.read_text())
+        case _:
+            return None

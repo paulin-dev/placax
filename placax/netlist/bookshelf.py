@@ -7,6 +7,7 @@ from placax.types import Nets, SizeMap
 _NODE_RE = re.compile(r"^\s*(\S+)\s+(\d+)\s+(\d+)\s*(terminal)?\s*$")
 _NET_HEADER_RE = re.compile(r"NetDegree\s*:\s*(\d+)")
 _NET_PIN_RE = re.compile(r"^\s*(\S+)\s+[IO]\s*:\s*(-?[\d.]+)\s+(-?[\d.]+)")
+_PL_RE = re.compile(r"^\s*(\S+)\s+(-?\d+)\s+(-?\d+)")
 
 
 def parse_nodes(nodes_path: pathlib.Path) -> SizeMap:
@@ -45,6 +46,26 @@ def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
 
     _flush()  # the last net in the file has no following header to trigger its flush
     return nets
+
+
+def parse_pl_die_size(pl_path: pathlib.Path, macro_sizes: SizeMap) -> float | None:
+    """The real (square) die side length implied by every macro's ORIGINAL position in the .pl file, matching MaskPlace's own read_pl_file: max over all macros of (x + width) and (y + height). None if the file is missing or none of macro_sizes appears in it."""
+    if not pl_path.exists():
+        return None
+    max_extent = 0.0
+    found = False
+    for line in pl_path.read_text().splitlines():
+        match = _PL_RE.match(line)
+        if not match:
+            continue
+        name, x_str, y_str = match.groups()
+        if name not in macro_sizes:
+            continue
+        found = True
+        width, height = macro_sizes[name]
+        x, y = int(x_str), int(y_str)
+        max_extent = max(max_extent, x + width, y + height)
+    return max_extent if found else None
 
 
 def load_bookshelf(benchmark_dir: pathlib.Path, name: str) -> tuple[SizeMap, Nets]:
