@@ -34,7 +34,7 @@ pip install placax
 ## Training (MaskPlace pipeline)
 
 ```sh
-python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --eval_every=5 --placement_images
+python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --eval_every=5 --placement_images --patience=10
 ```
 
 - `--benchmark_dir`: path to a downloaded benchmark (see `scripts/download_benchmarks.py`); default `benchmarks/adaptec1`.
@@ -45,6 +45,7 @@ python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iteratio
 - `--eval_every`: compute real HPWL (a full extra greedy rollout, so not cheap) every this many iterations; default `10`.
 - `--placement_images`: also write a placement snapshot PNG (`<benchmark_dir>/output_maskplace/placements/<iteration>.png` by default) - reuses the eval rollout that `--eval_every` already schedules, so it's free of extra rollouts; how many of those eval iterations actually get an image kept follows `--log_every`, not `--eval_every` (see `--placement_images_dir` to change where they're written).
 - `--no_checkpoint`: don't read or write checkpoint.bin - a quick, disposable run that won't resume from or leave behind any state.
+- `--patience`: stop early once real HPWL (per `--eval_every`) hasn't beaten its best value for this many consecutive evals; default `0` (disabled, always run the full `--n_iterations`).
 
 Every iteration is appended to `<benchmark_dir>/output_maskplace/training_log.jsonl` regardless of `--log_every`, so the full history survives even if the console only shows a fraction of it.
 

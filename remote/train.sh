@@ -27,7 +27,7 @@ echo "-> n_episodes=${N_EPISODES}"
 
 echo "== training (re-run this script to resume from checkpoint) =="
 python -m scripts.run_maskplace --benchmark_dir="$BENCHMARK_DIR" --macro_budget="$MACRO_BUDGET" \
-    --n_episodes="$N_EPISODES" --n_iterations="$N_ITERATIONS"
+    --n_episodes="$N_EPISODES" --n_iterations="$N_ITERATIONS" --patience=10
 
 echo "== visualizing =="
 python -m scripts.visualize --benchmark_dir="$BENCHMARK_DIR" --macro_budget="$MACRO_BUDGET" --preset=maskplace
