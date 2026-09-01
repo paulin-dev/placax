@@ -34,7 +34,7 @@ pip install placax
 ## Training (MaskPlace pipeline)
 
 ```sh
-python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --placement_images
+python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --eval_every=5 --placement_images
 ```
 
 - `--benchmark_dir`: path to a downloaded benchmark (see `scripts/download_benchmarks.py`); default `benchmarks/adaptec1`.
