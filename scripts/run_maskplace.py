@@ -40,6 +40,7 @@ from placax.log import Log
 from placax.netlist.order import connectivity_order
 from placax.netlist.padding import build_macro_net_index
 from placax_agents.benchmark import Benchmark
+from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
 from placax_agents.ops.resumable_train import _append_log_entry, _evaluate, _save_placement_image
 from placax_agents.policy.action import make_wiremask_quality_illegal
 from placax_agents.policy.architectures.resnet_cnn import (
@@ -51,11 +52,9 @@ from placax_agents.policy.observation import make_wiremask_observation
 from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.loss import huber_value_loss
-from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
-from placax_agents.training.algorithm.running_stats import init_running_stats
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
 from placax_agents.training.loops.buffered_train import buffered_train_step
-from placax_agents.training.loops.common import train_state_bundle
+from placax_agents.training.loops.common import checkpoint_every_n, open_train_state
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
 import jax.numpy as jnp
@@ -119,10 +118,10 @@ def maskplace_optimizer(
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None]:
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None]:
     """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every,
-    no_checkpoint, placement_images, placement_images_dir) from named --flag=value CLI args;
-    macro_budget is None if --macro_budget=all was given; n_episodes_arg is an int-as-string
+    no_checkpoint, placement_images, placement_images_dir, init_from) from named --flag=value CLI
+    args; macro_budget is None if --macro_budget=all was given; n_episodes_arg is an int-as-string
     (auto-detection is a separate step - see scripts/subprocess_search.py and this module's own
     docstring for why it isn't a flag of this script)."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
@@ -132,7 +131,10 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
     )
     parser.add_argument(
         "--n_iterations", type=int, default=100,
-        help="Number of buffered-PPO update cycles to run (default: 100).",
+        help="Number of buffered-PPO update cycles to run (default: 100) - additional cycles on "
+             "top of wherever a resumed checkpoint left off, e.g. --n_iterations=300 resumed from "
+             "iteration 100 trains 200 more, reaching iteration 400 total (shown correctly in the "
+             "progress line's iter N/400, not the misleading iter N/300 an earlier version showed).",
     )
     parser.add_argument(
         "--macro_budget", type=str, default=str(MASKPLACE_MACRO_BUDGET),
@@ -173,11 +175,22 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
         help="Where to write placement snapshots (implies --placement_images; default: "
              "<output_dir>/placements).",
     )
+    parser.add_argument(
+        "--init_from", type=pathlib.Path, default=None,
+        help="Warm-start the policy's initial weights from a bare-variables checkpoint - most "
+             "naturally <output_dir>/best_checkpoint.bin from a previous run (see "
+             "_save_best_checkpoint's own docstring) - instead of the network's own random init. "
+             "Takes priority over any existing checkpoint.bin: training starts fresh from these "
+             "weights at iteration 0 with a freshly-initialized optimizer/RNG key, even if "
+             "checkpoint.bin already holds a previous run's state - that state is overwritten "
+             "going forward, not loaded from.",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
         args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
+        args.init_from,
     )
 
 
@@ -244,62 +257,74 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
     )
 
 
-def _open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | None):
-    """Like training.loops.common.open_train_state, but the saved bundle also carries
-    best_real_hpwl - the real_hpwl of whatever's currently in checkpoint_path. It's read straight
-    back here instead of being rediscovered with a fresh _evaluate() rollout on resume: this same
-    process already knew the number at the moment it chose to save (see _save_train_state below),
-    so re-running eval to relearn it would be a second rollout for information we already had."""
-    template = {
-        **train_state_bundle(variables, optimizer.init(variables["params"]), init_running_stats(), key, 0),
-        "best_real_hpwl": jnp.array(float("inf")),
-    }
-    state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
-    return (
-        state["variables"], state["opt_state"], state["running_stats"], state["key"],
-        int(state["iteration"]), float(state["best_real_hpwl"]),
-    )
+def _read_best_real_hpwl(variables_template, best_checkpoint_path: pathlib.Path | None) -> float:
+    """The real_hpwl bundled alongside best_checkpoint_path's weights, or +inf if it doesn't exist
+    yet - read directly rather than recomputed, since whichever process wrote the file already
+    knew this number at the moment it chose to save (see _save_best_checkpoint). variables_template
+    just needs to be *some* variables pytree of the right shape (e.g. the freshly-init'd or
+    currently-training one) - deserialization needs it to restore best_checkpoint_path's own
+    "variables" entry, even though this function throws that part away and returns only the number."""
+    if best_checkpoint_path is None or not best_checkpoint_path.exists():
+        return float("inf")
+    template = {"variables": variables_template, "real_hpwl": jnp.array(0.0)}
+    return float(load_checkpoint(template, best_checkpoint_path)["real_hpwl"])
 
 
-def _save_train_state(checkpoint_path: pathlib.Path, variables, opt_state, running_stats, key, iteration: int, best_real_hpwl: float) -> None:
-    """Counterpart to _open_train_state: bundles best_real_hpwl in alongside the usual resumable state."""
-    save_checkpoint(
-        {**train_state_bundle(variables, opt_state, running_stats, key, iteration), "best_real_hpwl": jnp.array(best_real_hpwl)},
-        checkpoint_path,
-    )
+def _save_best_checkpoint(best_checkpoint_path: pathlib.Path, variables, real_hpwl: float) -> None:
+    """Bare policy weights + the real_hpwl that earned them - deliberately NOT the full resumable
+    state checkpoint_path carries (no optimizer state, no RNG key, no iteration count). That's the
+    point: this file is for recovering/deploying the best placement policy found (via --init_from,
+    or loading it directly for eval), not for continuing training deterministically from it - the
+    RNG key living in checkpoint_path is what makes that one resumable in the first place; carrying
+    it here too would make a --init_from warm-start from this file replay identically to whatever
+    already happened after the original save, not actually explore anything new."""
+    save_checkpoint({"variables": variables, "real_hpwl": jnp.array(real_hpwl)}, best_checkpoint_path)
 
 
 def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
     extra_illegal_fn, checkpoint_path: pathlib.Path | None, n_iterations: int, n_episodes: int,
     log_every: int, eval_every: int, log_path: pathlib.Path | None,
-    placement_images_dir: pathlib.Path | None = None,
+    placement_images_dir: pathlib.Path | None = None, best_checkpoint_path: pathlib.Path | None = None,
+    resume: bool = True,
 ):
-    """Runs n_iterations of buffered-PPO training one iteration at a time, resuming from
-    checkpoint_path if it exists. Real HPWL is computed every eval_every iterations (a full extra
-    greedy rollout, so not cheap); a progress line is printed every log_every iterations; every
-    iteration is appended to log_path as JSONL regardless of log_every.
+    """Runs n_iterations *more* PPO update cycles, resuming from checkpoint_path if it exists and
+    resume=True - so e.g. n_iterations=300 resumed from iteration 100 trains iterations 101..400.
+    resume=False starts fresh instead (iteration 0, freshly-initialized optimizer state/RNG key)
+    even if checkpoint_path already holds a previous run's state - this is how main() honors an
+    explicit --init_from: reading the caller's already-warm-started `variables` as the starting
+    point, not silently overridden by whatever's on disk. checkpoint_path is still written to
+    unconditionally either way (see step 3 below), so a resume=False run still overwrites it with
+    its own fresh progress going forward.
+
+    Real HPWL is computed every eval_every iterations (a full extra greedy rollout, so not cheap);
+    a progress line is printed every log_every iterations, showing current_iteration against the
+    true total (start_iteration + n_iterations), not n_iterations alone - otherwise a resumed run's
+    progress line understates where it's actually headed (e.g. "iter 400/300" instead of
+    "iter 400/400"). Every iteration is appended to log_path as JSONL regardless of log_every.
+    checkpoint_path is checkpointed every iteration (unconditionally) so a crash never loses more
+    than one iteration of progress; independently, best_checkpoint_path (if given) is (re)written
+    only when an eval's real_hpwl beats every real_hpwl seen so far - see _save_best_checkpoint's
+    own docstring for why that's a second, deliberately smaller file rather than reusing
+    checkpoint_path for this too.
 
     placement_images_dir, if given, writes <iteration>.png (that eval rollout's final placement) -
     eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
     log_every - the same condition that gates the console print below - controls which of those
-    eval iterations actually get an image kept.
-
-    checkpoint_path is only (re)written when an eval's real_hpwl beats the best seen so far -
-    matching MaskPlace's own PPO2.py, which only calls save_param() when its moving-average reward
-    improves, rather than unconditionally on every iteration. Training is noisy enough (see a real
-    run's training_log.jsonl: real_hpwl climbed ~4.6x from its best point over 100 iterations, with
-    no entropy bonus to pull it back) that always overwriting with the *latest* state risks leaving
-    behind whatever regime training wandered into, not the best one it found. best_real_hpwl is
-    carried inside checkpoint_path itself (see _open_train_state/_save_train_state above), so
-    resuming reads it straight back instead of spending a second eval rollout to rediscover it."""
-    # Resume from checkpoint_path if it exists (read once here, not once per iteration below).
-    variables, opt_state, running_stats, key, start_iteration, best_real_hpwl = _open_train_state(
-        variables, key, optimizer, checkpoint_path
+    eval iterations actually get an image kept."""
+    # Resume from checkpoint_path if it exists and resume=True (read once here, not once per
+    # iteration below). resume=False passes None through so open_train_state can't load anything,
+    # regardless of what's actually sitting at checkpoint_path.
+    variables, opt_state, running_stats, key, start_iteration = open_train_state(
+        variables, key, optimizer, checkpoint_path if resume else None
     )
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
-    if checkpoint_path is not None and checkpoint_path.exists():
-        Log.info(f"  resumed checkpoint's real_hpwl={best_real_hpwl:.1f} - only overwriting it if beaten")
+    total_iterations = start_iteration + n_iterations
+    if start_iteration > 0:
+        Log.info(f"  resumed at iteration {start_iteration}; running {n_iterations} more to reach {total_iterations}")
+    best_real_hpwl = _read_best_real_hpwl(variables, best_checkpoint_path)
+    if best_real_hpwl < float("inf"):
+        Log.info(f"  best real_hpwl so far: {best_real_hpwl:.1f} -> {best_checkpoint_path}")
 
     log = []
     for i in range(n_iterations):
@@ -329,18 +354,19 @@ def _train_and_eval_loop(
                 _save_placement_image(
                     placement_images_dir, current_iteration, eval_positions, grid_sizes, benchmark.params
                 )
+            if best_checkpoint_path is not None and real_hpwl < best_real_hpwl:
+                best_real_hpwl = real_hpwl
+                _save_best_checkpoint(best_checkpoint_path, variables, best_real_hpwl)
+                Log.info(f"  new best real_hpwl={best_real_hpwl:.1f} at iteration {current_iteration} -> {best_checkpoint_path}")
         _append_log_entry(log, log_path, current_iteration, loss, real_hpwl)
         if current_iteration % log_every == 0:
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
-            Log.info(f"iter {current_iteration:>6}/{n_iterations}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
+            Log.info(f"iter {current_iteration:>6}/{total_iterations}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 
-        # 3. Checkpoint only when this eval's real_hpwl beats the best seen so far - see this
-        #    function's own docstring for why "every iteration, unconditionally" (the old
-        #    behavior) risks saving a worse state than what training already found.
-        if checkpoint_path is not None and real_hpwl is not None and real_hpwl < best_real_hpwl:
-            best_real_hpwl = real_hpwl
-            _save_train_state(checkpoint_path, variables, opt_state, running_stats, key, current_iteration, best_real_hpwl)
-            Log.info(f"  new best real_hpwl={best_real_hpwl:.1f} at iteration {current_iteration} -> {checkpoint_path}")
+        # 3. Checkpoint every iteration (episodes are expensive to recollect on this hardware,
+        #    so a crash should never lose more than one iteration of progress). Independent of
+        #    best_checkpoint_path above - see _save_best_checkpoint's own docstring for why.
+        checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
 
     return variables
 
@@ -352,7 +378,7 @@ def main() -> None:
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
     (
         benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
-        want_placement_images, placement_images_dir_arg,
+        want_placement_images, placement_images_dir_arg, init_from,
     ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -395,20 +421,32 @@ def main() -> None:
     key, init_key = random.split(key)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(init_key, obs0)
+    if init_from is not None:
+        # Expects best_checkpoint.bin's own {"variables": ..., "real_hpwl": ...} schema (see
+        # _save_best_checkpoint) - the only file this script itself produces in the shape
+        # --init_from is meant to consume.
+        variables = load_checkpoint({"variables": variables, "real_hpwl": jnp.array(0.0)}, init_from)["variables"]
+        Log.info(f"warm-starting initial weights from {init_from}")
 
     # 6. Set up the checkpoint location; if one already exists, training below will resume from
-    #    it instead of starting over - unless --no_checkpoint was given, meaning don't read or
-    #    write any state at all (a quick, disposable run, e.g. a scripts/subprocess_search.py probe).
+    #    it instead of starting over - unless --no_checkpoint was given (don't read or write any
+    #    state at all) or --init_from was given (explicit warm-start wins over whatever's already
+    #    on disk; resume=False below still overwrites checkpoint_path with this run's own progress
+    #    going forward, it just won't be *loaded* from).
+    resume = init_from is None
     if no_checkpoint:
-        checkpoint_path = log_path = None
+        checkpoint_path = log_path = best_checkpoint_path = None
         placement_images_dir = placement_images_dir_arg  # only if explicitly given - no output_dir to default into
     else:
         output_dir = benchmark_dir / "output_maskplace"
         output_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = output_dir / "checkpoint.bin"
         log_path = output_dir / "training_log.jsonl"
-        resuming = checkpoint_path.exists()
+        best_checkpoint_path = output_dir / "best_checkpoint.bin"
+        resuming = resume and checkpoint_path.exists()
         Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+        if not resume and checkpoint_path.exists():
+            Log.info(f"  note: {checkpoint_path} exists but --init_from was given, so it's overwritten fresh from iteration 0, not resumed")
         placement_images_dir = placement_images_dir_arg or (
             output_dir / "placements" if want_placement_images else None
         )
@@ -434,12 +472,17 @@ def main() -> None:
         key, variables, policy, benchmark, optimizer, ppo_config, state_fn, extra_illegal_fn,
         checkpoint_path, n_iterations, n_episodes=n_episodes,
         log_every=log_every, eval_every=eval_every, log_path=log_path,
-        placement_images_dir=placement_images_dir,
+        placement_images_dir=placement_images_dir, best_checkpoint_path=best_checkpoint_path,
+        resume=resume,
     )
 
     if checkpoint_path is not None:
         print()
-        print(f"checkpoint saved to {checkpoint_path} (only when real_hpwl improved) - re-run this script to continue training.")
+        print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
+        best_real_hpwl = _read_best_real_hpwl(variables, best_checkpoint_path)
+        if best_real_hpwl < float("inf"):
+            print(f"best real_hpwl={best_real_hpwl:.1f} saved to {best_checkpoint_path} "
+                  f"(use --init_from={best_checkpoint_path} to warm-start a fresh run from it)")
         print(f"full history saved to {log_path}")
 
 
