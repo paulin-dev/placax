@@ -51,11 +51,14 @@ from placax_agents.policy.observation import make_wiremask_observation
 from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.loss import huber_value_loss
+from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
+from placax_agents.training.algorithm.running_stats import init_running_stats
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
 from placax_agents.training.loops.buffered_train import buffered_train_step
-from placax_agents.training.loops.common import checkpoint_every_n, open_train_state, save_train_state
+from placax_agents.training.loops.common import train_state_bundle
 from placax_agents.training.reward import make_scaled_hpwl_reward
 
+import jax.numpy as jnp
 import optax
 from jax import random
 
@@ -241,6 +244,31 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
     )
 
 
+def _open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | None):
+    """Like training.loops.common.open_train_state, but the saved bundle also carries
+    best_real_hpwl - the real_hpwl of whatever's currently in checkpoint_path. It's read straight
+    back here instead of being rediscovered with a fresh _evaluate() rollout on resume: this same
+    process already knew the number at the moment it chose to save (see _save_train_state below),
+    so re-running eval to relearn it would be a second rollout for information we already had."""
+    template = {
+        **train_state_bundle(variables, optimizer.init(variables["params"]), init_running_stats(), key, 0),
+        "best_real_hpwl": jnp.array(float("inf")),
+    }
+    state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
+    return (
+        state["variables"], state["opt_state"], state["running_stats"], state["key"],
+        int(state["iteration"]), float(state["best_real_hpwl"]),
+    )
+
+
+def _save_train_state(checkpoint_path: pathlib.Path, variables, opt_state, running_stats, key, iteration: int, best_real_hpwl: float) -> None:
+    """Counterpart to _open_train_state: bundles best_real_hpwl in alongside the usual resumable state."""
+    save_checkpoint(
+        {**train_state_bundle(variables, opt_state, running_stats, key, iteration), "best_real_hpwl": jnp.array(best_real_hpwl)},
+        checkpoint_path,
+    )
+
+
 def _train_and_eval_loop(
     key, variables, policy, benchmark: Benchmark, optimizer, ppo_config, state_fn,
     extra_illegal_fn, checkpoint_path: pathlib.Path | None, n_iterations: int, n_episodes: int,
@@ -255,12 +283,23 @@ def _train_and_eval_loop(
     placement_images_dir, if given, writes <iteration>.png (that eval rollout's final placement) -
     eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
     log_every - the same condition that gates the console print below - controls which of those
-    eval iterations actually get an image kept."""
+    eval iterations actually get an image kept.
+
+    checkpoint_path is only (re)written when an eval's real_hpwl beats the best seen so far -
+    matching MaskPlace's own PPO2.py, which only calls save_param() when its moving-average reward
+    improves, rather than unconditionally on every iteration. Training is noisy enough (see a real
+    run's training_log.jsonl: real_hpwl climbed ~4.6x from its best point over 100 iterations, with
+    no entropy bonus to pull it back) that always overwriting with the *latest* state risks leaving
+    behind whatever regime training wandered into, not the best one it found. best_real_hpwl is
+    carried inside checkpoint_path itself (see _open_train_state/_save_train_state above), so
+    resuming reads it straight back instead of spending a second eval rollout to rediscover it."""
     # Resume from checkpoint_path if it exists (read once here, not once per iteration below).
-    variables, opt_state, running_stats, key, start_iteration = open_train_state(
+    variables, opt_state, running_stats, key, start_iteration, best_real_hpwl = _open_train_state(
         variables, key, optimizer, checkpoint_path
     )
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    if checkpoint_path is not None and checkpoint_path.exists():
+        Log.info(f"  resumed checkpoint's real_hpwl={best_real_hpwl:.1f} - only overwriting it if beaten")
 
     log = []
     for i in range(n_iterations):
@@ -295,14 +334,14 @@ def _train_and_eval_loop(
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
             Log.info(f"iter {current_iteration:>6}/{n_iterations}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 
-        # 3. Checkpoint every iteration (episodes are expensive to recollect on this hardware,
-        #    so a crash should never lose more than one iteration of progress).
-        checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
+        # 3. Checkpoint only when this eval's real_hpwl beats the best seen so far - see this
+        #    function's own docstring for why "every iteration, unconditionally" (the old
+        #    behavior) risks saving a worse state than what training already found.
+        if checkpoint_path is not None and real_hpwl is not None and real_hpwl < best_real_hpwl:
+            best_real_hpwl = real_hpwl
+            _save_train_state(checkpoint_path, variables, opt_state, running_stats, key, current_iteration, best_real_hpwl)
+            Log.info(f"  new best real_hpwl={best_real_hpwl:.1f} at iteration {current_iteration} -> {checkpoint_path}")
 
-    # Always checkpoint at the end too (in case n_iterations was 0) - unless checkpoint_path is
-    # None, meaning the caller (e.g. the memory-fitting probe) doesn't want anything written.
-    if checkpoint_path is not None:
-        save_train_state(checkpoint_path, variables, opt_state, running_stats, key, start_iteration + n_iterations)
     return variables
 
 
@@ -400,7 +439,7 @@ def main() -> None:
 
     if checkpoint_path is not None:
         print()
-        print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
+        print(f"checkpoint saved to {checkpoint_path} (only when real_hpwl improved) - re-run this script to continue training.")
         print(f"full history saved to {log_path}")
 
 
