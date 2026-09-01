@@ -13,7 +13,7 @@ def test_plot_placement_skips_unplaced_macros() -> None:
 
     ax = plot_placement(positions, sizes, grid_x=8)
 
-    assert len(ax.patches) == 2  # only the two placed macros get a rectangle
+    assert len(ax.patches) == 3  # the die-boundary rectangle, plus the two placed macros
     assert ax.get_title() == ""  # no title unless explicitly requested
     assert ax.get_xticks().size == 0 and ax.get_yticks().size == 0  # no axis clutter
 
