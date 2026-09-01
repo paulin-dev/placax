@@ -1,6 +1,4 @@
-"""CNN actor-critic that also conditions on a wiremask channel - one more
-architecture option (see cnn.py), pairs with
-policy.observation.make_wiremask_observation as its state_fn."""
+"""CNN actor-critic that also conditions on a wiremask channel; pairs with make_wiremask_observation."""
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
@@ -15,13 +13,9 @@ class WiremaskCNNActorCritic(nn.Module):
 
     @nn.compact
     def __call__(self, obs: dict) -> tuple[jax.Array, jax.Array]:
-        # 1. Canvas as float, and wiremask rescaled to roughly [0, 1] so it's on a similar
-        #    footing to canvas rather than dominating with much larger raw values.
+        # 1. Canvas as float, and wiremask rescaled to roughly [0, 1] to match canvas's scale.
         canvas = obs["canvas"].astype(jnp.float32)
-        # observation.make_wiremask_observation doesn't buffer a standalone "wiremask" key
-        # (it's identical to lookahead_wiremasks[0], so keeping both would double a full
-        # grid-resolution channel's storage in every buffered trajectory for nothing) -
-        # fall back to that slice, same pattern as action.make_wiremask_quality_illegal.
+        # Falls back to the lookahead slice when there's no standalone "wiremask" key buffered.
         wiremask = obs["wiremask"] if "wiremask" in obs else obs["lookahead_wiremasks"][0]
         wiremask = wiremask / (wiremask.max() + 1e-6)
         # 2. Stack both as separate channels of one input image.

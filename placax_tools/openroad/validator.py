@@ -20,9 +20,7 @@ def build_openroad_script(
     lines.append(f"read_def {def_path}")
     lines.append("report_design_area")
 
-    # 2. Only attempt timing analysis if we have both a liberty file (cell
-    #    timing models) and a clock period - otherwise OpenROAD has nothing
-    #    to time against, so we skip these commands entirely.
+    # 2. Only attempt timing analysis if we have both a liberty file and a clock period.
     if liberty_path is not None and clock_period_ns is not None:
         lines.append(f"read_liberty {liberty_path}")
         lines.append(f"create_clock -period {clock_period_ns} [get_ports *] -name {clock_name}")
@@ -39,8 +37,7 @@ _SLACK_RE = re.compile(r"slack\s+\(?(?:MET|VIOLATED)?\)?\s*(-?[\d.]+)", re.IGNOR
 
 def parse_openroad_output(raw_output: str) -> PPAResult:
     """Extracts what's actually there in raw_output: area/utilization always, timing slack only if it ran."""
-    # Search rather than require a match, since timing lines may simply be
-    # absent (no liberty/clock given) - that's a valid, expected case.
+    # Search rather than require a match, since timing lines may simply be absent.
     area_match = _AREA_RE.search(raw_output)
     slack_match = _SLACK_RE.search(raw_output)
     return PPAResult(

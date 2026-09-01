@@ -16,8 +16,7 @@ from placax_agents.training.reward import make_scaled_hpwl_reward
 import jax
 
 RewardFnFactory = Callable[[jax.Array, jax.Array, jax.Array, jax.Array, float], RewardFn]
-"""(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size) -> RewardFn; the
-returned RewardFn still expects grid-unit centers, so convert with to_real_centers first."""
+"""Builds a RewardFn from padded pin/size arrays and cell size; result expects grid-unit centers."""
 
 
 @dataclass(frozen=True)
@@ -38,14 +37,7 @@ class Benchmark:
     def _load_and_truncate(
         benchmark_dir: pathlib.Path, order_fn: OrderFn, macro_budget: int | None
     ) -> tuple[SizeMap, Nets, OrderFn]:
-        """Loads the raw netlist and, if macro_budget is set, cuts it down to that many macros.
-
-        Also returns the OrderFn build_padded_arrays should use afterward: when truncating, this
-        already ran order_fn once on the FULL netlist to decide which macros survive - re-running
-        it again on the truncated netlist (an order_fn sensitive to net structure, e.g.
-        connectivity_order, can rank differently on a smaller graph) would silently produce a
-        different final sequence than the one that was actually used to pick the top `macro_budget`
-        macros. freeze_order() locks in that first, full-netlist ordering instead."""
+        """Loads the raw netlist and, if macro_budget is set, truncates and freezes the ordering used."""
         # Load everything first...
         macro_sizes, nets = load_netlist(benchmark_dir)
         # ...then optionally drop all but the first macro_budget macros (by order_fn's ordering).
@@ -64,9 +56,7 @@ class Benchmark:
         macro_budget: int | None = None,
     ) -> "Benchmark":
         """Loads a netlist directory into a fully-built, ready-to-train Benchmark."""
-        # 1. Load the netlist (and optionally truncate to a macro budget, e.g. MaskPlace's `placed_num_macro`) -
-        #    frozen_order_fn is order_fn itself when nothing was truncated, or the exact order that
-        #    truncation already settled on when it was.
+        # 1. Load the netlist, optionally truncated to a macro budget, with its frozen ordering.
         macro_sizes, nets, frozen_order_fn = cls._load_and_truncate(benchmark_dir, order_fn, macro_budget)
         # 2. Pad/index everything into the fixed-shape arrays the JAX code operates on.
         _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(

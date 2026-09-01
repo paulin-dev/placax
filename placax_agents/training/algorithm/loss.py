@@ -50,8 +50,7 @@ def ppo_loss(
     value_loss_fn: ValueLossFn = mse_value_loss,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> jax.Array:
-    """PPO loss: mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy),
-    extra_illegal_fn must match what was used at rollout time."""
+    """PPO loss: mean(policy_loss) + value_coef*mean(value_loss) - entropy_coef*mean(entropy)."""
 
     def per_step(obs, action, old_log_prob, advantage, ret):
         # 1. Re-run the current (being-trained) policy on the saved observation to get

@@ -17,8 +17,7 @@ def load_checkpoint(variables_template, path: pathlib.Path):
 
 
 def load_pretrained_from_url(variables_template, url: str, cache_path: pathlib.Path):
-    """Downloads the checkpoint to cache_path if absent, then loads it
-    like any local one."""
+    """Downloads the checkpoint to cache_path if absent, then loads it like any local one."""
     if not cache_path.exists():
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(url, cache_path)

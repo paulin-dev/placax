@@ -1,7 +1,4 @@
-"""Step-by-step placement history for a trained policy, for animating a rollout
-(placax_viz.animation). Mirrors placax_agents.ops.evaluate.evaluate's greedy rollout, but as a
-plain Python loop (not jax.lax.scan) so every intermediate EnvState.positions is kept, not just
-the final one - too slow to train with, fine for building an animation of one trained policy."""
+"""Step-by-step placement history for a trained policy, for animating a rollout."""
 from placax.core import reset
 from placax_agents.policy.action import legal_action_logits
 from placax_agents.policy.observation import observation
@@ -21,8 +18,7 @@ def collect_placement_history(
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> list:
-    """Greedily places every macro (argmax over legal cells), returning one (n_macros, 2) grid-unit
-    positions array per step - history[0] is all-unplaced, history[-1] is the final layout."""
+    """Greedily places every macro, returning one positions array per step from unplaced to final layout."""
     state = reset(params)
     history = [np.asarray(state.positions)]
     for _ in range(params.n_macros):

@@ -1,5 +1,4 @@
-"""Evaluates a policy's placement quality: greedy (argmax) rollout,
-reporting real HPWL."""
+"""Evaluates a policy's placement quality via a greedy (argmax) rollout, reporting real HPWL."""
 from placax.core import reset  # must precede jax imports
 from placax.extras.rewards import hpwl
 from placax.types import EnvParams
@@ -54,12 +53,7 @@ def evaluate(
     return final_state.positions, hpwl(real_centers, padded_pin_idx, padded_pin_offset, valid_mask)
 
 
-# Built once at import: without this, the lax.scan rollout above (which runs the entire
-# policy network, backbone included, once per macro) gets retraced and recompiled from
-# scratch on every call instead of being cached - both far slower than it should be, and,
-# on tightly memory-constrained hardware, a source of GPU memory growth every time
-# evaluate() runs until the process OOMs. Same fix as buffered_train.py's
-# _jitted_collect_buffer/_jitted_compute_gae.
+# Built once at import to avoid retracing/recompiling on every call (same fix as buffered_train.py's jitted fns).
 _jitted_evaluate = jax.jit(
     evaluate, static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn")
 )

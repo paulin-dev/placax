@@ -20,12 +20,7 @@ def parse_components(def_text: str) -> dict[str, tuple[str, float, float]]:
 
 
 def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
-    """Returns [(instance_name, port_name)] per net, as a list since net names can legitimately repeat.
-
-    An instance can appear more than once in one net (multiple physical pins on the same wire) -
-    only the FIRST port seen for a given (net, instance) pair is kept, same convention as
-    load_bookshelf's parse_nets (see its docstring): one macro-net connection contributes one
-    bounding-box point, not one per physical pin."""
+    """Returns [(instance_name, port_name)] per net, as a list since net names can repeat; keeps only the first port per (net, instance)."""
     section = def_text[def_text.index("\nNETS") : def_text.index("\nEND NETS")]
 
     nets = []
@@ -33,8 +28,7 @@ def parse_nets(def_text: str) -> list[list[tuple[str, str]]]:
         match = _NET_LINE_RE.search(line)
         if not match:
             continue
-        # Drop the special top-level "PIN" pseudo-instance and dedupe by instance, keeping
-        # only the first port seen for each.
+        # Drop the special top-level "PIN" pseudo-instance and dedupe by instance, keeping the first port seen.
         seen: dict[str, str] = {}
         for inst, port in _NET_PIN_RE.findall(match.group(2)):
             if inst != "PIN" and inst not in seen:
@@ -66,9 +60,7 @@ def resolve_net_pin_offsets(
     for net in nets:
         pins: list[NetPin] = []
         for inst, port in net:
-            # Look up this instance's cell type, then that type's LEF-declared pin
-            # offset; pins with no matching geometry fall back to (0, 0) rather than
-            # being dropped, since the net topology should still be preserved.
+            # Look up this instance's cell type and its LEF-declared pin offset; unmatched pins fall back to (0, 0) to preserve topology.
             cell_type = components[inst][0]
             x_off, y_off = pin_offsets.get(cell_type, {}).get(port, (0.0, 0.0))
             pins.append((inst, x_off, y_off))

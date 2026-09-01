@@ -22,17 +22,7 @@ def lookahead_sizes(state: EnvState, params: EnvParams, sizes_array: jax.Array, 
 def observation(
     state: EnvState, params: EnvParams, sizes_array: jax.Array, cell_size: float = 1.0, lookahead: int = 1
 ) -> dict:
-    """Builds the base observation dict (canvas, current/lookahead macro sizes, positions, step) any policy can read.
-
-    Deliberately excludes a "sizes_array" key: unlike positions/placed_mask (genuinely different
-    every step), sizes_array is the exact same (n_macros, 2) array on every single step of an
-    episode - buffering it per step (see training.rollout.collect_rollout) would replicate it
-    n_macros times over for zero new information. A policy that needs it has it available the
-    same way this function does: as its own sizes_array argument, not through obs.
-
-    cell_size converts sizes_array (REAL units) to the GRID units render() needs to compare
-    against state.positions (already grid-unit corners) - default 1.0 keeps callers that already
-    pass grid-scaled sizes_array (e.g. most existing tests) working unchanged."""
+    """Builds the base observation dict (canvas, current/lookahead macro sizes, positions, step) any policy can read; excludes sizes_array since it's constant across an episode."""
     # Render already-placed macros onto the grid; this is what the policy "sees" as the board state.
     grid_sizes = to_grid_units(sizes_array, cell_size)
     canvas = render(state.positions, grid_sizes, params.grid_x, params.effective_grid_y)
@@ -57,18 +47,7 @@ def make_wiremask_observation(
     base_state_fn=observation,
     lookahead: int = 1,
 ):
-    """Wraps a StateFn to add "lookahead_wiremasks" (per-cell HPWL-increase previews); build once per benchmark.
-
-    The current-macro slice is lookahead_wiremasks[0] - deliberately not also duplicated under a
-    separate "wiremask" key, since every full grid-resolution channel here gets buffered per step
-    of every episode in the PPO trajectory (see training.rollout.collect_rollout); a policy or
-    ExtraIllegalFn that only cares about one step ahead should read lookahead_wiremasks[0] directly
-    (placax_agents.policy.action.make_wiremask_quality_illegal already falls back to exactly that
-    when its "wiremask" key isn't present in obs).
-
-    wiremask()/hpwl() expect REAL-unit center positions (padded_pin_offset is REAL-unit), while
-    state.positions is a GRID-unit corner - cell_size converts one to the other here, the same
-    way training.reward.make_scaled_hpwl_reward already does for the reward path."""
+    """Wraps a StateFn to add "lookahead_wiremasks" (per-cell HPWL-increase previews); build once per benchmark."""
 
     def state_fn(state: EnvState, params: EnvParams, sizes_array: jax.Array) -> dict:
         # Start from the base observation (canvas, sizes, etc.), then layer wiremask info on top.

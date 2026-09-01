@@ -38,15 +38,13 @@ def train_step(
         key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
         extra_illegal_fn,
     )
-    # 2. Turn the raw rewards/values into advantages (how much better each action was
-    #    than expected) and returns (the value function's training target).
+    # 2. Turn raw rewards/values into advantages and returns (the value function's training target).
     advantages, returns = compute_gae(
         trajectory["reward"], trajectory["value"], trajectory["done"], next_value=jnp.array(0.0),
         gamma=ppo_config.gamma, lam=ppo_config.lam,
     )
 
-    # 3. Wrap ppo_loss so it closes over the fixed trajectory/advantages/returns and
-    #    exposes only policy_params as the thing to differentiate with respect to.
+    # 3. Wrap ppo_loss so it closes over trajectory/advantages/returns, exposing only policy_params to differentiate.
     def loss_fn(policy_params, normalized_advantages, normalized_returns):
         return ppo_loss(
             policy_params, policy_apply_fn, trajectory, normalized_advantages, normalized_returns,
@@ -63,8 +61,7 @@ def train_step(
     return new_variables, new_opt_state, new_running_stats, loss, final_state
 
 
-# Built once at import; each distinct jax.jit wrapper would otherwise pay
-# its own one-time compile cost on first use.
+# Built once at import to avoid paying the one-time compile cost on every call.
 _jitted_train_step = jax.jit(
     train_step,
     static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config", "extra_illegal_fn"),
@@ -87,9 +84,7 @@ def train_sequential(
     checkpoint_path: pathlib.Path | None = None,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """Runs n_iterations of train_step, returning (final_variables, losses); checkpoint_path,
-    if given, saves every iteration and auto-resumes (use ops.resumable_train instead for
-    periodic checkpointing/eval)."""
+    """Runs n_iterations of train_step, returning (final_variables, losses); checkpoint_path saves every iteration and auto-resumes."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
@@ -98,8 +93,7 @@ def train_sequential(
 
     losses = []
     for i in range(n_iterations):
-        # One episode + one gradient update per iteration, then checkpoint immediately
-        # so a crash never loses more than one iteration of progress.
+        # One episode + one gradient update per iteration, then checkpoint immediately.
         key, step_key = make_step_input(key)
         variables, opt_state, running_stats, loss, _ = _jitted_train_step(
             step_key, variables, opt_state, running_stats, optimizer, policy_apply_fn,

@@ -1,5 +1,4 @@
-"""MST-based wirelength (Prim's, Manhattan distance) - more accurate than
-HPWL but expensive; plain Python, for periodic reporting only."""
+"""MST-based wirelength (Prim's, Manhattan distance) - more accurate than HPWL but expensive; for periodic reporting only."""
 from placax.types import Nets
 
 
@@ -9,16 +8,14 @@ def _prim_mst_length(points: list[tuple[float, float]]) -> float:
     if n < 2:
         return 0.0
 
-    # 1. Start the tree with just the first point; min_dist[i] tracks the
-    #    cheapest known distance from the tree to point i so far.
+    # 1. Start the tree with the first point; min_dist[i] tracks its cheapest known distance to the tree.
     in_tree = [False] * n
     in_tree[0] = True
     min_dist = [
         abs(points[0][0] - points[i][0]) + abs(points[0][1] - points[i][1]) for i in range(n)
     ]
 
-    # 2. Repeatedly grow the tree: add the closest point not yet in it, pay
-    #    its distance, then relax every remaining point's distance through it.
+    # 2. Repeatedly add the closest remaining point, paying its distance and relaxing the rest through it.
     total = 0.0
     for _ in range(n - 1):
         best_j = min((j for j in range(n) if not in_tree[j]), key=lambda j: min_dist[j])

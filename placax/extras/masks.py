@@ -1,5 +1,4 @@
-"""Composable legality constraints - each function answers one
-independent question about which cells are illegal."""
+"""Composable legality constraints - each function answers one independent question about which cells are illegal."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
 
 import jax
@@ -10,8 +9,7 @@ from placax.types import EnvParams
 
 def compute_occupied(positions: jax.Array, grid: int) -> jax.Array:
     """Returns a (grid, grid) bool array marking cells that hold a macro's reference point."""
-    # 1. Unplaced macros use the -1 sentinel; filter them out explicitly so a JAX
-    #    scatter/compare doesn't treat -1 as a real (wrapped) grid index.
+    # 1. Filter out unplaced (-1 sentinel) macros so a JAX scatter/compare doesn't treat -1 as a real index.
     is_placed = positions[:, 0] >= 0
     # 2. Compare every grid cell against every macro's position at once (no Python loop).
     row_idx = jnp.arange(grid)[:, None, None]
@@ -26,8 +24,7 @@ def occupancy_mask(occupied: jax.Array, macro_size: tuple[int, int]) -> jax.Arra
     grid_w, grid_h = occupied.shape
     w, h = macro_size
 
-    # 1. Build a 2D prefix-sum table so we can sum any rectangular window in O(1),
-    #    instead of re-summing cells for every candidate position.
+    # 1. Build a 2D prefix-sum table so any rectangular window sums in O(1).
     cumsum = jnp.pad(occupied.astype(jnp.int32), ((1, 0), (1, 0))).cumsum(axis=0).cumsum(axis=1)
 
     # 2. For each cell, work out the macro-sized window starting there, clamped to the grid.
@@ -60,8 +57,7 @@ def quality_mask(scores: jax.Array, max_score: jax.Array) -> jax.Array:
 def lookahead_illegal_masks(occupied: jax.Array, params: EnvParams, macro_sizes: jax.Array) -> jax.Array:
     """Returns occupancy_mask | boundary_mask for each row of macro_sizes, all against today's canvas."""
 
-    # Today's canvas is valid for every lookahead macro since none of them are
-    # placed yet, so we can vmap the same occupied grid over all their sizes.
+    # Today's canvas is valid for every lookahead macro, so vmap it over all their sizes.
     def mask_for(size: jax.Array) -> jax.Array:
         w, h = size[0], size[1]
         return occupancy_mask(occupied, (w, h)) | boundary_mask(params, (w, h))

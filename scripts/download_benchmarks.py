@@ -24,8 +24,7 @@ class Benchmark:
     format: Format
 
 
-# URLs as published on ispd.cc - the /benchmarks/ subpath genuinely
-# varies between designs on the original site, not a typo here.
+# URLs as published on ispd.cc - the /benchmarks/ subpath genuinely varies between designs.
 BENCHMARKS: dict[str, Benchmark] = {
     "adaptec1": Benchmark(
         "http://www.ispd.cc/contests/05/ispd05-contest/adaptec1.tar.gz", Format.ISPD05_NETLIST
@@ -73,8 +72,7 @@ def _flatten_nested_dir(out_dir: pathlib.Path, name: str) -> None:
     """Some ISPD05 tarballs nest an extra <name>/ dir inside; others don't."""
     nested = out_dir / name
     if nested.is_dir():
-        # Move everything up one level so files always end up directly in
-        # out_dir, regardless of how the original tarball was packed.
+        # Move everything up one level so files always end up directly in out_dir.
         for item in nested.iterdir():
             item.rename(out_dir / item.name)
         nested.rmdir()
@@ -97,8 +95,7 @@ def _fetch_ispd05_netlist(url: str, out_dir: pathlib.Path, name: str) -> None:
     with tarfile.open(tar_path) as tar:
         tar.extractall(out_dir, filter="data")
     tar_path.unlink()
-    # 3. Normalize the directory layout and undo the extra gzip some
-    #    ISPD05 benchmarks apply on top of the tarball itself.
+    # 3. Normalize the directory layout and undo the extra gzip some ISPD05 benchmarks apply.
     _flatten_nested_dir(out_dir, name)
     _degzip_all(out_dir)
 

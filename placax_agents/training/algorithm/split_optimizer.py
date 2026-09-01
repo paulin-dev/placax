@@ -1,5 +1,4 @@
-"""Per-parameter-group optimizers, e.g. a separately-optimized critic
-without a second backward pass."""
+"""Per-parameter-group optimizers, e.g. a separately-optimized critic without a second backward pass."""
 from collections.abc import Hashable
 
 import jax
@@ -12,13 +11,11 @@ def label_params_by_name_prefix(
     """Labels each param leaf matched_label if any key in its path starts with prefix, else default_label."""
 
     def label_leaf(path, _leaf):
-        # path is a sequence of pytree keys (e.g. dict keys) leading to this leaf;
-        # stringify each one so we can check it against the prefix.
+        # Stringify each key in the path so it can be checked against the prefix.
         keys = (str(getattr(entry, "key", entry)) for entry in path)
         return matched_label if any(key.startswith(prefix) for key in keys) else default_label
 
-    # Walk the whole params pytree, replacing each leaf with its label - the result
-    # is a same-shaped pytree of labels, exactly what optax.multi_transform expects.
+    # Walk the params pytree, replacing each leaf with its label to match optax.multi_transform's expected shape.
     return jax.tree_util.tree_map_with_path(label_leaf, params)
 
 

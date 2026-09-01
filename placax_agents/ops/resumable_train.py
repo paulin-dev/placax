@@ -1,6 +1,4 @@
-"""Training loop with periodic checkpointing, HPWL evaluation, and a
-JSONL log - resumable across calls (checkpoint_every/eval_every count
-in absolute iterations, not relative to a single call)."""
+"""Training loop with periodic checkpointing, HPWL evaluation, and a JSONL log, resumable across calls."""
 import json
 import pathlib
 
@@ -37,9 +35,7 @@ def _evaluate(
     state_fn: StateFn,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> tuple[float, jax.Array]:
-    """Runs one full greedy rollout with the current policy and returns (real HPWL, final grid
-    positions) - not cheap (an entire extra rollout on top of training), so the caller decides
-    when to call this (see eval_every in resumable_train's loop) rather than gating itself."""
+    """Runs one full greedy rollout with the current policy and returns (real HPWL, final grid positions)."""
     positions, hpwl_value = _jitted_evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
@@ -54,10 +50,7 @@ def _save_placement_image(
     grid_sizes: jax.Array,
     params: EnvParams,
 ) -> None:
-    """Writes <placement_images_dir>/<iteration>.png from an eval rollout's final positions.
-    Caller decides when to call this (see placement_images_dir/log_every in resumable_train's
-    loop). Imports placax_viz/matplotlib lazily - training has no hard dependency on either
-    otherwise."""
+    """Writes <placement_images_dir>/<iteration>.png from an eval rollout's final positions."""
     from placax_viz.placement import save_placement_image
 
     placement_images_dir.mkdir(parents=True, exist_ok=True)
@@ -105,13 +98,7 @@ def resumable_train(
     snapshot_every: int | None = None,
     placement_images_dir: pathlib.Path | None = None,
 ):
-    """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log).
-
-    placement_images_dir, if given, writes <iteration>.png (the eval rollout's final placement) -
-    eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
-    log_every - the same condition that gates the console print below - controls which of those
-    eval iterations actually get an image kept, so a smaller eval_every for a finer real_hpwl
-    curve doesn't also imply writing an image on every single one of those rollouts."""
+    """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log)."""
     if optimizer is None:
         optimizer = optax.adam(learning_rate)
     grid_sizes = to_grid_units(sizes_array, cell_size)
@@ -137,8 +124,7 @@ def resumable_train(
             params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
         )
 
-        # 2. periodic real-HPWL eval (only every eval_every iterations - not cheap, so gated
-        #    explicitly here rather than inside _evaluate itself) + 3. log entry (always, eval or not).
+        # 2. periodic real-HPWL eval (only every eval_every iterations) + 3. log entry (always).
         is_log_iteration = log_every is not None and current_iteration % log_every == 0
         real_hpwl = None
         if current_iteration % eval_every == 0:

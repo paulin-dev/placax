@@ -20,12 +20,7 @@ def collect_rollout(
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
-    """Samples one full episode. Returns (trajectory, final_state);
-    trajectory maps obs/action/reward/log_prob/value/done to arrays with a
-    leading n_macros dimension. Per-step reward shape (sparse/terminal vs
-    dense/every-step) is entirely reward_fn's choice - see placax.types.RewardFn.
-    extra_illegal_fn, if given, restricts the action space beyond bare
-    legality - see placax_agents.types.ExtraIllegalFn."""
+    """Samples one full episode, returning (trajectory, final_state) with per-step obs/action/reward/log_prob/value/done arrays."""
     initial_state = reset(params)
 
     def scan_step(state, step_key):

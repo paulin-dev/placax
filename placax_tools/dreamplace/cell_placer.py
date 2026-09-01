@@ -89,8 +89,7 @@ class DREAMPlaceCellPlacer(CellPlacer):
 
     def _expect_result_def(self, def_path: pathlib.Path, output_dir: pathlib.Path) -> pathlib.Path:
         """Confirms DREAMPlace actually produced the DEF we expect."""
-        # DREAMPlace names its output after the input DEF's stem, with a
-        # ".gp.def" suffix - fail loudly if that convention doesn't hold.
+        # DREAMPlace names output after the input DEF's stem with a ".gp.def" suffix.
         result_def = output_dir / f"{def_path.stem}.gp.def"
         if not result_def.exists():
             raise FileNotFoundError(

@@ -29,10 +29,8 @@ def save_train_state(path: pathlib.Path, variables, opt_state, running_stats, ke
 
 def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | None):
     """Returns fresh (variables, opt_state, running_stats, key, start_iteration), or resumed from checkpoint_path."""
-    # Build a fresh-state pytree first; it also serves as the deserialization
-    # template, giving load_checkpoint the shape to unpack saved data into.
-    # optimizer state is shaped for params only, matching apply_gradient_update
-    # (which optimizes variables["params"] alone, leaving other collections frozen).
+    # Fresh-state pytree also serves as the deserialization template for load_checkpoint.
+    # Optimizer state is shaped for params only, matching apply_gradient_update.
     template = train_state_bundle(variables, optimizer.init(variables["params"]), init_running_stats(), key, 0)
     state = load_checkpoint(template, checkpoint_path) if checkpoint_path is not None and checkpoint_path.exists() else template
     return (
@@ -45,8 +43,7 @@ def open_train_state(variables, key, optimizer, checkpoint_path: pathlib.Path | 
 
 
 def make_step_input(key: jax.Array, n_envs: int | None = None) -> tuple[jax.Array, jax.Array]:
-    """(key, step_input) for one iteration: n_envs=None gives a single
-    subkey (sequential); n_envs=N gives N split keys (parallel)."""
+    """(key, step_input) for one iteration: n_envs=None gives a single subkey, n_envs=N gives N split keys."""
     key, step_key = jax.random.split(key)
     if n_envs is None:
         return key, step_key

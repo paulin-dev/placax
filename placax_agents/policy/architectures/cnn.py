@@ -1,5 +1,4 @@
-"""CNN actor-critic policy - one architecture among possible several (a
-GNN is a natural candidate; this directory is its home too)."""
+"""CNN actor-critic policy - one architecture among possibly several others in this directory."""
 import jax
 import jax.numpy as jnp
 from flax import linen as nn

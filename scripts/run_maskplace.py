@@ -1,35 +1,4 @@
-"""Runs the MaskPlace-equivalent pipeline end to end, using only placax's
-existing pluggable pieces (not a MaskPlace reimplementation):
-
-  - connectivity_order        macro placement order (MaskPlace's topology order)
-  - macro_budget              place only the N most important macros (--pnm)
-  - dense=True reward         per-step HPWL delta, not a terminal-only reward
-  - make_wiremask_observation wiremask + 2-macro lookahead as observation channels
-  - make_wiremask_quality_illegal   wirelength-guided action masking (soft_coefficient)
-  - ResNetCoarseFineActorCritic(critic_style="step_embedding")  two-branch network,
-                               critic shares zero parameters with the actor
-  - maskplace_ppo_config       its GAE/entropy/value-loss choices
-  - maskplace_optimizer        independently-clipped, independently-stepped actor/critic Adam
-  - train_buffered            its buffer-collect + minibatch-epoch PPO update procedure
-
-Usage: python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 \\
-           --n_episodes=10   (run --help for all flags, including macro_budget)
-
-To find the largest n_episodes your hardware actually supports, use scripts/subprocess_search.py
-*separately first* (not a flag of this script - see that module's docstring for why: this
-process's own GPU memory reservation, just from starting up, would otherwise compete with the
-disposable subprocesses being probed). It needs no special cooperation from this script - just
-run it with its own ordinary CLI, once per candidate:
-
-    python -m scripts.subprocess_search scripts.run_maskplace '--n_episodes=[1,2,4,8,10]' \\
-        --benchmark_dir=benchmarks/adaptec1 --macro_budget=128 --eval_every=1 --n_iterations=4 --no_checkpoint
-
---eval_every=1/--n_iterations=4 there deliberately don't match a real run's --eval_every=10: the
-eval rollout is a separately-compiled executable with its own memory footprint, so a probe needs
-to cross at least one eval boundary (plus a couple more iterations, to catch ordinary GPU
-allocator fragmentation drift) to be representative - forcing it every iteration reaches that
-footprint by iteration 1 instead of iteration 10, so 4 iterations suffice instead of 13.
-"""
+"""Runs the MaskPlace-equivalent pipeline end to end, using only placax's existing pluggable pieces."""
 import argparse
 import pathlib
 import sys
@@ -80,17 +49,7 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults (gamma=0.95, no GAE smoothing, no entropy
-    bonus). Unlike the reference, this keeps advantage/return normalization ON (the PPOConfig
-    default) rather than matching PPO2.py's raw (target_v - critic_net_output) advantage exactly:
-    this environment's per-step dense HPWL reward is heavy-tailed (placing an unusually large or
-    heavily-connected macro produces a swing ~30x a typical step's, confirmed empirically on a real
-    buffer) enough that, without normalization, whichever few extreme transitions happen to land in
-    a given ppo_epochs=10 x batch_size=64 minibatch dominate its gradient - a second, distinct route
-    to the same saturated-policy collapse first seen from normalize_advantages's near-zero-std
-    division (see normalize.py's own min_std guard for that original failure mode). Matching the
-    reference exactly here traded one collapse mechanism for another; normalizing is the safer
-    choice for this specific reward's tails, even though it isn't what PPO2.py itself does."""
+    """PPOConfig matching MaskPlace's own PPO2.py defaults, but with advantage/return normalization kept ON."""
     return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
 
 
@@ -100,30 +59,14 @@ def maskplace_optimizer(
     critic_param_prefix: str = "critic_",
     value_coef: float = PPOConfig().value_coef,
 ) -> optax.GradientTransformation:
-    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-independent-backward-pass setup.
-
-    Requires critic params named under critic_param_prefix and disjoint from the actor's
-    (true for critic_style="step_embedding", not the shared-trunk "canvas" style).
-
-    value_coef must match whatever value_coef the training loss uses: ppo_loss differentiates
-    policy_loss + value_coef*value_loss as one scalar, so the critic's gradient arrives here
-    already pre-scaled by value_coef. Left uncompensated, clipping that scaled gradient to
-    max_grad_norm silently turns the critic's real clip threshold into max_grad_norm/value_coef
-    instead of the intended max_grad_norm; dividing it back out here makes both networks clip
-    against their own true, unweighted gradient norm - matching MaskPlace's two fully independent
-    backward passes (each with its own untouched clip_grad_norm_(0.5), no value_coef involved).
-    """
+    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-independent-backward-pass setup."""
     actor_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
     critic_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm / value_coef), optax.adam(learning_rate))
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
 def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None]:
-    """(benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every,
-    no_checkpoint, placement_images, placement_images_dir, init_from) from named --flag=value CLI
-    args; macro_budget is None if --macro_budget=all was given; n_episodes_arg is an int-as-string
-    (auto-detection is a separate step - see scripts/subprocess_search.py and this module's own
-    docstring for why it isn't a flag of this script)."""
+    """Parses named --flag=value CLI args into the run configuration tuple."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
         "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
@@ -195,12 +138,7 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
 
 
 def _maskplace_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
-    """MaskPlace's own reward magnitude: its reward is accumulated in grid-cell units (pins rounded
-    to the nearest cell) then divided by 200 before being buffered (PPO2.py's `reward / 200.0`), not
-    the raw real-unit HPWL delta placax computes by default. Dividing by cell_size here converts our
-    real-unit delta back to that grid-unit-equivalent scale before applying the same /200; without
-    this, clip_eps/entropy_coef/max_grad_norm - all tuned against MaskPlace's own reward magnitude -
-    would be operating on rewards ~1000x too large for this benchmark's cell_size."""
+    """Converts real-unit HPWL delta to MaskPlace's own grid-unit reward magnitude (divided by 200)."""
     reward_scale = 1.0 / (cell_size * MASKPLACE_REWARD_DIVISOR)
     return make_scaled_hpwl_reward(
         padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
@@ -221,9 +159,7 @@ def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Be
 
 def _build_state_fn(benchmark: Benchmark):
     """Builds the wiremask + 2-macro-lookahead observation function, MaskPlace's own channel set."""
-    # 1. Precompute, once, which nets touch each macro - the wiremask
-    #    observation needs this lookup on every step, so building it here
-    #    (outside the per-step hot path) avoids redoing the work per call.
+    # 1. Precompute, once, which nets touch each macro, so it's not redone on every step.
     macro_net_idx, macro_net_offset, macro_net_valid = build_macro_net_index(
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         n_macros=benchmark.params.n_macros,
@@ -241,8 +177,7 @@ def _resnet_backbone():
         # Prefer real pretrained weights when the optional dependency is available.
         import flaxmodels  # noqa: F401
     except ImportError:
-        # Fall back to an untrained backbone with matching shapes, so training
-        # still works offline - just tell the user clearly which path was taken.
+        # Fall back to an untrained backbone with matching shapes, so training still works offline.
         Log.info("flaxmodels not installed (pip install placax[resnet]) - using an "
                   "offline, untrained ResNet backbone instead of real ImageNet weights.")
         return build_untrained_resnet_backbone()
@@ -258,12 +193,7 @@ def _build_policy(benchmark: Benchmark) -> ResNetCoarseFineActorCritic:
 
 
 def _read_best_real_hpwl(variables_template, best_checkpoint_path: pathlib.Path | None) -> float:
-    """The real_hpwl bundled alongside best_checkpoint_path's weights, or +inf if it doesn't exist
-    yet - read directly rather than recomputed, since whichever process wrote the file already
-    knew this number at the moment it chose to save (see _save_best_checkpoint). variables_template
-    just needs to be *some* variables pytree of the right shape (e.g. the freshly-init'd or
-    currently-training one) - deserialization needs it to restore best_checkpoint_path's own
-    "variables" entry, even though this function throws that part away and returns only the number."""
+    """The real_hpwl bundled alongside best_checkpoint_path's weights, or +inf if it doesn't exist yet."""
     if best_checkpoint_path is None or not best_checkpoint_path.exists():
         return float("inf")
     template = {"variables": variables_template, "real_hpwl": jnp.array(0.0)}
@@ -271,13 +201,7 @@ def _read_best_real_hpwl(variables_template, best_checkpoint_path: pathlib.Path 
 
 
 def _save_best_checkpoint(best_checkpoint_path: pathlib.Path, variables, real_hpwl: float) -> None:
-    """Bare policy weights + the real_hpwl that earned them - deliberately NOT the full resumable
-    state checkpoint_path carries (no optimizer state, no RNG key, no iteration count). That's the
-    point: this file is for recovering/deploying the best placement policy found (via --init_from,
-    or loading it directly for eval), not for continuing training deterministically from it - the
-    RNG key living in checkpoint_path is what makes that one resumable in the first place; carrying
-    it here too would make a --init_from warm-start from this file replay identically to whatever
-    already happened after the original save, not actually explore anything new."""
+    """Saves bare policy weights + the real_hpwl that earned them, deliberately without optimizer/RNG state."""
     save_checkpoint({"variables": variables, "real_hpwl": jnp.array(real_hpwl)}, best_checkpoint_path)
 
 
@@ -288,33 +212,8 @@ def _train_and_eval_loop(
     placement_images_dir: pathlib.Path | None = None, best_checkpoint_path: pathlib.Path | None = None,
     resume: bool = True,
 ):
-    """Runs n_iterations *more* PPO update cycles, resuming from checkpoint_path if it exists and
-    resume=True - so e.g. n_iterations=300 resumed from iteration 100 trains iterations 101..400.
-    resume=False starts fresh instead (iteration 0, freshly-initialized optimizer state/RNG key)
-    even if checkpoint_path already holds a previous run's state - this is how main() honors an
-    explicit --init_from: reading the caller's already-warm-started `variables` as the starting
-    point, not silently overridden by whatever's on disk. checkpoint_path is still written to
-    unconditionally either way (see step 3 below), so a resume=False run still overwrites it with
-    its own fresh progress going forward.
-
-    Real HPWL is computed every eval_every iterations (a full extra greedy rollout, so not cheap);
-    a progress line is printed every log_every iterations, showing current_iteration against the
-    true total (start_iteration + n_iterations), not n_iterations alone - otherwise a resumed run's
-    progress line understates where it's actually headed (e.g. "iter 400/300" instead of
-    "iter 400/400"). Every iteration is appended to log_path as JSONL regardless of log_every.
-    checkpoint_path is checkpointed every iteration (unconditionally) so a crash never loses more
-    than one iteration of progress; independently, best_checkpoint_path (if given) is (re)written
-    only when an eval's real_hpwl beats every real_hpwl seen so far - see _save_best_checkpoint's
-    own docstring for why that's a second, deliberately smaller file rather than reusing
-    checkpoint_path for this too.
-
-    placement_images_dir, if given, writes <iteration>.png (that eval rollout's final placement) -
-    eval_every controls how often positions even exist to save (an eval rollout isn't cheap), and
-    log_every - the same condition that gates the console print below - controls which of those
-    eval iterations actually get an image kept."""
-    # Resume from checkpoint_path if it exists and resume=True (read once here, not once per
-    # iteration below). resume=False passes None through so open_train_state can't load anything,
-    # regardless of what's actually sitting at checkpoint_path.
+    """Runs n_iterations more PPO update cycles, resuming from checkpoint_path unless resume=False, with periodic eval/logging/checkpointing."""
+    # Resume from checkpoint_path if it exists and resume=True (read once here, not per iteration).
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path if resume else None
     )
@@ -331,7 +230,6 @@ def _train_and_eval_loop(
         current_iteration = start_iteration + i + 1
 
         # 1. One buffered-PPO update: collect n_episodes fresh episodes, train on them.
-        #    ppo_epochs=10, batch_size=64 are train_buffered's own defaults, matching MaskPlace.
         key, buffer_key = random.split(key)
         variables, opt_state, running_stats, loss = buffered_train_step(
             buffer_key, variables, opt_state, running_stats, optimizer, policy.apply,
@@ -340,9 +238,7 @@ def _train_and_eval_loop(
             extra_illegal_fn=extra_illegal_fn,
         )
 
-        # 2. Real-HPWL eval (only every eval_every iterations - not cheap, so gated explicitly
-        #    here rather than inside _evaluate itself) + log entry (always, to log_path; console
-        #    only every log_every iterations).
+        # 2. Real-HPWL eval (only every eval_every iterations) + log entry (console every log_every).
         real_hpwl = None
         if current_iteration % eval_every == 0:
             real_hpwl, eval_positions = _evaluate(
@@ -363,9 +259,7 @@ def _train_and_eval_loop(
             hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
             Log.info(f"iter {current_iteration:>6}/{total_iterations}  loss={loss:>10.4f}  real_hpwl={hpwl_str}")
 
-        # 3. Checkpoint every iteration (episodes are expensive to recollect on this hardware,
-        #    so a crash should never lose more than one iteration of progress). Independent of
-        #    best_checkpoint_path above - see _save_best_checkpoint's own docstring for why.
+        # 3. Checkpoint every iteration so a crash never loses more than one iteration of progress.
         checkpoint_every_n(checkpoint_path, 1, current_iteration, variables, opt_state, running_stats, key)
 
     return variables
@@ -384,14 +278,8 @@ def main() -> None:
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
-    # 2. n_episodes must be an explicit value here - no in-process "auto" (see this module's own
-    #    docstring, and scripts/subprocess_search.py's, for why): this process reserves its own
-    #    GPU memory just by starting (JAX's default allocator preallocates a large fraction of
-    #    the device as one arena on its first backend touch, which happens at import time via
-    #    placax's own package init), so it can never probe disposable subprocess candidates
-    #    without competing with them for the same physical device. Auto-detection has to be a
-    #    genuinely separate, earlier invocation - one that never imports jax/placax at all - not
-    #    something this script can do to itself no matter how its own internals are reordered.
+    # 2. n_episodes must be an explicit value here - this process reserves its own GPU memory just
+    #    by starting, so it can't probe disposable subprocess candidates without competing with them.
     try:
         n_episodes = int(n_episodes_arg)
     except ValueError:
@@ -415,24 +303,17 @@ def main() -> None:
     extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
     policy = _build_policy(benchmark)
 
-    # 5. Initialize the policy's parameters using one dummy observation, so
-    #    Flax can infer every layer's shape from real input.
+    # 5. Initialize the policy's parameters using one dummy observation, so Flax can infer shapes.
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(init_key, obs0)
     if init_from is not None:
-        # Expects best_checkpoint.bin's own {"variables": ..., "real_hpwl": ...} schema (see
-        # _save_best_checkpoint) - the only file this script itself produces in the shape
-        # --init_from is meant to consume.
+        # Expects best_checkpoint.bin's own {"variables": ..., "real_hpwl": ...} schema.
         variables = load_checkpoint({"variables": variables, "real_hpwl": jnp.array(0.0)}, init_from)["variables"]
         Log.info(f"warm-starting initial weights from {init_from}")
 
-    # 6. Set up the checkpoint location; if one already exists, training below will resume from
-    #    it instead of starting over - unless --no_checkpoint was given (don't read or write any
-    #    state at all) or --init_from was given (explicit warm-start wins over whatever's already
-    #    on disk; resume=False below still overwrites checkpoint_path with this run's own progress
-    #    going forward, it just won't be *loaded* from).
+    # 6. Set up the checkpoint location; training resumes from it unless --no_checkpoint or --init_from was given.
     resume = init_from is None
     if no_checkpoint:
         checkpoint_path = log_path = best_checkpoint_path = None

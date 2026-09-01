@@ -1,5 +1,4 @@
-"""Static images of a macro placement, rendering each macro as a colored rectangle
-rather than placax.extras.render's single-bit occupancy canvas."""
+"""Static images of a macro placement, rendering each macro as a colored rectangle."""
 import pathlib
 
 import matplotlib.pyplot as plt
@@ -8,10 +7,7 @@ from matplotlib.patches import Rectangle
 
 
 def plot_placement(positions, sizes, grid_x: int, grid_y: int | None = None, ax=None, title: str | None = None):
-    """Draws each placed macro (position[i, 0] >= 0) as a rectangle on a grid_x x grid_y canvas;
-    unplaced macros are skipped. positions/sizes are GRID-unit arrays, e.g. EnvState.positions and
-    a benchmark's sizes_array converted via policy.scale.to_grid_units. No axis/ticks are drawn -
-    the canvas fills the Axes edge to edge. Returns the Axes used."""
+    """Draws each placed macro as a rectangle on a grid_x x grid_y canvas, skipping unplaced ones; returns the Axes."""
     positions = np.asarray(positions)
     sizes = np.asarray(sizes)
     grid_y = grid_x if grid_y is None else grid_y
@@ -41,8 +37,7 @@ def plot_placement(positions, sizes, grid_x: int, grid_y: int | None = None, ax=
 def save_placement_image(
     positions, sizes, grid_x: int, grid_y: int | None, save_path: pathlib.Path | str, title: str | None = None
 ) -> None:
-    """plot_placement, saved to save_path as a standalone figure with no surrounding margin -
-    the canvas fills the whole image."""
+    """plot_placement, saved to save_path as a standalone figure with no surrounding margin."""
     fig, ax = plt.subplots(figsize=(5, 5))
     fig.subplots_adjust(left=0, right=1, bottom=0, top=1 if title is None else 0.92)
     plot_placement(positions, sizes, grid_x, grid_y, ax=ax, title=title)

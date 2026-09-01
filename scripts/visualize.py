@@ -1,13 +1,4 @@
-"""Generates training-progress and placement visualizations from an already-trained run (a
-training_log.jsonl + checkpoint.bin). Writes PNGs (and, with --gif, a GIF) to --output_dir.
-
-Works with either training script's output:
-  --preset=training   (default) scripts/run_training.py's output, <benchmark_dir>/output/
-  --preset=maskplace  scripts/run_maskplace.py's output, <benchmark_dir>/output_maskplace/
-                       (also accepts --macro_budget, matching how that run was trained)
-
-Usage: python -m scripts.visualize --benchmark_dir=benchmarks/adaptec1 [--preset=maskplace] [--gif]
-"""
+"""Generates training-progress and placement visualizations from an already-trained run."""
 import argparse
 import functools
 import pathlib
@@ -38,8 +29,7 @@ def _training_setup(benchmark_dir: pathlib.Path, _macro_budget: int | None):
     """scripts/run_training.py's own setup: full netlist, plain CNN policy/observation."""
     benchmark = Benchmark.load(benchmark_dir)
     policy = CNNActorCritic()
-    # Bare `observation` defaults to cell_size=1.0 - bind the benchmark's real cell_size the same
-    # way scripts/run_training.py itself now does, so the canvas render matches its grid scale.
+    # Bare `observation` defaults to cell_size=1.0 - bind the benchmark's real cell_size instead.
     state_fn: StateFn = functools.partial(observation, cell_size=benchmark.cell_size)
     extra_illegal_fn: ExtraIllegalFn | None = None
     optimizer = optax.adam(3e-4)
@@ -47,9 +37,7 @@ def _training_setup(benchmark_dir: pathlib.Path, _macro_budget: int | None):
 
 
 def _maskplace_setup(benchmark_dir: pathlib.Path, macro_budget: int | None):
-    """scripts/run_maskplace.py's own setup: macro-budget-truncated netlist, wiremask
-    observation, ResNet coarse/fine policy - imported lazily so --preset=training never
-    needs scripts.run_maskplace's extra dependencies (e.g. flaxmodels)."""
+    """scripts/run_maskplace.py's own setup, imported lazily so --preset=training skips its extra deps."""
     from scripts.run_maskplace import (
         WIREMASK_MARGIN,
         _build_policy,
@@ -112,8 +100,7 @@ def main() -> None:
     plot_training_curves(log_path, save_path=curves_path)
     Log.info(f"wrote {curves_path}")
 
-    # 2. Everything else needs the trained policy: rebuild the same setup the
-    #    matching training script used (--preset), then load its weights.
+    # 2. Everything else needs the trained policy: rebuild the matching setup (--preset), then load weights.
     benchmark, policy, state_fn, extra_illegal_fn, optimizer = setup_fn(benchmark_dir, macro_budget)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(random.PRNGKey(0), obs0)
@@ -135,9 +122,7 @@ def main() -> None:
     )
     Log.info(f"wrote {placement_path}")
 
-    # obs0 (nothing placed yet) makes for a flat, uninformative wiremask panel - use a
-    # partway-through-the-rollout state instead, where both the canvas and the per-cell
-    # cost channels actually vary.
+    # obs0 makes for a flat, uninformative wiremask panel - use a partway-through-the-rollout state instead.
     masks_path = output_dir / "observation_channels.png"
     mid_step = len(history) // 2
     mid_state = EnvState(positions=jnp.asarray(history[mid_step]), step=mid_step)

@@ -1,5 +1,4 @@
-"""Panels of what the policy sees at one step: the placement canvas, plus any per-cell cost
-channels (e.g. a wiremask) the observation dict happens to carry, side by side."""
+"""Panels of what the policy sees at one step: the placement canvas plus any per-cell cost channels."""
 import pathlib
 
 import matplotlib.pyplot as plt
@@ -7,8 +6,7 @@ import numpy as np
 
 
 def plot_observation_channels(obs: dict, save_path: pathlib.Path | str | None = None):
-    """Plots obs["canvas"] plus, if present, obs["wiremask"]/obs["lookahead_wiremasks"]
-    (see policy.observation.make_wiremask_observation) as heatmap panels. Returns the Figure."""
+    """Plots obs["canvas"] plus any wiremask/lookahead_wiremasks channels as heatmap panels; returns the Figure."""
     panels = [("canvas", np.asarray(obs["canvas"]).T)]
     if "wiremask" in obs:
         panels.append(("wiremask", np.asarray(obs["wiremask"]).T))

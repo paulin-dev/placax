@@ -21,18 +21,7 @@ def apply_gradient_update(
     returns: jax.Array,
     ppo_config: PPOConfig = PPOConfig(),
 ):
-    """One gradient step: optionally normalizes advantages/returns (per ppo_config), then applies
-    loss_fn's gradient via optimizer. Only variables["params"] is trained; any other collection
-    (e.g. Flax BatchNorm's batch_stats) is passed through unchanged - gradient-descending a running
-    statistic isn't meaningful, and can drive a variance negative, NaN-ing every forward pass from
-    then on.
-
-    Both normalizations are standard PPO tricks, but neither is in MaskPlace's own reference PPO2.py
-    (it trains on the raw advantage/return, scaled only by its fixed reward/200 divisor) - ppo_config
-    lets a caller matching that reference (see run_maskplace.py's maskplace_ppo_config) disable them.
-    They're also actively dangerous with a small buffer and no entropy bonus: if a batch's episodes
-    happen to be low-variance, dividing by advantages.std() + eps amplifies ordinary floating-point-
-    scale noise into huge gradient spikes instead of failing safely."""
+    """One gradient step: optionally normalizes advantages/returns (per ppo_config), then applies loss_fn's gradient via optimizer, training only variables["params"]."""
     # 1. Fold this batch's returns into the running mean/var, then optionally use the updated stats
     #    to standardize returns - keeps the value loss's scale stable as training progresses.
     new_running_stats = update_running_stats(running_stats, returns)

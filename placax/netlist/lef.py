@@ -26,8 +26,7 @@ def _parse_macro_pins(macro_block: str, width: float, height: float) -> dict[str
         rect_match = _RECT_RE.search(pin_block)
         if not rect_match:
             continue
-        # Convert the pin's absolute rectangle to its center, then to an
-        # offset from the macro's center (which sits at width/2, height/2).
+        # Convert the pin's rectangle to its center, offset from the macro's center.
         x1, y1, x2, y2 = (float(v) for v in rect_match.groups())
         pins[pin_name] = (
             (x1 + x2) / 2 - width / 2,
@@ -39,7 +38,7 @@ def _parse_macro_pins(macro_block: str, width: float, height: float) -> dict[str
 def parse_lef_pin_offsets(lef_path: pathlib.Path) -> PinOffsets:
     """Returns {macro_name: {pin_name: (x_offset, y_offset)}} relative to the macro center."""
     result: PinOffsets = {}
-    # Each MACRO block needs its own size (to find its center) before its pins can be offset from it.
+    # Each MACRO block needs its own size before its pins can be offset from it.
     for macro_name, block in _MACRO_BLOCK_RE.findall(lef_path.read_text()):
         size_match = _SIZE_IN_BLOCK_RE.search(block)
         if not size_match:

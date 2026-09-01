@@ -10,10 +10,7 @@ def _filter_nets_to_kept_macros(nets: Nets, kept: set[str]) -> Nets:
 
 
 def freeze_order(order: list[str]) -> OrderFn:
-    """Wraps an already-decided macro order as an OrderFn that ignores whatever (macro_sizes, nets)
-    it's called with and always returns `order` - lets a caller hand a precomputed sequence to
-    anything expecting an OrderFn (e.g. build_padded_arrays), instead of that code re-deriving its
-    own order and potentially getting a different answer. See truncate_to_budget's return value."""
+    """Wraps an already-decided macro order as an OrderFn that ignores its arguments and always returns `order`."""
 
     def fixed(_macro_sizes: SizeMap, _nets: Nets) -> list[str]:
         return order
@@ -24,14 +21,7 @@ def freeze_order(order: list[str]) -> OrderFn:
 def truncate_to_budget(
     macro_sizes: SizeMap, nets: Nets, budget: int, order_fn: OrderFn = alphabetical_order
 ) -> tuple[SizeMap, Nets, list[str]]:
-    """Keeps only the first `budget` macros per order_fn(macro_sizes, nets), pruning nets accordingly.
-
-    Also returns that same top-`budget` order, since order_fn ran here on the FULL (pre-truncation)
-    netlist - an order_fn sensitive to net structure (e.g. connectivity_order) can rank differently
-    if re-run on the now-truncated netlist. A caller that goes on to build_padded_arrays() should
-    wrap this returned order with freeze_order() and use that, not the original order_fn, so the
-    truncated netlist's final macro sequence matches what was actually decided here rather than a
-    second, independent ranking of the smaller netlist."""
+    """Keeps only the first `budget` macros per order_fn(macro_sizes, nets), pruning nets accordingly, and returns that order."""
     # Rank all macros once, take the prefix, then drop everything else (macros and their pins).
     kept_names = order_fn(macro_sizes, nets)[:budget]
     kept_sizes = {name: macro_sizes[name] for name in kept_names}

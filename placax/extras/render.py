@@ -21,7 +21,6 @@ def render(positions: jax.Array, sizes: jax.Array, grid_x: int, grid_y: int | No
         in_y = (ys >= y) & (ys < y + h)
         return (in_x[:, None] & in_y[None, :]) & (x >= 0)
 
-    # Compute every macro's footprint at once, then flatten to one canvas
-    # (a cell is covered if any macro's footprint lands on it).
+    # Compute every macro's footprint at once, then flatten to one canvas (any footprint covers the cell).
     footprints = jax.vmap(footprint_of)(positions, sizes)
     return footprints.any(axis=0)

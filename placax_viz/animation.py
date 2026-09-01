@@ -1,5 +1,4 @@
-"""Animated GIF of a placement rollout building up macro by macro - MaskPlace's own README
-"Placement" gif, built from placax_viz.rollout.collect_placement_history."""
+"""Builds an animated GIF of a placement rollout, macro by macro (MaskPlace's "Placement" gif)."""
 import pathlib
 
 import matplotlib.pyplot as plt
@@ -16,8 +15,7 @@ def save_placement_gif(
     save_path: pathlib.Path | str,
     fps: int = 4,
 ) -> None:
-    """positions_history: one (n_macros, 2) grid-unit positions array per frame (see
-    placax_viz.rollout.collect_placement_history)."""
+    """positions_history: one (n_macros, 2) grid-unit positions array per frame."""
     fig, ax = plt.subplots(figsize=(5, 5))
 
     def draw(frame_idx: int) -> None:

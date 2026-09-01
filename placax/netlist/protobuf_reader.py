@@ -38,8 +38,7 @@ def _macro_pin_entries(pb_text: str) -> list[tuple[str, float, float, str]]:
         type_match = _TYPE_RE.search(block)
         if not type_match or type_match.group(1) != "MACRO_PIN":
             continue
-        # The pin node's own name is what other nodes' input: lists reference,
-        # so we keep it alongside the macro it belongs to and its offset.
+        # Keep the pin node's own name (what other nodes' input: lists reference) alongside its macro/offset.
         pin_name = _NAME_RE.search(block).group(1)
         str_attrs = dict(_STR_ATTR_RE.findall(block))
         float_attrs = dict(_FLOAT_ATTR_RE.findall(block))
@@ -57,18 +56,12 @@ def parse_macro_pins(pb_text: str) -> list[NetPin]:
 
 
 def parse_nets(pb_text: str) -> Nets:
-    """Returns a list of pins per net, built from any node's `input:` references, kept if >= 2 macros.
-
-    A macro can have more than one MACRO_PIN node wired into the same net (multiple physical pins
-    on the same wire) - only the FIRST offset seen for a given (net, macro) pair is kept, same
-    convention as load_bookshelf's parse_nets (see its docstring): one macro-net connection
-    contributes one bounding-box point, not one per physical pin."""
+    """Returns a list of pins per net from each node's `input:` references, kept if >= 2 macros (first offset per macro wins)."""
     pin_lookup = {name: (macro, x, y) for macro, x, y, name in _macro_pin_entries(pb_text)}
 
     nets = []
     for block in _split_nodes(pb_text):
-        # A net is: this node's own name, plus everything it lists as input: -
-        # whichever of those names happen to be MACRO_PIN nodes are this net's pins.
+        # A net is this node's own name plus its input: references; MACRO_PIN ones are its pins.
         hub_name_match = _NAME_RE.search(block)
         referenced = re.findall(r'input:\s*"([^"]+)"', block)
         if hub_name_match:

@@ -31,9 +31,7 @@ def _macro_nets(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[int]]:
 
 
 def _adjacency(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[str]]:
-    """macro name -> set of OTHER macro names it shares at least one net with (a plain graph,
-    not weighted by how many nets/pins connect a pair - two macros sharing 5 nets are exactly as
-    adjacent as two sharing 1)."""
+    """macro name -> set of OTHER macro names it shares at least one net with (unweighted)."""
     adjacency: dict[str, set[str]] = {name: set() for name in macro_sizes}
     for net in nets:
         names = {name for name, _x, _y in net}
@@ -43,16 +41,7 @@ def _adjacency(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[str]]:
 
 
 def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Reproduces MaskPlace's own topology order (place_db.py's get_node_id_to_name_topology):
-    seed with the single highest-degree macro, then repeatedly add whichever remaining macro
-    maximizes (count of DISTINCT already-placed macros it's adjacent to) + degree*1000 + raw
-    area - so degree dominates over connectivity to what's already placed unless area swamps
-    both (real macro areas can run into the millions, same as the reference's own unnormalized
-    formula). "Adjacent" means sharing at least one net at all - a macro with 5 nets to the same
-    already-placed neighbor counts as adjacent to exactly 1 macro, not 5, same as the reference.
-
-    Ties broken by name (ascending) for determinism - the reference breaks ties via hash(name),
-    which is effectively arbitrary (varies with PYTHONHASHSEED) and not worth reproducing."""
+    """Reproduces MaskPlace's topology order: seed with the highest-degree macro, then greedily add the remaining macro maximizing adjacency-to-placed, degree, then area, ties broken by name."""
     if not macro_sizes:
         return []
     degree = _net_degree(nets)

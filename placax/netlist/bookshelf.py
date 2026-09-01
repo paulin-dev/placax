@@ -21,19 +21,9 @@ def parse_nodes(nodes_path: pathlib.Path) -> SizeMap:
 
 
 def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
-    """Returns a list of (macro_name, x_offset, y_offset) pins per net, dropping nets with < 2 macros.
-
-    A macro can appear more than once in one net's pin list (multiple physical pins on the same
-    wire) - only the FIRST offset seen for a given (net, macro) pair is kept, matching both
-    MaskPlace's own reference loader (place_db.py's read_net_file, `if not node_name in
-    net_info[net_name]["nodes"]`) and DREAMPlace's Bookshelf parser (PlaceDB.cpp's
-    add_bookshelf_net, "if a node has multiple pins in the net, only one is kepted"). Keeping every
-    duplicate instead inflates that net's bounding box (HPWL) and any degree-based ordering built
-    from these nets - about 20% of adaptec1's nets have a macro with more than one pin."""
+    """Returns a list of (macro_name, x_offset, y_offset) pins per net, dropping nets with < 2 macros; keeps only the first offset per (net, macro)."""
     nets: Nets = []
-    # macro name -> first-seen (x_offset, y_offset) for the net being read right now; a dict
-    # both dedupes (later pins on an already-seen macro are skipped) and stores the offset in
-    # one structure, instead of a list-plus-parallel-set doing the same job twice.
+    # macro name -> first-seen (x_offset, y_offset) for the net being read right now; dedupes and stores the offset in one structure.
     current: dict[str, tuple[float, float]] = {}
 
     def _flush() -> None:
@@ -41,8 +31,7 @@ def parse_nets(nets_path: pathlib.Path, macro_names: set[str]) -> Nets:
         if len(current) >= 2:
             nets.append([(name, x_off, y_off) for name, (x_off, y_off) in current.items()])
 
-    # Walk the file line by line: a "NetDegree :" line starts a new net, so we
-    # flush the previous one's pins and start collecting again.
+    # Walk the file line by line: a "NetDegree :" line starts a new net, flushing the previous one's pins.
     for line in nets_path.read_text().splitlines():
         if _NET_HEADER_RE.search(line):
             _flush()

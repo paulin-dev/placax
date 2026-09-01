@@ -1,13 +1,4 @@
-"""Two-branch actor-critic mirroring MaskPlace's own network: a fine
-local conv stack over wiremask/legality channels, merged with a coarse
-branch built on an injected ResNet backbone over (canvas, wiremask,
-next-macro wiremask).
-
-The backbone is injected, not baked in, so importing this module never
-requires `placax[resnet]` (only the backbone-building/loading helpers do).
-Needs obs to carry "canvas", "wiremask", "lookahead_wiremasks" (horizon>=2),
-and "lookahead_sizes" (horizon>=2) - pair with
-policy.observation.make_wiremask_observation(..., lookahead=2)."""
+"""Two-branch actor-critic mirroring MaskPlace's network: a fine local conv stack merged with a coarse ResNet-backbone branch."""
 import math
 import pathlib
 
@@ -68,8 +59,7 @@ def _normalize_channel(x: jax.Array) -> jax.Array:
 
 
 def _run_backbone(module: nn.Module, x: jax.Array) -> dict:
-    """A plain function taking the (already-instantiated) backbone module as its first argument,
-    so nn.remat (which only accepts a Module class or such a function) can wrap this specific call."""
+    """A plain function wrapping the backbone call so nn.remat can wrap it."""
     return module(x, train=False)
 
 
@@ -81,31 +71,14 @@ class _FineBranch(nn.Module):
 
     @nn.compact
     def __call__(self, x: jax.Array) -> jax.Array:
-        # Each layer only looks at one cell at a time (1x1 kernel), so this refines per-cell
-        # features without ever mixing in neighboring cells.
+        # Each layer only looks at one cell at a time (1x1 kernel), never mixing in neighbors.
         for _ in range(self.num_layers):
             x = nn.relu(nn.Conv(features=self.features, kernel_size=(1, 1))(x))
         return nn.Conv(features=1, kernel_size=(1, 1))(x)
 
 
 class _CoarseBranch(nn.Module):
-    """Reproduces MaskPlace's own MyCNNCoarse - confirmed against a real torchvision.models.resnet18
-    forward pass (not just reading the code): it globally average-pools the backbone's spatial
-    features down to a single vector via the resnet's own avgpool+flatten (its `self.cnn.fc` is
-    Linear(512, 16*7*7), so `self.cnn(x)` still runs the WHOLE resnet including avgpool before
-    that fc - the 7x7 the deconv chain starts from is a fresh tensor decoded from that one
-    pooled vector, not the resnet's own spatial layer4 feature map). This throws away all of the
-    backbone's own spatial resolution on purpose (the reference's design, not an oversight the
-    fix should route around) and instead LEARNS to reconstruct a small spatial seed from that
-    global summary, then upsamples it back to the action grid via a stack of learned transposed
-    convolutions - not a fixed, non-trainable resize.
-
-    MaskPlace's own deconv chain is exactly 5 stages (16->8->4->2->1->1 channels) because its
-    grid is always 224 = seed * 2**5; this generalizes that same seed-and-decode idea to any
-    grid size the caller asks for, ending with an exact resize (only ever a same-or-larger,
-    integer-doubling step away from the target, unlike the old approach's arbitrary jump straight
-    from backbone resolution to grid resolution) so a non-power-of-two grid still comes out at
-    exactly (grid_x, grid_y)."""
+    """Reproduces MaskPlace's MyCNNCoarse: pools backbone features to a vector, decodes a small seed, then upsamples to any (grid_x, grid_y) via learned transposed convolutions."""
 
     grid_x: int
     grid_y: int
@@ -115,31 +88,24 @@ class _CoarseBranch(nn.Module):
 
     @nn.compact
     def __call__(self, backbone_features: jax.Array) -> jax.Array:
-        # 1. Global-average-pool the backbone's spatial feature map into one vector - the same
-        #    information bottleneck the reference's avgpool+flatten enforces.
+        # 1. Global-average-pool the backbone's spatial feature map into one vector.
         pooled = backbone_features.mean(axis=(0, 1))
         # 2. Learn a small spatial seed from that pooled vector (the reference's fc(512 -> 16*7*7)).
         seed_flat = nn.Dense(features=self.seed_features * self.seed * self.seed)(pooled)
         x = seed_flat.reshape(self.seed, self.seed, self.seed_features)
-        # 3. Learned transposed-conv upsampling, doubling spatial size each stage - as many
-        #    stages as it takes to reach or pass the larger grid dimension from the seed.
+        # 3. Learned transposed-conv upsampling, doubling spatial size each stage until past target.
         n_doublings = max(1, math.ceil(math.log2(max(self.grid_x, self.grid_y) / self.seed)))
         for i in range(n_doublings):
             out_features = self.channel_schedule[min(i, len(self.channel_schedule) - 1)]
             x = nn.ConvTranspose(features=out_features, kernel_size=(3, 3), strides=(2, 2), padding="SAME")(x)
             if i < n_doublings - 1:
                 x = nn.relu(x)
-        # 4. The doubling stages only land exactly on (grid_x, grid_y) when both are seed * 2**n
-        #    (e.g. MaskPlace's own 224 = 7*2**5) - resize to the exact target so any grid size works.
+        # 4. Resize to the exact target so any grid size works, not just powers of two from seed.
         return jax.image.resize(x, (self.grid_x, self.grid_y, x.shape[-1]), method="bilinear")
 
 
 class ResNetCoarseFineActorCritic(nn.Module):
-    """Two-branch actor-critic: a fine local branch plus a coarse ResNet-backbone branch, merged into one policy head.
-
-    Note: the backbone always runs in eval mode (train=False) because the policy is applied to
-    one observation at a time, and BatchNorm in train mode would see a batch of 1. Eval mode
-    (frozen running stats) is still fully differentiable, so backbone weights still get gradients."""
+    """Two-branch actor-critic: a fine local branch plus a coarse ResNet-backbone branch, merged into one policy head. Backbone always runs in eval mode since observations are processed one at a time."""
 
     resnet_backbone: nn.Module
     params: EnvParams
@@ -155,7 +121,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
         """Returns normalized (current, next) lookahead wiremasks, falling back to `current` if horizon==1."""
         wiremasks = obs["lookahead_wiremasks"]  # (horizon, grid_x, grid_y), horizon>=1
         current = _normalize_channel(wiremasks[0])
-        # If there's no real "next" slice (horizon==1), just reuse current so shapes stay consistent.
+        # Reuse current as "next" when there's no real next slice (horizon==1).
         next_ = _normalize_channel(wiremasks[1] if wiremasks.shape[0] > 1 else wiremasks[0])
         return current, next_
 
@@ -172,12 +138,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
         """Runs the frozen-BatchNorm ResNet backbone, then the coarse-branch projection/resize."""
         # Stack the 3 input channels and add a batch dim of 1 (the backbone expects a batch axis).
         coarse_input = jnp.stack([canvas, wiremask_cur, wiremask_next], axis=-1)[None]
-        # Gradient checkpointing: only affects a differentiated (backward) call - the PPO
-        # minibatch update's batch=64 backward pass through this backbone at 224x224 is a large,
-        # fixed memory cost (independent of n_episodes), since without this every layer's forward
-        # activations must be kept alive for the whole backward pass. This trades that memory for
-        # recomputing the forward pass during backprop instead; the plain forward-only rollout
-        # collection path (never differentiated) is unaffected either way.
+        # Gradient checkpointing: trades memory for recompute on the backward pass only.
         backbone_out = nn.remat(_run_backbone)(self.resnet_backbone, coarse_input)
         backbone_features = backbone_out[self.resnet_feature_key][0]  # drop the batch dim again
         # Pool the backbone's feature map, decode a small seed, upsample to the action grid.
@@ -188,10 +149,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
     def _critic_value(self, obs: dict, fine_logits: jax.Array, coarse_features: jax.Array) -> jax.Array:
         """Computes the value estimate; "step_embedding" style shares zero params with the actor."""
         if self.critic_style == "step_embedding":
-            # MaskPlace's own design: the critic gets its own small MLP over just the step index,
-            # sharing no parameters with the actor. "critic_" prefix lets split_optimizer isolate it.
-            # Two hidden Dense+ReLU stages, matching the reference's Critic exactly (PPO2.py:
-            # pos_emb -> fc1(64->64)+relu -> fc2(64->64)+relu -> state_value(64->1)).
+            # MaskPlace's own design: a small MLP over just the step index, sharing no params with the actor.
             emb = nn.Embed(num_embeddings=self.max_episode_macros, features=64, name="critic_step_embed")(obs["step"])
             hidden = nn.relu(nn.Dense(features=64, name="critic_hidden1")(emb))
             hidden = nn.relu(nn.Dense(features=64, name="critic_hidden2")(hidden))

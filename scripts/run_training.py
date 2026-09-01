@@ -1,22 +1,4 @@
-"""Runs (or resumes) extended training on a real benchmark, checkpointing
-and evaluating real HPWL along the way.
-
-Usage: python -m scripts.run_training --benchmark_dir=benchmarks/adaptec1 --n_iterations=100
-
-To find the largest --n_envs your hardware supports, use scripts/subprocess_search.py
-*separately first* (not a flag of this script - see that module's docstring for why: this
-process's own GPU memory reservation, just from starting up, would otherwise compete with the
-disposable subprocesses being probed):
-
-    python -m scripts.subprocess_search scripts.run_training '--n_envs=[1,2,4,8,16]' \\
-        --benchmark_dir=benchmarks/adaptec1 --eval_every=1 --n_iterations=4 --no_checkpoint
-
---eval_every=1/--n_iterations=4 there deliberately don't match a real run's --eval_every=10: the
-eval rollout is a separately-compiled executable with its own memory footprint, so a probe needs
-to cross at least one eval boundary (plus a couple more iterations, to catch ordinary GPU
-allocator fragmentation drift) to be representative - forcing it every iteration reaches that
-footprint by iteration 1 instead of iteration 10, so 4 iterations suffice instead of 13.
-"""
+"""Runs (or resumes) extended training on a real benchmark, checkpointing and evaluating real HPWL along the way."""
 import argparse
 import functools
 import pathlib
@@ -111,11 +93,7 @@ def main() -> None:
         Log.info(f"writing a placement snapshot every {args.eval_every} iterations to {placement_images_dir}")
     Log.info(f"running {args.n_iterations} more iterations (n_envs={args.n_envs}, mode={args.mode or 'auto'}) ...")
 
-    # resumable_train's own default state_fn (plain observation()) would silently fall back to
-    # cell_size=1.0 on every actual rollout/eval call - observation() only gets the real
-    # cell_size where it's passed explicitly, and resumable_train never does that on its own.
-    # Binding it here once (the same pattern run_maskplace.py's _build_state_fn uses) is what
-    # keeps the canvas render at the correct grid scale for this benchmark.
+    # resumable_train's default state_fn would silently fall back to cell_size=1.0; bind the real one here.
     state_fn = functools.partial(observation, cell_size=benchmark.cell_size)
 
     _final_variables, _log = resumable_train(

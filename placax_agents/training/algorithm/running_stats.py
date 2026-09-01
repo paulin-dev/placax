@@ -11,8 +11,7 @@ class RunningStats:
 
 
 def init_running_stats() -> RunningStats:
-    # count starts near-zero, not exactly zero, to avoid div-by-zero on
-    # the very first update.
+    # count starts near-zero, not exactly zero, to avoid div-by-zero on the very first update.
     return RunningStats(mean=jnp.array(0.0), var=jnp.array(1.0), count=jnp.array(1e-4))
 
 

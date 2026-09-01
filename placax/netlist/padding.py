@@ -13,8 +13,7 @@ def _pack_groups(
     groups: list[list[tuple[int, float, float]]], n_groups: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Pads per-group (index, x_offset, y_offset) entries into aligned (idx, offset, valid) arrays."""
-    # Every group must end up the same length (max_len) so they form a rectangular
-    # array; groups shorter than that are padded with zeros and marked invalid.
+    # Every group is padded to max_len with zeros and marked invalid, forming a rectangular array.
     max_len = max((len(g) for g in groups), default=0)
     idx = np.zeros((n_groups, max_len), dtype=np.int32)
     offset = np.zeros((n_groups, max_len, 2), dtype=np.float32)
@@ -52,8 +51,7 @@ def build_padded_arrays(macro_sizes: SizeMap, nets: Nets, order_fn: OrderFn = al
     net_groups = _remap_nets_to_indices(nets, name_to_idx)
     pin_idx, pin_offset, valid_mask = _pack_groups(net_groups, len(nets))
 
-    # 3. Everything is built with NumPy above and converted to JAX arrays only
-    #    once here - incremental .at[].set() on JAX arrays would be far too slow.
+    # 3. Everything is built with NumPy and converted to JAX arrays only once here.
     return name_to_idx, sizes_array, jnp.array(pin_idx), jnp.array(pin_offset), jnp.array(valid_mask)
 
 
@@ -70,8 +68,7 @@ def build_macro_net_index(
     macro_ids = pin_idx_np.ravel()[valid_flat]
     offsets = offset_np.reshape(-1, 2)[valid_flat]
 
-    # 2. Invert the net->macro relationship into macro->nets: for each macro,
-    #    collect every (net, offset) pair it participates in.
+    # 2. Invert the net->macro relationship: for each macro, collect its (net, offset) pairs.
     participations: list[list[tuple[int, float, float]]] = [[] for _ in range(n_macros)]
     for net_idx, macro_idx, x_off, y_off in zip(
         net_ids.tolist(), macro_ids.tolist(), offsets[:, 0].tolist(), offsets[:, 1].tolist()

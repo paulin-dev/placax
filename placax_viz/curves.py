@@ -12,9 +12,7 @@ def load_training_log(log_path: pathlib.Path) -> list[dict]:
 
 
 def plot_training_curves(log: list[dict] | pathlib.Path | str, save_path: pathlib.Path | str | None = None):
-    """Plots PPO loss (every iteration) alongside real HPWL (only logged at eval iterations,
-    see resumable_train's eval_every) side by side. Accepts either a loaded log or a path to
-    training_log.jsonl. Returns the Figure; also saves it to save_path if given."""
+    """Plots PPO loss alongside real HPWL side by side; returns the Figure and optionally saves it."""
     if isinstance(log, (str, pathlib.Path)):
         log = load_training_log(pathlib.Path(log))
 

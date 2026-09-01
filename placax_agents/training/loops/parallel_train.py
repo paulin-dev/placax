@@ -102,8 +102,7 @@ def train_parallel(
 
     losses = []
     for i in range(n_iterations):
-        # n_envs fresh keys, one per parallel episode, then one jitted step covering
-        # rollout + GAE + gradient update for all of them.
+        # n_envs fresh keys, one jitted step covering rollout + GAE + gradient update for all of them.
         key, step_keys = make_step_input(key, n_envs)
         variables, opt_state, running_stats, loss, _ = _jitted_parallel_train_step(
             step_keys, variables, opt_state, running_stats, optimizer, policy_apply_fn,

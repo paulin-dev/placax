@@ -1,8 +1,4 @@
-"""Loads a trained checkpoint and runs one greedy placement pass - no training, just inference.
-
-Usage: python -m scripts.place_once --benchmark_dir=benchmarks/adaptec1 \\
-           --checkpoint=benchmarks/adaptec1/output_maskplace/checkpoint.bin
-"""
+"""Loads a trained checkpoint and runs one greedy placement pass - no training, just inference."""
 import argparse
 import pathlib
 import sys
@@ -48,17 +44,14 @@ def main() -> None:
         Log.error(f"'{checkpoint_path}' not found - train first with scripts/run_maskplace.py.")
         sys.exit(1)
 
-    # 1. Load the same netlist/observation/policy setup the checkpoint was trained with -
-    #    mismatched macro_budget or benchmark_dir would silently load into the wrong shapes.
+    # 1. Load the same netlist/observation/policy setup the checkpoint was trained with.
     Log.info(f"loading {benchmark_dir} (macro_budget={macro_budget}) ...")
     benchmark = _load_benchmark(benchmark_dir, macro_budget)
     state_fn = _build_state_fn(benchmark)
     extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
     policy = _build_policy(benchmark)
 
-    # 2. Build a template pytree (weights + optimizer + running-stats shapes) matching what
-    #    was saved, then deserialize the checkpoint into it - only variables actually matters
-    #    for inference, opt_state/running_stats/key are along for the ride.
+    # 2. Build a template pytree matching what was saved, then deserialize the checkpoint into it.
     key = random.PRNGKey(0)
     key, init_key = random.split(key)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
