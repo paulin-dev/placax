@@ -224,3 +224,9 @@ __marimo__/
 
 # Claude
 .claude/
+
+# Benchmark run outputs (checkpoints, training logs, generated placement images) - keeps
+# already-committed benchmark data (.nodes/.nets/.pl/.scl/.wts/.aux, netlist.pb.txt) tracked
+# as-is, since gitignore only affects untracked files, while stopping every training/eval
+# run's own output* directory from ever being added.
+benchmarks/*/output*/
