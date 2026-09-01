@@ -22,7 +22,11 @@ def legal_action_logits(
     # Safety valve: relax to just physical constraints if the extra rule leaves zero legal cells.
     illegal = jnp.where(illegal.all(), base_illegal, illegal)
     illegal = jnp.where(illegal.all(), False, illegal)
-    return jnp.where(illegal, -jnp.inf, logits)
+    # Widen to float64 here, matching MaskPlace's own `x.double()` right before its softmax:
+    # the CNN itself stays float32, but softmax/log_softmax downstream of this function need
+    # the extra dynamic range so growing logit spread doesn't fully saturate (and zero out
+    # PPO's gradient) as early in training as float32 alone would allow.
+    return jnp.where(illegal, -jnp.inf, logits.astype(jnp.float64))
 
 
 def make_wiremask_quality_illegal(
