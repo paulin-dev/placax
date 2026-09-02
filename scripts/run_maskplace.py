@@ -6,7 +6,7 @@ import sys
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
 from placax.log import Log
-from placax.netlist.order import connectivity_order
+from placax.netlist.order import connectivity_order_for
 from placax.netlist.padding import build_macro_net_index
 from placax_agents.benchmark import Benchmark
 from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
@@ -49,19 +49,23 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults, but with advantage/return normalization kept ON
-    and a small entropy bonus where upstream uses none.
+    """PPOConfig matching MaskPlace's own PPO2.py defaults exactly: entropy_coef=0.0 (no entropy bonus)
+    and raw, unnormalized advantages/returns (PPO2.py's `advantage = (target_v - critic_net_output).detach()`
+    and `value_loss = F.smooth_l1_loss(critic_output, target_v)` use neither).
 
-    entropy_coef=0.0 is MaskPlace's own literal default, but with nothing else bounding actor-logit
-    magnitude (single fixed deterministic netlist -> consistent gradient direction every step -> Adam's
-    updates accumulate roughly linearly), it drives the masked logits' spread unbounded until softmax
-    saturates completely (exact 0/1 probabilities, exact zero gradient - confirmed by direct checkpoint
-    inspection: saturated by iteration ~4 in float32 at a ~1e8-1e9 logit spread, and again by iteration
-    ~6 even with jax_enable_x64 (see placax/_device.py), at a ~1e10-1e11 spread - x64 only bought more
-    headroom before hitting the same wall, not immunity from it). A small entropy bonus keeps probabilities
-    off the 0/1 boundary so this can't happen; PPOConfig's own general default (0.01) is used here too.
+    Note: entropy_coef=0.0 here has a known consequence in this JAX/float32 implementation - with nothing
+    bounding actor-logit magnitude (single fixed deterministic netlist -> consistent gradient direction
+    every step -> Adam's updates accumulate roughly linearly), logits saturate completely (exact 0/1
+    probabilities, exact zero gradient) by iteration ~4 in float32 (confirmed by direct checkpoint
+    inspection), and again by iteration ~6 even with jax_enable_x64 (see placax/_device.py) - x64 only
+    buys more headroom before hitting the same wall, not immunity from it. This literal-MaskPlace config
+    is kept for faithful comparison; PPOConfig's own general default (entropy_coef=0.01, normalization ON)
+    avoids the saturation and is what other configs in this codebase should keep using.
     """
-    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.01, value_loss_fn=huber_value_loss)
+    return PPOConfig(
+        gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss,
+        normalize_advantages=False, normalize_returns=False,
+    )
 
 
 def maskplace_optimizer(
@@ -164,12 +168,26 @@ def _maskplace_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_ar
     )
 
 
+def _maskplace_connectivity_weights(benchmark_name: str) -> tuple[float, float]:
+    """(candidate_weight, degree_weight) for connectivity_order, per MaskPlace's own
+    get_node_id_to_name_topology: it scales `candidates*W1 + node_net_num*W2 + area` differently for
+    "ariane" (W1=30000, W2=1000) and "bigblue3" (W1=1, W2=100000) than everything else (W1=1, W2=1000).
+    Matched by substring so directory names like "ariane133" still pick up the right override."""
+    name = benchmark_name.lower()
+    if "ariane" in name:
+        return 30000.0, 1000.0
+    if "bigblue3" in name:
+        return 1.0, 100000.0
+    return 1.0, 1000.0
+
+
 def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
     """Connectivity order, macro budget, dense reward - loaded once, shared everywhere below."""
+    candidate_weight, degree_weight = _maskplace_connectivity_weights(benchmark_dir.name)
     return Benchmark.load(
         benchmark_dir,
         grid=224,  # MaskPlace's own grid resolution
-        order_fn=connectivity_order,
+        order_fn=connectivity_order_for(candidate_weight, degree_weight),
         macro_budget=macro_budget,
         make_reward_fn=_maskplace_reward_fn,
     )

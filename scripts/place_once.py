@@ -6,7 +6,6 @@ import sys
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
 from placax.log import Log
-from placax.netlist.order import connectivity_order
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.policy.scale import to_real_centers
 from placax_agents.training.loops.common import open_train_state

@@ -1,5 +1,5 @@
 """Pluggable OrderFns deciding what sequence macros get placed in, swappable via build_padded_arrays(order_fn=...)."""
-from placax.types import Nets, SizeMap
+from placax.types import Nets, OrderFn, SizeMap
 
 
 def alphabetical_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
@@ -40,8 +40,17 @@ def _adjacency(macro_sizes: SizeMap, nets: Nets) -> dict[str, set[str]]:
     return adjacency
 
 
-def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
-    """Reproduces MaskPlace's topology order: seed with the highest-degree macro, then greedily add the remaining macro maximizing adjacency-to-placed, degree, then area, ties broken by name."""
+def connectivity_order(
+    macro_sizes: SizeMap, nets: Nets, candidate_weight: float = 1.0, degree_weight: float = 1000.0
+) -> list[str]:
+    """Reproduces MaskPlace's topology order: seed with the highest-degree macro, then greedily add the
+    remaining macro maximizing `candidates*candidate_weight + degree*degree_weight + area`
+    (candidates = count of already-placed macros it's adjacent to), ties broken by name.
+
+    candidate_weight/degree_weight default to MaskPlace's own weights for most benchmarks; MaskPlace
+    itself overrides these per-benchmark (e.g. "ariane" uses candidate_weight=30000, "bigblue3" uses
+    degree_weight=100000) - pass those explicitly (e.g. via connectivity_order_for) when reproducing
+    a specific benchmark's ordering."""
     if not macro_sizes:
         return []
     degree = _net_degree(nets)
@@ -64,7 +73,7 @@ def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
                     candidates[neighbor] = candidates.get(neighbor, 0) + 1
 
         def sort_key(name: str) -> tuple[float, str]:
-            score = candidates.get(name, 0) + degree.get(name, 0) * 1000 + area[name]
+            score = candidates.get(name, 0) * candidate_weight + degree.get(name, 0) * degree_weight + area[name]
             return (-score, name)
 
         next_name = min(remaining, key=sort_key)
@@ -73,3 +82,14 @@ def connectivity_order(macro_sizes: SizeMap, nets: Nets) -> list[str]:
         placed.add(next_name)
 
     return order
+
+
+def connectivity_order_for(candidate_weight: float = 1.0, degree_weight: float = 1000.0) -> OrderFn:
+    """Binds connectivity_order's weights so the result matches the plain OrderFn signature - pass this
+    to build_padded_arrays/truncate_to_budget instead of the bare connectivity_order when you want
+    specific weights (e.g. a benchmark-specific override) applied consistently."""
+
+    def order_fn(macro_sizes: SizeMap, nets: Nets) -> list[str]:
+        return connectivity_order(macro_sizes, nets, candidate_weight=candidate_weight, degree_weight=degree_weight)
+
+    return order_fn
