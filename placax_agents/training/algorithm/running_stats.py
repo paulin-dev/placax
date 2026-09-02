@@ -12,7 +12,22 @@ class RunningStats:
 
 def init_running_stats() -> RunningStats:
     # count starts near-zero, not exactly zero, to avoid div-by-zero on the very first update.
-    return RunningStats(mean=jnp.array(0.0), var=jnp.array(1.0), count=jnp.array(1e-4))
+    # Explicit float32, not left to inherit whatever JAX_ENABLE_X64 (placax/_device.py) happens to
+    # default untyped literals to: this matches both what these values naturally settle into during
+    # real training anyway (the netlist's sizes_array/padded_pin_offset are deliberately float32 -
+    # placax/netlist/padding.py - and that propagates through returns into update_running_stats
+    # below) and MaskPlace's own PyTorch reference, which never asks for double precision on this
+    # quantity - only its masked-logit-before-softmax upcast does. Being explicit also means this no
+    # longer silently rides on x64's global default-dtype side effect: an implicitly-typed (weak)
+    # float64 default here is what let a resumed run's checkpoint - genuinely float32 on disk, same
+    # reason - collide into an opaque jax.lax.scan carry-dtype mismatch (see
+    # placax_agents/ops/checkpoint.py::load_checkpoint's own dtype-cast fix, kept regardless as a
+    # general safety net for any future dtype-regime drift).
+    return RunningStats(
+        mean=jnp.array(0.0, dtype=jnp.float32),
+        var=jnp.array(1.0, dtype=jnp.float32),
+        count=jnp.array(1e-4, dtype=jnp.float32),
+    )
 
 
 def update_running_stats(stats: RunningStats, x: jnp.ndarray) -> RunningStats:

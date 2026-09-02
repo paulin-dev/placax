@@ -4,6 +4,8 @@ import urllib.request
 
 from flax import serialization
 
+import jax
+
 
 def save_checkpoint(variables, path: pathlib.Path) -> None:
     """Serializes variables to path (creating parent dirs)."""
@@ -13,7 +15,17 @@ def save_checkpoint(variables, path: pathlib.Path) -> None:
 
 def load_checkpoint(variables_template, path: pathlib.Path):
     """Deserializes into variables_template (supplies shape/dtype)."""
-    return serialization.from_bytes(variables_template, path.read_bytes())
+    restored = serialization.from_bytes(variables_template, path.read_bytes())
+    # flax's from_bytes preserves each leaf's ON-DISK dtype rather than the template's (confirmed
+    # empirically - it does NOT honor this function's own "supplies shape/dtype" contract on its
+    # own). Cast back to the template's dtype so a checkpoint saved under a different dtype regime
+    # (e.g. JAX_ENABLE_X64 toggled between the save and this load - see placax/_device.py) can't
+    # silently resume with a leaf dtype that no longer matches what the rest of the process computes,
+    # which surfaces far downstream as an opaque jax.lax.scan carry-type mismatch.
+    return jax.tree_util.tree_map(
+        lambda template_leaf, restored_leaf: restored_leaf.astype(template_leaf.dtype),
+        variables_template, restored,
+    )
 
 
 def load_pretrained_from_url(variables_template, url: str, cache_path: pathlib.Path):

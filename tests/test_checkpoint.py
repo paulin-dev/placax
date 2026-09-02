@@ -32,6 +32,21 @@ def test_save_and_load_checkpoint_round_trip(tmp_path: pathlib.Path) -> None:
     assert not _all_match(fresh_template, loaded)  # confirms it's not just returning the template
 
 
+def test_load_checkpoint_casts_to_the_templates_dtype(tmp_path: pathlib.Path) -> None:
+    # flax's own from_bytes preserves each leaf's ON-DISK dtype rather than the template's (e.g. a
+    # checkpoint saved while JAX_ENABLE_X64 was off, now loaded into a float64 template) - this must
+    # not silently resume with a leaf dtype that no longer matches the rest of the process, which
+    # otherwise only surfaces far downstream as an opaque jax.lax.scan carry-type mismatch.
+    saved = {"mean": jnp.array(0.0, dtype=jnp.float32)}
+    path = tmp_path / "checkpoint.bin"
+    save_checkpoint(saved, path)
+
+    template = {"mean": jnp.array(0.0, dtype=jnp.float64)}
+    loaded = load_checkpoint(template, path)
+
+    assert loaded["mean"].dtype == jnp.float64
+
+
 def test_load_pretrained_from_url_downloads_and_caches(tmp_path: pathlib.Path) -> None:
     policy = CNNActorCritic()
     variables = policy.init(random.PRNGKey(0), {"canvas": jnp.zeros((8, 8), dtype=bool)})

@@ -14,9 +14,12 @@ from jax import random
 
 def _toy_setup():
     params = EnvParams(grid=8, n_macros=4)
-    sizes_array = jnp.array([[2.0, 2.0], [1.0, 1.0], [2.0, 1.0], [1.0, 2.0]])
+    # float32, matching placax/netlist/padding.py's real (deliberately float32) sizes_array/
+    # padded_pin_offset - not left to default to float64 under JAX_ENABLE_X64 like a real benchmark
+    # never would, since that silently hides any float32/float64 interaction real training hits.
+    sizes_array = jnp.array([[2.0, 2.0], [1.0, 1.0], [2.0, 1.0], [1.0, 2.0]], dtype=jnp.float32)
     padded_pin_idx = jnp.array([[0, 1]])
-    padded_pin_offset = jnp.zeros((1, 2, 2))
+    padded_pin_offset = jnp.zeros((1, 2, 2), dtype=jnp.float32)
     valid_mask = jnp.array([[True, True]])
     reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
     return params, sizes_array, reward_fn, padded_pin_idx, padded_pin_offset, valid_mask
