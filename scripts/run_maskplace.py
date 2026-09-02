@@ -80,12 +80,19 @@ def maskplace_optimizer(
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None]:
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None, int, int]:
     """Parses named --flag=value CLI args into the run configuration tuple."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
         "--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"),
         help="Path to a downloaded benchmark directory (default: benchmarks/adaptec1).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42,
+        help="RNG seed for policy init and rollout sampling (default: 42, MaskPlace's own --seed "
+             "default). MaskPlace itself reports mean+-std across several seeds per benchmark, not a "
+             "single run - vary this to reproduce that spread, or to check whether a given run's "
+             "outcome is representative or just that seed's luck.",
     )
     parser.add_argument(
         "--n_iterations", type=int, default=100,
@@ -155,7 +162,7 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
         args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
-        args.init_from, args.patience,
+        args.init_from, args.patience, args.seed,
     )
 
 
@@ -330,7 +337,7 @@ def main() -> None:
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
     (
         benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
-        want_placement_images, placement_images_dir_arg, init_from, patience,
+        want_placement_images, placement_images_dir_arg, init_from, patience, seed,
     ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -362,7 +369,7 @@ def main() -> None:
     policy = _build_policy(benchmark)
 
     # 5. Initialize the policy's parameters using one dummy observation, so Flax can infer shapes.
-    key = random.PRNGKey(0)
+    key = random.PRNGKey(seed)
     key, init_key = random.split(key)
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables = policy.init(init_key, obs0)
