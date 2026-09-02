@@ -85,10 +85,9 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
     )
     parser.add_argument(
         "--n_iterations", type=int, default=100,
-        help="Number of buffered-PPO update cycles to run (default: 100) - additional cycles on "
-             "top of wherever a resumed checkpoint left off, e.g. --n_iterations=300 resumed from "
-             "iteration 100 trains 200 more, reaching iteration 400 total (shown correctly in the "
-             "progress line's iter N/400, not the misleading iter N/300 an earlier version showed).",
+        help="Target TOTAL buffered-PPO update cycle to train to (default: 100), not an additional "
+             "count - e.g. --n_iterations=300 resumed from iteration 100 trains 200 more to reach "
+             "300 total; resuming at or past --n_iterations runs zero further iterations.",
     )
     parser.add_argument(
         "--macro_budget", type=str, default=str(MASKPLACE_MACRO_BUDGET),
@@ -231,15 +230,22 @@ def _train_and_eval_loop(
     placement_images_dir: pathlib.Path | None = None, best_checkpoint_path: pathlib.Path | None = None,
     resume: bool = True, patience: int = 0,
 ):
-    """Runs n_iterations more PPO update cycles, resuming from checkpoint_path unless resume=False, with periodic eval/logging/checkpointing. Stops early if patience>0 and real_hpwl hasn't beaten its best in that many consecutive evals."""
+    """Trains up to iteration n_iterations (the TOTAL target, not an additional count), resuming from
+    checkpoint_path unless resume=False - resuming past n_iterations already runs zero further iterations,
+    and resuming short of it runs only the remainder needed to reach it. Periodic eval/logging/checkpointing.
+    Stops early if patience>0 and real_hpwl hasn't beaten its best in that many consecutive evals."""
     # Resume from checkpoint_path if it exists and resume=True (read once here, not per iteration).
     variables, opt_state, running_stats, key, start_iteration = open_train_state(
         variables, key, optimizer, checkpoint_path if resume else None
     )
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
-    total_iterations = start_iteration + n_iterations
+    total_iterations = n_iterations
+    remaining_iterations = max(0, n_iterations - start_iteration)
     if start_iteration > 0:
-        Log.info(f"  resumed at iteration {start_iteration}; running {n_iterations} more to reach {total_iterations}")
+        if remaining_iterations > 0:
+            Log.info(f"  resumed at iteration {start_iteration}; running {remaining_iterations} more to reach {total_iterations}")
+        else:
+            Log.info(f"  resumed at iteration {start_iteration}, already >= --n_iterations={total_iterations}; nothing to do")
     best_real_hpwl = _read_best_real_hpwl(variables, best_checkpoint_path)
     if best_real_hpwl < float("inf"):
         Log.info(f"  best real_hpwl so far: {best_real_hpwl:.1f} -> {best_checkpoint_path}")
@@ -248,7 +254,7 @@ def _train_and_eval_loop(
     evals_without_improvement = 0
 
     log = []
-    for i in range(n_iterations):
+    for i in range(remaining_iterations):
         current_iteration = start_iteration + i + 1
 
         # 1. One buffered-PPO update: collect n_episodes fresh episodes, train on them.
@@ -377,7 +383,7 @@ def main() -> None:
     optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)  # separately-clipped actor/critic Adam
 
     Log.info(
-        f"running {n_iterations} more buffered-PPO iterations "
+        f"training to iteration {n_iterations} "
         f"({n_episodes} episodes/buffer, 10 minibatch epochs, batch 64, "
         f"independent actor/critic optimizers) ..."
     )

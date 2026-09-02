@@ -38,7 +38,7 @@ python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iteratio
 ```
 
 - `--benchmark_dir`: path to a downloaded benchmark (see `scripts/download_benchmarks.py`); default `benchmarks/adaptec1`.
-- `--n_iterations`: number of buffered-PPO update cycles to run; default `100`.
+- `--n_iterations`: target TOTAL buffered-PPO update cycle to train to, not an additional count - resuming from a checkpoint runs only the remainder needed to reach it (zero further iterations if already past it); default `100`.
 - `--macro_budget`: place only the N most important macros (MaskPlace's `--pnm`); default `128`, MaskPlace's own value. Pass `all` to place every macro in the netlist instead - not yet verified to fit in memory or train well at that scale.
 - `--n_episodes`: episodes collected per PPO update; default `10`, MaskPlace's own value. To find the largest value your GPU actually supports, use `scripts/subprocess_search.py` *separately first* (see below) rather than picking a number blind.
 - `--log_every`: print a progress line to the console every this many iterations; default `1` (every iteration).
