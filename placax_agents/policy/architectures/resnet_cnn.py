@@ -150,7 +150,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
             grid_x=self.params.grid_x, grid_y=self.params.effective_grid_y, seed_features=self.coarse_seed_features
         )(backbone_features)
 
-    def _critic_value(self, obs: dict, fine_logits: jax.Array, coarse_features: jax.Array) -> jax.Array:
+    def _critic_value(self, obs: dict, fine_logits: jax.Array, coarse_logits: jax.Array) -> jax.Array:
         """Computes the value estimate; "step_embedding" style shares zero params with the actor."""
         if self.critic_style == "step_embedding":
             # MaskPlace's own design: a small MLP over just the step index, sharing no params with the actor.
@@ -158,8 +158,8 @@ class ResNetCoarseFineActorCritic(nn.Module):
             hidden = nn.relu(nn.Dense(features=64, name="critic_hidden1")(emb))
             hidden = nn.relu(nn.Dense(features=64, name="critic_hidden2")(hidden))
             return nn.Dense(features=1, name="critic_value")(hidden)[0]
-        # Default: read the same fine/coarse features the actor uses, pooled to one vector.
-        pooled = jnp.concatenate([fine_logits, coarse_features], axis=-1).mean(axis=(0, 1))
+        # Default: read the same fine/coarse logits the actor uses, pooled to one vector.
+        pooled = jnp.concatenate([fine_logits, coarse_logits], axis=-1).mean(axis=(0, 1))
         return nn.Dense(features=1, name="critic_value")(pooled)[0]
 
     @nn.compact
@@ -174,13 +174,15 @@ class ResNetCoarseFineActorCritic(nn.Module):
         fine_logits = _FineBranch(features=self.fine_features, num_layers=self.fine_layers)(fine_input)
 
         # 3. Coarse branch: wider-context features from the ResNet backbone over canvas + wiremasks.
-        coarse_features = self._coarse_branch_features(canvas, wiremask_cur, wiremask_next)
-        coarse_logits = nn.Conv(features=1, kernel_size=(1, 1))(coarse_features)
+        #    _CoarseBranch's own channel_schedule already ends at 1 feature (MyCNNCoarse's own deconv
+        #    output), so unlike an earlier version of this code, there's no extra projection conv here -
+        #    MaskPlace's Actor.merge takes the coarse branch's raw 1-channel output directly too.
+        coarse_logits = self._coarse_branch_features(canvas, wiremask_cur, wiremask_next)
 
         # 4. Merge both branches' per-cell logits into the final action logits.
         merged = jnp.concatenate([fine_logits, coarse_logits], axis=-1)
         action_logits = nn.Conv(features=1, kernel_size=(1, 1))(merged)[..., 0]
 
         # 5. Value head, using whichever critic_style this instance was configured with.
-        value = self._critic_value(obs, fine_logits, coarse_features)
+        value = self._critic_value(obs, fine_logits, coarse_logits)
         return action_logits, value

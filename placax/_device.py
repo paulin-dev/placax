@@ -41,6 +41,14 @@ os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/
 # actionable); a real fatal error still aborts the process regardless.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
+# MaskPlace's own actor casts its masked logits to float64 before softmax (PPO2.py's
+# `x.double()`). Without x64 enabled here, jax silently truncates any float64 array back to
+# float32, so legal_action_logits' matching upcast (placax_agents/policy/action.py) would be a
+# no-op without this. Note this alone doesn't prevent logit-saturation with entropy_coef=0.0 -
+# it only delays it (iteration ~4 in float32 -> ~6 with x64 enabled, per direct checkpoint
+# inspection) - it's kept here purely for exact fidelity to MaskPlace's own casting behavior.
+os.environ.setdefault("JAX_ENABLE_X64", "1")
+
 
 def warn_if_gpu_unused() -> None:
     """Warns if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""
