@@ -21,3 +21,8 @@ def to_grid_units(real_size: jax.Array, cell_size: float) -> jax.Array:
 def to_real_centers(positions: jax.Array, sizes_array: jax.Array, cell_size: float) -> jax.Array:
     """Grid positions (lower-left corner) -> real-unit macro centers."""
     return positions.astype(jnp.float32) * cell_size + sizes_array / 2.0
+
+
+def to_real_lower_left(positions: jax.Array, cell_size: float) -> jax.Array:
+    """Grid positions (lower-left corner) -> real-unit lower-left corner, e.g. for Bookshelf .pl / DEF PLACED."""
+    return positions.astype(jnp.float32) * cell_size

@@ -32,6 +32,7 @@ class Benchmark:
     padded_pin_idx: jax.Array
     padded_pin_offset: jax.Array
     valid_mask: jax.Array
+    name_to_idx: dict[str, int]
 
     @staticmethod
     def _load_and_truncate(
@@ -62,7 +63,7 @@ class Benchmark:
         # 1. Load the netlist, optionally truncated to a macro budget, with its frozen ordering.
         macro_sizes, nets, frozen_order_fn, die_size = cls._load_and_truncate(benchmark_dir, order_fn, macro_budget)
         # 2. Pad/index everything into the fixed-shape arrays the JAX code operates on.
-        _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
+        name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
             macro_sizes, nets, order_fn=frozen_order_fn
         )
         # 3. Set up env params and the grid's real-unit cell size. Prefer the real physical die size (from
@@ -80,7 +81,7 @@ class Benchmark:
         reward_fn = make_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size)
         return cls(
             macro_sizes, nets, params, sizes_array, cell_size, reward_fn,
-            padded_pin_idx, padded_pin_offset, valid_mask,
+            padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx,
         )
 
     def init_policy(self, policy, key: jax.Array):

@@ -29,6 +29,16 @@ def test_benchmark_load_uses_alphabetical_order_by_default(tmp_path) -> None:
     assert benchmark.sizes_array[0].tolist() == [1.0, 1.0]  # "asmall" sorts first alphabetically
 
 
+def test_benchmark_load_keeps_name_to_idx_matching_sizes_array_rows(tmp_path) -> None:
+    # name_to_idx must round-trip back to the exact row each macro's size/position lives at -
+    # needed to turn a finished rollout's positions back into a {name: (x, y)} dict.
+    benchmark_dir = _write_tiny_bookshelf(tmp_path)
+    benchmark = Benchmark.load(benchmark_dir, grid=4)
+    assert benchmark.name_to_idx == {"asmall": 0, "zbig": 1}
+    for name, idx in benchmark.name_to_idx.items():
+        assert benchmark.sizes_array[idx].tolist() == list(benchmark.macro_sizes[name])
+
+
 def test_benchmark_load_accepts_a_custom_order_fn(tmp_path) -> None:
     benchmark_dir = _write_tiny_bookshelf(tmp_path)
     benchmark = Benchmark.load(benchmark_dir, grid=4, order_fn=area_desc_order)

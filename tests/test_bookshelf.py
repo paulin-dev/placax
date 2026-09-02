@@ -2,7 +2,9 @@ import pathlib
 
 import pytest
 
-from placax.netlist.bookshelf import load_bookshelf, parse_nets, parse_nodes
+from placax.netlist.bookshelf import (
+    load_bookshelf, parse_all_node_sizes, parse_nets, parse_nodes, parse_pl_positions, write_aux, write_pl,
+)
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "bookshelf"
 REAL_ADAPTEC1 = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
@@ -46,6 +48,48 @@ def test_parse_nets_dedupes_multiple_pins_on_one_macro() -> None:
     assert len(n2) == 2
     m3_pins = [(x, y) for name, x, y in n2 if name == "m3"]
     assert m3_pins == [(0.0, 0.0)]
+
+
+def test_parse_all_node_sizes_keeps_terminals_and_cells() -> None:
+    sizes = parse_all_node_sizes(FIXTURES / "sample.nodes")
+    assert set(sizes) == {"c1", "c2", "m1", "m2", "m3"}
+    assert sizes["c1"] == (5.0, 5.0)
+    assert sizes["m1"] == (100.0, 200.0)
+
+
+_SAMPLE_PL = (
+    "UCLA pl 1.0\n"
+    "\n"
+    "c1\t0\t0\t: N\n"
+    "m1\t10\t20\t: N /FIXED\n"
+    "m2\t30\t40\t: N\n"
+)
+
+
+def test_parse_pl_positions_reads_coordinates_and_fixed_flag(tmp_path) -> None:
+    pl_path = tmp_path / "sample.pl"
+    pl_path.write_text(_SAMPLE_PL)
+    positions = parse_pl_positions(pl_path)
+    assert positions["c1"] == (0.0, 0.0, False)
+    assert positions["m1"] == (10.0, 20.0, True)
+    assert positions["m2"] == (30.0, 40.0, False)
+
+
+def test_write_pl_moves_and_fixes_only_the_given_names() -> None:
+    result = write_pl(_SAMPLE_PL, {"m1": (99, 88)})
+    assert "m1\t99\t88\t: N /FIXED" in result
+    assert "c1\t0\t0\t: N\n" in result  # untouched line passes through byte-for-byte
+    assert "m2\t30\t40\t: N\n" in result  # untouched even though it wasn't given a position
+
+
+def test_write_pl_marks_fixed_even_if_not_already_fixed() -> None:
+    result = write_pl(_SAMPLE_PL, {"m2": (1, 2)})
+    assert "m2\t1\t2\t: N /FIXED" in result
+
+
+def test_write_aux_builds_row_based_placement_line() -> None:
+    aux = write_aux("a.nodes", "a.nets", "a.wts", "a.pl", "a.scl")
+    assert aux == "RowBasedPlacement : a.nodes a.nets a.wts a.pl a.scl\n"
 
 
 @pytest.mark.skipif(not REAL_ADAPTEC1.exists(), reason="real adaptec1 benchmark not available")

@@ -23,3 +23,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["placax*", "placax_agents*", "placax_tools*", "placax_viz*"]
+
+[tool.pytest.ini_options]
+# Scoped explicitly: --use_docker clones DREAMPlace's full source (its own pybind11/etc. test suites
+# included) into placax_tools/dreamplace/DREAMPlace/ - gitignored, but still on disk, so unscoped
+# discovery would try (and fail) to collect tests that were never ours to run.
+testpaths = ["tests"]

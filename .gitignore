@@ -230,3 +230,8 @@ __marimo__/
 # as-is, since gitignore only affects untracked files, while stopping every training/eval
 # run's own output* directory from ever being added.
 benchmarks/*/output*/
+
+# DREAMPlace itself - cloned + built on first use by placax_tools/dreamplace/docker.py, a full
+# external repo (with its own git history and submodules) and compiled build output, never ours
+# to track. Not tied to the "DREAMPlace" name specifically since --dreamplace_root is configurable.
+placax_tools/dreamplace/DREAMPlace/
