@@ -53,9 +53,13 @@ def load_resnet_backbone_weights(variables: dict, path: pathlib.Path) -> dict:
     }
 
 
-def _normalize_channel(x: jax.Array) -> jax.Array:
-    """Scales a non-negative per-cell score to roughly [0, 1], on a similar footing to 0/1 channels."""
-    return x / (x.max() + 1e-6)
+def _normalize_by_shared_max(current: jax.Array, next_: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Scales (current, next) wiremasks by their *shared* max, matching MaskPlace's own
+    `net_img /= max(net_img.max(), net_img_2.max())` — normalizing each independently would
+    discard the relative magnitude between the two lookahead steps."""
+    scale = jnp.maximum(current.max(), next_.max())
+    scale = jnp.where(scale > 0, scale, 1.0)
+    return current / scale, next_ / scale
 
 
 def _run_backbone(module: nn.Module, x: jax.Array) -> dict:
@@ -120,10 +124,10 @@ class ResNetCoarseFineActorCritic(nn.Module):
     def _current_and_next_wiremasks(self, obs: dict) -> tuple[jax.Array, jax.Array]:
         """Returns normalized (current, next) lookahead wiremasks, falling back to `current` if horizon==1."""
         wiremasks = obs["lookahead_wiremasks"]  # (horizon, grid_x, grid_y), horizon>=1
-        current = _normalize_channel(wiremasks[0])
+        current = wiremasks[0]
         # Reuse current as "next" when there's no real next slice (horizon==1).
-        next_ = _normalize_channel(wiremasks[1] if wiremasks.shape[0] > 1 else wiremasks[0])
-        return current, next_
+        next_ = wiremasks[1] if wiremasks.shape[0] > 1 else wiremasks[0]
+        return _normalize_by_shared_max(current, next_)
 
     def _current_and_next_posmasks(self, obs: dict) -> tuple[jax.Array, jax.Array]:
         """Returns illegal-position masks for the current and next macro to place."""
