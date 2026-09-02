@@ -25,6 +25,14 @@ def test_maskplace_ppo_config_matches_maskplace_values() -> None:
     assert MASKPLACE_LEARNING_RATE == 2.5e-3
 
 
+def test_maskplace_ppo_config_entropy_coef_is_overridable() -> None:
+    # Normalization must stay off regardless - only entropy_coef itself is meant to vary here.
+    config = maskplace_ppo_config(entropy_coef=0.01)
+    assert config.entropy_coef == 0.01
+    assert config.normalize_advantages is False
+    assert config.normalize_returns is False
+
+
 def test_maskplace_optimizer_isolates_critic_prefixed_params() -> None:
     # A large gradient on the "critic_" group must not spill over to the
     # non-critic group's clip-by-global-norm - proof each network is

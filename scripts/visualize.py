@@ -1,6 +1,5 @@
 """Generates training-progress and placement visualizations from an already-trained run."""
 import argparse
-import functools
 import pathlib
 import sys
 
@@ -8,61 +7,23 @@ from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
 from placax.log import Log
 from placax.types import EnvState
-from placax_agents.benchmark import Benchmark
-from placax_agents.policy.architectures.cnn import CNNActorCritic
-from placax_agents.policy.observation import observation
 from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.loops.common import open_train_state
-from placax_agents.types import ExtraIllegalFn, StateFn
 from placax_viz.animation import save_placement_gif
 from placax_viz.curves import plot_training_curves
 from placax_viz.masks import plot_observation_channels
 from placax_viz.placement import save_placement_image
 from placax_viz.rollout import collect_placement_history
+from scripts.presets import PRESETS
 
 import jax.numpy as jnp
-import optax
 from jax import random
-
-
-def _training_setup(benchmark_dir: pathlib.Path, _macro_budget: int | None):
-    """scripts/run_training.py's own setup: full netlist, plain CNN policy/observation."""
-    benchmark = Benchmark.load(benchmark_dir)
-    policy = CNNActorCritic()
-    # Bare `observation` defaults to cell_size=1.0 - bind the benchmark's real cell_size instead.
-    state_fn: StateFn = functools.partial(observation, cell_size=benchmark.cell_size)
-    extra_illegal_fn: ExtraIllegalFn | None = None
-    optimizer = optax.adam(3e-4)
-    return benchmark, policy, state_fn, extra_illegal_fn, optimizer
-
-
-def _maskplace_setup(benchmark_dir: pathlib.Path, macro_budget: int | None):
-    """scripts/run_maskplace.py's own setup, imported lazily so --preset=training skips its extra deps."""
-    from scripts.run_maskplace import (
-        WIREMASK_MARGIN,
-        _build_policy,
-        _build_state_fn,
-        _load_benchmark,
-        maskplace_optimizer,
-        maskplace_ppo_config,
-    )
-    from placax_agents.policy.action import make_wiremask_quality_illegal
-
-    benchmark = _load_benchmark(benchmark_dir, macro_budget)
-    policy = _build_policy(benchmark)
-    state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
-    optimizer = maskplace_optimizer(value_coef=maskplace_ppo_config().value_coef)
-    return benchmark, policy, state_fn, extra_illegal_fn, optimizer
-
-
-_PRESETS = {"training": ("output", _training_setup), "maskplace": ("output_maskplace", _maskplace_setup)}
 
 
 def _parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description="Visualize a training run's progress and placements.")
     parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
-    parser.add_argument("--preset", choices=sorted(_PRESETS), default="training")
+    parser.add_argument("--preset", choices=sorted(PRESETS), default="training")
     parser.add_argument(
         "--macro_budget", type=str, default=None,
         help='--preset=maskplace only: macro budget it was trained with (default: that script\'s own '
@@ -78,7 +39,7 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--gif", action="store_true", help="Also render a placement-progress GIF (one extra rollout).")
     args = parser.parse_args(argv[1:])
 
-    default_subdir, setup_fn = _PRESETS[args.preset]
+    default_subdir, setup_fn = PRESETS[args.preset]
     run_dir = args.run_dir or args.benchmark_dir / default_subdir
     output_dir = args.output_dir or run_dir
     macro_budget = None if args.macro_budget is None or args.macro_budget.lower() == "all" else int(args.macro_budget)

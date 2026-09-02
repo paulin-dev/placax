@@ -133,6 +133,32 @@ def test_interrupted_parallel_run_exactly_matches_continuous_run(tmp_path: pathl
     assert all((a == b).all() for a, b in zip(leaves_interrupted, leaves_continuous))
 
 
+def test_extra_illegal_fn_is_threaded_through(tmp_path: pathlib.Path) -> None:
+    # Regression: resumable_train() used to silently drop extra_illegal_fn on the floor (never passed
+    # to its own gradient-step or eval calls, even though train_sequential/train_parallel/evaluate all
+    # already accept and honor it) - forcing MaskPlace's own action-quality masking (or any custom
+    # ExtraIllegalFn) to bypass this public API entirely. A call-counting closure proves it's actually
+    # invoked somewhere in the traced computation, not just accepted and ignored.
+    params, sizes_array, reward_fn, ppi, ppo, vm = _toy_setup()
+    policy = CNNActorCritic()
+    obs0 = observation(reset(params), params, sizes_array)
+    variables_init = policy.init(random.PRNGKey(0), obs0)
+
+    calls = []
+
+    def counting_illegal_fn(obs):
+        calls.append(1)
+        return jnp.zeros((params.grid, params.grid), dtype=bool)
+
+    path = tmp_path / "extra_illegal.bin"
+    resumable_train(
+        path, variables_init, random.PRNGKey(1), policy.apply, params, reward_fn,
+        sizes_array, 1.0, n_iterations=1, padded_pin_idx=ppi, padded_pin_offset=ppo,
+        valid_mask=vm, checkpoint_every=1, eval_every=1, extra_illegal_fn=counting_illegal_fn,
+    )
+    assert len(calls) > 0
+
+
 def test_snapshots_are_never_overwritten(tmp_path: pathlib.Path) -> None:
     params, sizes_array, reward_fn, ppi, ppo, vm = _toy_setup()
     policy = CNNActorCritic()

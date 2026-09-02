@@ -48,10 +48,11 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 """MaskPlace's own PPO.max_grad_norm; clipped per-network, not jointly."""
 
 
-def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults exactly: entropy_coef=0.0 (no entropy bonus)
-    and raw, unnormalized advantages/returns (PPO2.py's `advantage = (target_v - critic_net_output).detach()`
-    and `value_loss = F.smooth_l1_loss(critic_output, target_v)` use neither).
+def maskplace_ppo_config(entropy_coef: float = 0.0) -> PPOConfig:
+    """PPOConfig matching MaskPlace's own PPO2.py defaults: raw, unnormalized advantages/returns
+    (PPO2.py's `advantage = (target_v - critic_net_output).detach()` and
+    `value_loss = F.smooth_l1_loss(critic_output, target_v)` use neither) and, by default,
+    entropy_coef=0.0 (no entropy bonus, also matching PPO2.py).
 
     Note: entropy_coef=0.0 here has a known consequence in this JAX/float32 implementation - with nothing
     bounding actor-logit magnitude (single fixed deterministic netlist -> consistent gradient direction
@@ -60,10 +61,15 @@ def maskplace_ppo_config() -> PPOConfig:
     inspection), and again by iteration ~6 even with jax_enable_x64 (see placax/_device.py) - x64 only
     buys more headroom before hitting the same wall, not immunity from it. This literal-MaskPlace config
     is kept for faithful comparison; PPOConfig's own general default (entropy_coef=0.01, normalization ON)
-    avoids the saturation and is what other configs in this codebase should keep using.
+    avoids the saturation and is what other configs in this codebase should keep using. Passing a nonzero
+    entropy_coef here (normalization still OFF, e.g. via --entropy_coef) tests a narrower question: an
+    entropy bonus only ever counteracts logit growth *before* saturation (its own gradient vanishes
+    together with every other softmax-based gradient once probabilities actually hit exact 0/1) - it's
+    unverified whether 0.01 is strong enough relative to unnormalized advantage/return scale to prevent
+    saturation ever being reached at all.
     """
     return PPOConfig(
-        gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss,
+        gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=entropy_coef, value_loss_fn=huber_value_loss,
         normalize_advantages=False, normalize_returns=False,
     )
 
@@ -80,7 +86,7 @@ def maskplace_optimizer(
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
-def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None, int, int]:
+def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, int, int, bool, bool, pathlib.Path | None, pathlib.Path | None, int, int, float]:
     """Parses named --flag=value CLI args into the run configuration tuple."""
     parser = argparse.ArgumentParser(description="Run the MaskPlace-equivalent pipeline end to end.")
     parser.add_argument(
@@ -157,12 +163,19 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
              "scaling/macro budget, which doesn't generalize across benchmarks/configs, so this "
              "uses best-real_hpwl patience instead.",
     )
+    parser.add_argument(
+        "--entropy_coef", type=float, default=0.0,
+        help="Entropy bonus coefficient, passed straight to maskplace_ppo_config() (default: 0.0, "
+             "MaskPlace's own value - see that function's docstring for the logit-saturation issue "
+             "this causes and what a nonzero value here does and doesn't fix). Advantage/return "
+             "normalization stay off regardless of this flag, matching MaskPlace's own PPO2.py.",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
         args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
-        args.init_from, args.patience, args.seed,
+        args.init_from, args.patience, args.seed, args.entropy_coef,
     )
 
 
@@ -337,7 +350,7 @@ def main() -> None:
     # 1. Parse CLI args and make sure the requested benchmark actually exists.
     (
         benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
-        want_placement_images, placement_images_dir_arg, init_from, patience, seed,
+        want_placement_images, placement_images_dir_arg, init_from, patience, seed, entropy_coef,
     ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -404,13 +417,13 @@ def main() -> None:
         Log.info(f"writing a placement snapshot {cadence} to {placement_images_dir}")
 
     # 7. Build the PPO config/optimizer matching MaskPlace's own hyperparameters.
-    ppo_config = maskplace_ppo_config()
+    ppo_config = maskplace_ppo_config(entropy_coef=entropy_coef)
     optimizer = maskplace_optimizer(value_coef=ppo_config.value_coef)  # separately-clipped actor/critic Adam
 
     Log.info(
         f"training to iteration {n_iterations} "
         f"({n_episodes} episodes/buffer, 10 minibatch epochs, batch 64, "
-        f"independent actor/critic optimizers) ..."
+        f"independent actor/critic optimizers, entropy_coef={entropy_coef}) ..."
     )
 
     # 8. Run the actual training/eval loop.

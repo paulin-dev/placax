@@ -3,6 +3,7 @@ the RL policy, then hands off to DREAMPlace to place every remaining standard ce
 is intentionally not wired up yet - placax_tools/openroad/validator.py is ready for it once this design
 has real LEF/DEF (our Bookshelf-only benchmarks don't)."""
 import argparse
+import json
 import os
 import pathlib
 import subprocess
@@ -16,12 +17,10 @@ from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.ops.inference import is_bare_checkpoint, load_policy_variables, positions_to_named_lower_left
 from placax_agents.policy.scale import to_grid_units
+from placax_tools.cell_placer import CellPlacer
 from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 from placax_viz.placement import save_full_placement_image, save_placement_image, save_placement_with_nets_image
-from scripts.run_maskplace import (
-    MASKPLACE_MACRO_BUDGET, WIREMASK_MARGIN, _build_policy, _build_state_fn, _load_benchmark,
-    maskplace_optimizer,
-)
+from scripts.presets import PRESETS
 
 import numpy as np
 from jax import random
@@ -35,21 +34,29 @@ def _parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
     parser.add_argument(
+        "--preset", choices=sorted(PRESETS), default="maskplace",
+        help="Which benchmark/policy/state_fn/reward setup to rebuild before loading the checkpoint - "
+             "must match what the checkpoint was actually trained with (scripts/run_maskplace.py's "
+             "checkpoints need --preset=maskplace, the default; scripts/run_training.py's need "
+             "--preset=training). See scripts/presets.py to register a custom setup.",
+    )
+    parser.add_argument(
         "--checkpoint", type=pathlib.Path, default=None,
-        help="Defaults to <benchmark_dir>/output_maskplace/best_checkpoint.bin if it exists, else "
+        help="Defaults to <benchmark_dir>/output_<preset>/best_checkpoint.bin if it exists, else "
              ".../checkpoint.bin.",
     )
     parser.add_argument(
         "--macro_budget", type=str, default="all",
-        help='Defaults to "all" (every macro placed - the production default: the network has no '
-             f"architectural dependence on macro count, so a checkpoint trained with any budget, e.g. "
-             f"MaskPlace's own default of {MASKPLACE_MACRO_BUDGET}, still loads and places every macro "
-             "with no shape mismatch and no retraining - confirmed end-to-end). Pass an integer to match "
-             "a specific training budget instead, e.g. for a fast/partial preview.",
+        help='Defaults to "all" (every macro placed - the production default: neither shipped preset\'s '
+             "network has any architectural dependence on macro count, so a checkpoint trained with any "
+             "budget still loads and places every macro with no shape mismatch and no retraining - "
+             "confirmed end-to-end for --preset=maskplace). Pass an integer to match a specific training "
+             "budget instead, e.g. for a fast/partial preview. Ignored by --preset=training (always all).",
     )
     parser.add_argument(
         "--output_dir", type=pathlib.Path, default=None,
-        help="Defaults to <benchmark_dir>/output_maskplace/pipeline.",
+        help="Defaults to <benchmark_dir>/<preset's own output subdir>/pipeline, e.g. output_maskplace/"
+             "pipeline for --preset=maskplace, output/pipeline for --preset=training.",
     )
     parser.add_argument(
         "--dreamplace_root", type=pathlib.Path, default=None,
@@ -71,6 +78,23 @@ def _parse_args(argv: list[str]):
         help="Local-checkout mode only: python interpreter DREAMPlace itself should run under "
              "(often a separate env from this one). Ignored with --use_docker.",
     )
+    parser.add_argument(
+        "--dreamplace_extra_config", type=str, default=None,
+        help="A JSON object string overriding/adding any DREAMPlace config field (e.g. "
+             '\'{"num_bins_x": 1024, "random_seed": 42}\') - forwarded to DREAMPlaceCellPlacer\'s own '
+             "extra_config, which already accepts arbitrary overrides; this just exposes that from the CLI.",
+    )
+    parser.add_argument(
+        "--viz_resolution", type=int, default=1024,
+        help="Bin resolution for the post-DREAMPlace full_placement.png cell-density raster; default 1024.",
+    )
+    parser.add_argument(
+        "--nets_sample_fraction", type=float, default=1.0,
+        help="Randomly keep only this fraction of macro-to-macro nets in macros_with_nets.png (MaskPlace's "
+             "own convention for a denser netlist - \"For clarity, we only show 1%% wires\"); default 1.0 "
+             "(show every net).",
+    )
+    parser.add_argument("--nets_seed", type=int, default=0, help="Seed for --nets_sample_fraction's subsample.")
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     dreamplace_root = args.dreamplace_root
@@ -80,35 +104,57 @@ def _parse_args(argv: list[str]):
         # Docker bind mounts (-v) need an absolute host path, not one resolved relative to whatever
         # directory `docker` itself happens to run from.
         dreamplace_root = dreamplace_root.resolve()
+    dreamplace_extra_config = json.loads(args.dreamplace_extra_config) if args.dreamplace_extra_config else {}
     return (
-        args.benchmark_dir, args.checkpoint, macro_budget, args.output_dir, dreamplace_root,
-        args.use_docker, args.gpu, args.target_density, args.python_executable,
+        args.benchmark_dir, args.preset, args.checkpoint, macro_budget, args.output_dir, dreamplace_root,
+        args.use_docker, args.gpu, args.target_density, args.python_executable, dreamplace_extra_config,
+        args.viz_resolution, args.nets_sample_fraction, args.nets_seed,
     )
 
 
 def _resolve_checkpoint(
-    benchmark_dir: pathlib.Path, checkpoint_arg: pathlib.Path | None
+    benchmark_dir: pathlib.Path, default_subdir: str, checkpoint_arg: pathlib.Path | None
 ) -> tuple[pathlib.Path, bool]:
     """Returns (checkpoint_path, bare): bare=True for a bare-weights bundle (the production default - no
     optimizer/RNG state), detected from the file's own contents (is_bare_checkpoint) so this works
     whatever the file is actually called, not just the conventional best_checkpoint.bin/checkpoint.bin
     names. Only the DEFAULT --checkpoint path (when none is given) uses that naming convention, to pick
-    which of the two conventional files to default to."""
-    checkpoint_path = checkpoint_arg or (benchmark_dir / "output_maskplace" / "best_checkpoint.bin")
+    which of the two conventional files to default to, under the given preset's own default output
+    subdir (e.g. output_maskplace, output - see scripts/presets.py's PRESETS)."""
+    checkpoint_path = checkpoint_arg or (benchmark_dir / default_subdir / "best_checkpoint.bin")
     if checkpoint_arg is None and not checkpoint_path.exists():
-        checkpoint_path = benchmark_dir / "output_maskplace" / "checkpoint.bin"
+        checkpoint_path = benchmark_dir / default_subdir / "checkpoint.bin"
     if not checkpoint_path.exists():
         return checkpoint_path, True  # doesn't exist yet; bare is just a harmless default, caller errors next
     return checkpoint_path, is_bare_checkpoint(checkpoint_path)
 
 
+def _build_cell_placer(
+    dreamplace_root: pathlib.Path,
+    gpu: bool,
+    target_density: float,
+    python_executable: str,
+    use_docker: bool,
+    extra_mounts: tuple[pathlib.Path, ...],
+    extra_config: dict | None = None,
+) -> CellPlacer:
+    """The one place this pipeline decides WHICH CellPlacer to use - DREAMPlace by default, matching
+    docs/JAX_Placement_Environment_Spec.md section 5.4. Swap in a different Bookshelf-capable
+    CellPlacer (RePlAce, AutoDMP, a commercial tool) by changing only this function; every call site
+    downstream depends on the generic CellPlacer.place_bookshelf() contract, not this class."""
+    return DREAMPlaceCellPlacer(
+        dreamplace_root=dreamplace_root, gpu=gpu, target_density=target_density,
+        python_executable=python_executable, use_docker=use_docker, extra_mounts=extra_mounts,
+        extra_config=extra_config,
+    )
+
+
 def main() -> None:
     Log.configure()
-    from placax_agents.policy.action import make_wiremask_quality_illegal
-
     (
-        benchmark_dir, checkpoint_arg, macro_budget, output_dir_arg, dreamplace_root, use_docker, gpu,
-        target_density, python_executable,
+        benchmark_dir, preset, checkpoint_arg, macro_budget, output_dir_arg, dreamplace_root, use_docker, gpu,
+        target_density, python_executable, dreamplace_extra_config, viz_resolution, nets_sample_fraction,
+        nets_seed,
     ) = _parse_args(sys.argv)
     # Resolve to absolute paths up front: every path written into the DREAMPlace config/.aux below must
     # stay valid inside the Docker container too, which runs with a different cwd (/DREAMPlace) than this
@@ -122,25 +168,25 @@ def main() -> None:
         sys.exit(1)
     design_name = aux_candidates[0].stem
 
-    checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, checkpoint_arg)
+    default_subdir, setup_fn = PRESETS[preset]
+    checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, default_subdir, checkpoint_arg)
     if not checkpoint_path.exists():
-        Log.error(f"'{checkpoint_path}' not found - train first with scripts/run_maskplace.py.")
+        Log.error(f"'{checkpoint_path}' not found - train first (--preset={preset} expects a checkpoint "
+                   f"matching that preset's own training script).")
         sys.exit(1)
 
-    output_dir = output_dir_arg or (benchmark_dir / "output_maskplace" / "pipeline")
+    output_dir = output_dir_arg or (benchmark_dir / default_subdir / "pipeline")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load the same netlist/observation/policy setup the checkpoint was trained with.
-    Log.info(f"loading {benchmark_dir} (macro_budget={macro_budget}) ...")
-    benchmark = _load_benchmark(benchmark_dir, macro_budget)
-    state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
-    policy = _build_policy(benchmark)
+    # 1. Load the same benchmark/policy/state_fn/reward setup the checkpoint was trained with - via
+    # scripts/presets.py, so this pipeline works with any registered preset, not just MaskPlace.
+    Log.info(f"loading {benchmark_dir} (preset={preset}, macro_budget={macro_budget}) ...")
+    benchmark, policy, state_fn, extra_illegal_fn, preset_optimizer = setup_fn(benchmark_dir, macro_budget)
 
     # 2. Load the trained weights - inference only, nothing here ever trains.
     obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
     variables_template = policy.init(random.PRNGKey(0), obs0)
-    optimizer = None if bare else maskplace_optimizer()
+    optimizer = None if bare else preset_optimizer
     variables = load_policy_variables(variables_template, checkpoint_path, bare=bare, optimizer=optimizer)
     Log.info(f"loaded weights from {checkpoint_path} ({'bare' if bare else 'full'} checkpoint)")
 
@@ -164,7 +210,7 @@ def main() -> None:
     save_placement_with_nets_image(
         positions, benchmark.sizes_array, benchmark.params.grid_x, benchmark.params.effective_grid_y,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask, benchmark.cell_size,
-        nets_png,
+        nets_png, sample_fraction=nets_sample_fraction, seed=nets_seed,
     )
     Log.info(f"wrote {nets_png}")
 
@@ -202,15 +248,18 @@ def main() -> None:
               "is ready for it once this design has real LEF/DEF).")
         return
 
-    # 6. Hand off to DREAMPlace to place every remaining standard cell around the now-fixed macros.
+    # 6. Hand off to a CellPlacer (default: DREAMPlace) to place every remaining standard cell around
+    # the now-fixed macros. Only construction is DREAMPlace-specific; the call site below depends on
+    # CellPlacer.place_bookshelf()'s generic contract (placax_tools/cell_placer.py), so swapping in a
+    # different Bookshelf-capable CellPlacer only means changing _build_cell_placer, not this call site.
     # Docker mode: the container only sees dreamplace_root (mounted at /DREAMPlace) plus whatever we
     # explicitly mount below - benchmark_dir (nodes/nets/wts/scl) and output_dir (pl/aux/config/result),
     # each at their own identical host path, so the absolute paths already written into new_aux_path
     # and the DREAMPlace config resolve unchanged inside the container too.
     common_mount_root = pathlib.Path(os.path.commonpath([benchmark_dir.resolve(), output_dir.resolve()]))
-    cell_placer = DREAMPlaceCellPlacer(
-        dreamplace_root=dreamplace_root, gpu=gpu, target_density=target_density,
-        python_executable=python_executable, use_docker=use_docker, extra_mounts=(common_mount_root,),
+    cell_placer = _build_cell_placer(
+        dreamplace_root, gpu, target_density, python_executable, use_docker, (common_mount_root,),
+        extra_config=dreamplace_extra_config,
     )
     try:
         result_pl = cell_placer.place_bookshelf(new_aux_path, output_dir)
@@ -231,7 +280,8 @@ def main() -> None:
 
     full_png = output_dir / "full_placement.png"
     save_full_placement_image(
-        pos[macro_mask], sz[macro_mask], pos[~macro_mask], sz[~macro_mask], die_width, die_height, full_png
+        pos[macro_mask], sz[macro_mask], pos[~macro_mask], sz[~macro_mask], die_width, die_height, full_png,
+        resolution=viz_resolution,
     )
     Log.info(f"wrote {full_png}")
 

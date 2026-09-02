@@ -28,7 +28,13 @@ def evaluate(
 
     def scan_step(state, _macro_idx):
         # 1. Ask the policy for action scores at this state (we don't need the value estimate here).
-        obs = state_fn(state, params, sizes_array)
+        # The bare `observation` default takes cell_size as a keyword the plain StateFn signature
+        # doesn't carry - bind it here from what evaluate() was already given, rather than silently
+        # falling back to observation's own cell_size=1.0 default (wrong for any real benchmark; a
+        # custom state_fn, e.g. make_wiremask_observation's closure, already binds its own cell_size
+        # and is called exactly as given).
+        obs = observation(state, params, sizes_array, cell_size=cell_size) if state_fn is observation \
+            else state_fn(state, params, sizes_array)
         logits, _value = policy_apply_fn(variables, obs)
 
         # 2. Mask out illegal cells (occupied/out-of-bounds, plus any extra rule) before choosing.

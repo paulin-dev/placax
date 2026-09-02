@@ -1,5 +1,9 @@
-from placax.netlist.order import area_desc_order  # noqa: F401  must precede jax imports
+from placax.core import reset  # noqa: F401  must precede jax imports
+from placax.netlist.order import area_desc_order  # noqa: F401
 from placax_agents.benchmark import Benchmark  # noqa: F401
+from placax_agents.policy.scale import to_grid_units  # noqa: F401
+
+import jax.numpy as jnp
 
 
 def _write_tiny_bookshelf(tmp_path):
@@ -44,6 +48,25 @@ def test_benchmark_load_accepts_a_custom_order_fn(tmp_path) -> None:
     benchmark = Benchmark.load(benchmark_dir, grid=4, order_fn=area_desc_order)
     assert benchmark.sizes_array[0].tolist() == [10.0, 10.0]  # "zbig" placed first by area_desc_order
     assert benchmark.sizes_array[1].tolist() == [1.0, 1.0]
+
+
+def test_benchmark_state_fn_binds_the_real_cell_size(tmp_path) -> None:
+    # The bare `observation` default (still what evaluate()/collect_rollout() fall back to unless
+    # given a state_fn) takes cell_size=1.0 unless told otherwise. benchmark.state_fn must actually
+    # bind the real cell_size, not just be another equally-broken default - checked here by placing
+    # one macro and confirming its rendered canvas footprint matches to_grid_units at the real
+    # cell_size, which would be wrong (a differently-sized footprint) at cell_size=1.0.
+    benchmark_dir = _write_tiny_bookshelf(tmp_path)
+    benchmark = Benchmark.load(benchmark_dir, grid=4)
+    assert benchmark.cell_size != 1.0
+
+    positions = reset(benchmark.params).positions.at[0].set(jnp.array([0, 0]))
+    state = reset(benchmark.params).replace(positions=positions, step=1)
+    obs = benchmark.state_fn(state, benchmark.params, benchmark.sizes_array)
+    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    w0, h0 = int(grid_sizes[0, 0]), int(grid_sizes[0, 1])
+    assert bool(obs["canvas"][:w0, :h0].all())  # the placed macro's full grid-unit footprint is filled
+    assert not bool(obs["canvas"][w0:, h0:].any())  # nothing beyond it is
 
 
 def test_benchmark_load_accepts_a_macro_budget(tmp_path) -> None:

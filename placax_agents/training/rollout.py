@@ -25,7 +25,13 @@ def collect_rollout(
 
     def scan_step(state, step_key):
         # obs -> policy -> mask illegal cells -> sample -> apply -> record.
-        obs = state_fn(state, params, sizes_array)
+        # The bare `observation` default takes cell_size as a keyword the plain StateFn signature
+        # doesn't carry - bind it here from what collect_rollout() was already given, rather than
+        # silently falling back to observation's own cell_size=1.0 default (wrong for any real
+        # benchmark; a custom state_fn, e.g. make_wiremask_observation's closure, already binds its
+        # own cell_size and is called exactly as given).
+        obs = observation(state, params, sizes_array, cell_size=cell_size) if state_fn is observation \
+            else state_fn(state, params, sizes_array)
         logits, value = policy_apply_fn(variables, obs)
 
         macro_size = to_grid_units(obs["current_macro_size"], cell_size)

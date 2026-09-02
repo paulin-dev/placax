@@ -75,14 +75,18 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 ```
 
 - `--benchmark_dir`: path to a downloaded Bookshelf benchmark (only format supported so far); default `benchmarks/adaptec1`.
-- `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `<benchmark_dir>/output_maskplace/best_checkpoint.bin` if it exists, else `.../checkpoint.bin`.
-- `--macro_budget`: default `all` - every macro placed, the production default. The network has no architectural dependence on macro count, so a checkpoint trained with any budget (e.g. MaskPlace's own default of 128) still loads and places every macro with no shape mismatch and no retraining. Pass an integer instead to match a specific training budget, e.g. for a fast/partial preview.
-- `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `<benchmark_dir>/output_maskplace/pipeline`.
+- `--preset`: which benchmark/policy/state_fn/reward setup to rebuild before loading the checkpoint - must match what it was actually trained with; default `maskplace` (`scripts/run_maskplace.py`'s own setup). `training` uses `scripts/run_training.py`'s plain CNN setup instead. See `scripts/presets.py` to register a custom one - this pipeline isn't tied to MaskPlace specifically.
+- `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `<benchmark_dir>/<preset's own output subdir>/best_checkpoint.bin` if it exists, else `.../checkpoint.bin`.
+- `--macro_budget`: default `all` - every macro placed, the production default. Neither shipped preset's network has any architectural dependence on macro count, so a checkpoint trained with any budget (e.g. MaskPlace's own default of 128) still loads and places every macro with no shape mismatch and no retraining. Pass an integer instead to match a specific training budget, e.g. for a fast/partial preview.
+- `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `<benchmark_dir>/<preset's own output subdir>/pipeline`.
 - `--use_docker`: run DREAMPlace via its official Docker image (`limbo018/dreamplace:cuda`) instead of a local checkout - no matching GCC/Boost/Bison/Flex/CMake/PyTorch toolchain needed on the host. Clones and builds DREAMPlace into `--dreamplace_root` automatically on first use (a few minutes, one time only).
 - `--dreamplace_root`: path to a DREAMPlace checkout. Defaults to `placax_tools/dreamplace/DREAMPlace` with `--use_docker` (auto-cloned/built there); if omitted with no `--use_docker` either, the pipeline stops after macro placement and just writes the Bookshelf files DREAMPlace would need.
 - `--gpu`: run DREAMPlace on GPU.
 - `--target_density`: DREAMPlace's target placement density; default `1.0`.
 - `--python_executable`: local-checkout mode only - the Python interpreter DREAMPlace itself should run under (often a separate env from this one); ignored with `--use_docker`.
+- `--dreamplace_extra_config`: a JSON object string overriding/adding any DREAMPlace config field, e.g. `--dreamplace_extra_config='{"num_bins_x": 1024, "random_seed": 42}'`.
+- `--viz_resolution`: bin resolution for `full_placement.png`'s cell-density raster; default `1024`.
+- `--nets_sample_fraction` / `--nets_seed`: randomly keep only this fraction of macro-to-macro nets in `macros_with_nets.png` (MaskPlace's own convention for a denser netlist); default `1.0` (every net).
 
 Writes `macros_placed.png` and `macros_with_nets.png` (macro-only, always) plus, once DREAMPlace succeeds, `full_placement.png` (every macro and every cell) and the placed design itself at `<output_dir>/<design_name>/<design_name>.gp.pl`. Prints two HPWL numbers: `real_hpwl` (macro-to-macro nets only, the RL reward's own scope) and `full_hpwl` (every net, macros and cells, from the actual final placement) - both are geometric (half-perimeter) proxies, not a routed wirelength; that needs OpenROAD.
 

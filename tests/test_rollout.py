@@ -10,6 +10,8 @@ from placax_agents.policy.architectures.cnn import CNNActorCritic  # noqa: F401
 from placax_agents.training.rollout import collect_rollout  # noqa: F401
 from placax_agents.policy.scale import compute_grid_scale  # noqa: F401
 
+import functools
+
 import jax.numpy as jnp
 import pytest
 from jax import random
@@ -50,6 +52,34 @@ def test_collect_rollout_state_fn_is_genuinely_swappable() -> None:
         cell_size=1.0, state_fn=fake_state_fn,
     )
     assert bool(trajectory["obs"]["canvas"][0].all())  # matches fake_state_fn, not the real observation()
+
+
+def test_collect_rollout_default_state_fn_uses_the_given_cell_size() -> None:
+    # Regression: collect_rollout()'s default state_fn (the bare `observation` function) used to
+    # silently render the canvas with observation's own cell_size=1.0 default, ignoring the real
+    # cell_size collect_rollout() was actually given - wrong for any real (non-toy) benchmark.
+    # Confirmed by cross-checking the recorded canvases against an explicitly cell_size-bound
+    # state_fn: with the fix, both agree exactly.
+    params = EnvParams(grid=8, n_macros=4)
+    sizes_array = jnp.array([[4.0, 4.0], [2.0, 2.0], [4.0, 2.0], [2.0, 4.0]])  # real units
+    cell_size = 2.0  # -> grid-unit sizes [[2,2],[1,1],[2,1],[1,2]], not [[4,4],[2,2],[4,2],[2,4]]
+    padded_pin_idx = jnp.array([[0, 1]])
+    padded_pin_offset = jnp.zeros((1, 2, 2))
+    valid_mask = jnp.array([[True, True]])
+    reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
+    policy = CNNActorCritic()
+    obs0 = observation(reset(params), params, sizes_array, cell_size=cell_size)
+    variables = policy.init(random.PRNGKey(0), obs0)
+
+    trajectory_default, _ = collect_rollout(
+        random.PRNGKey(1), variables, policy.apply, params, reward_fn, sizes_array, cell_size=cell_size,
+    )
+    trajectory_explicit, _ = collect_rollout(
+        random.PRNGKey(1), variables, policy.apply, params, reward_fn, sizes_array, cell_size=cell_size,
+        state_fn=functools.partial(observation, cell_size=cell_size),
+    )
+    assert (trajectory_default["obs"]["canvas"] == trajectory_explicit["obs"]["canvas"]).all()
+    assert (trajectory_default["action"] == trajectory_explicit["action"]).all()
 
 
 def test_collect_rollout_extra_illegal_fn_restricts_actions() -> None:

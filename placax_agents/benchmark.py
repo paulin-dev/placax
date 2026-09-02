@@ -1,4 +1,5 @@
 """Bundles a loaded netlist into everything training needs."""
+import functools
 import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from placax.types import EnvParams, Nets, OrderFn, RewardFn, SizeMap
 from placax_agents.policy.observation import observation
 from placax_agents.policy.scale import compute_grid_scale
 from placax_agents.training.reward import make_scaled_hpwl_reward
+from placax_agents.types import StateFn
 
 import jax
 
@@ -84,8 +86,16 @@ class Benchmark:
             padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx,
         )
 
+    @property
+    def state_fn(self) -> StateFn:
+        """The bare `observation` StateFn, correctly bound to this benchmark's real cell_size - pass
+        this to evaluate()/collect_rollout()/the training loops instead of relying on their own
+        `state_fn` default (the unbound `observation` function, which takes cell_size=1.0 unless told
+        otherwise - wrong for any benchmark whose real cell_size != 1.0, i.e. almost all of them)."""
+        return functools.partial(observation, cell_size=self.cell_size)
+
     def init_policy(self, policy, key: jax.Array):
         """Initializes policy's variables from one fresh observation of this benchmark."""
         # Build a "step 0" observation just to get the right shapes for Flax's init.
-        obs0 = observation(reset(self.params), self.params, self.sizes_array, cell_size=self.cell_size)
+        obs0 = self.state_fn(reset(self.params), self.params, self.sizes_array)
         return policy.init(key, obs0)

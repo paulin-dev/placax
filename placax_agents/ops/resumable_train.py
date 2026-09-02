@@ -97,6 +97,7 @@ def resumable_train(
     snapshot_dir: pathlib.Path | None = None,
     snapshot_every: int | None = None,
     placement_images_dir: pathlib.Path | None = None,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
 ):
     """Runs n_iterations more of training, resuming from checkpoint_path if it exists, and returns (final_variables, log)."""
     if optimizer is None:
@@ -121,7 +122,7 @@ def resumable_train(
         key, step_input = make_step_input(key, n_envs if use_parallel else None)
         variables, opt_state, running_stats, loss, _ = jitted_step(
             step_input, variables, opt_state, running_stats, optimizer, policy_apply_fn,
-            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config,
+            params, reward_fn, sizes_array, cell_size, state_fn, ppo_config, extra_illegal_fn,
         )
 
         # 2. periodic real-HPWL eval (only every eval_every iterations) + 3. log entry (always).
@@ -130,7 +131,7 @@ def resumable_train(
         if current_iteration % eval_every == 0:
             real_hpwl, eval_positions = _evaluate(
                 variables, policy_apply_fn, params, sizes_array, cell_size,
-                padded_pin_idx, padded_pin_offset, valid_mask, state_fn,
+                padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
             )
             if placement_images_dir is not None and is_log_iteration:
                 _save_placement_image(placement_images_dir, current_iteration, eval_positions, grid_sizes, params)
