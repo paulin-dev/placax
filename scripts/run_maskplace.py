@@ -49,8 +49,19 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config() -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults, but with advantage/return normalization kept ON."""
-    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.0, value_loss_fn=huber_value_loss)
+    """PPOConfig matching MaskPlace's own PPO2.py defaults, but with advantage/return normalization kept ON
+    and a small entropy bonus where upstream uses none.
+
+    entropy_coef=0.0 is MaskPlace's own literal default, but with nothing else bounding actor-logit
+    magnitude (single fixed deterministic netlist -> consistent gradient direction every step -> Adam's
+    updates accumulate roughly linearly), it drives the masked logits' spread unbounded until softmax
+    saturates completely (exact 0/1 probabilities, exact zero gradient - confirmed by direct checkpoint
+    inspection: saturated by iteration ~4 in float32 at a ~1e8-1e9 logit spread, and again by iteration
+    ~6 even with jax_enable_x64 (see placax/_device.py), at a ~1e10-1e11 spread - x64 only bought more
+    headroom before hitting the same wall, not immunity from it). A small entropy bonus keeps probabilities
+    off the 0/1 boundary so this can't happen; PPOConfig's own general default (0.01) is used here too.
+    """
+    return PPOConfig(gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=0.01, value_loss_fn=huber_value_loss)
 
 
 def maskplace_optimizer(
