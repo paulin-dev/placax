@@ -41,13 +41,6 @@ os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/
 # actionable); a real fatal error still aborts the process regardless.
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
-# MaskPlace's own actor casts its masked logits to float64 before softmax (PPO2.py's
-# `x.double()`), which matters: with no entropy bonus, nothing else stops per-cell logit
-# spread from growing every gradient step, and float32 softmax fully saturates (exact 0/1
-# probabilities, zero gradient) at a spread of ~40, versus ~700+ in float64. Without x64
-# enabled here, jax silently truncates any float64 array back to float32.
-os.environ.setdefault("JAX_ENABLE_X64", "1")
-
 
 def warn_if_gpu_unused() -> None:
     """Warns if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""

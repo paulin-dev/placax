@@ -13,7 +13,12 @@ def test_maskplace_ppo_config_matches_maskplace_values() -> None:
     config = maskplace_ppo_config()
     assert config.gamma == 0.95
     assert config.lam == 1.0  # no GAE smoothing -> plain discounted return
-    assert config.entropy_coef == 0.0  # no entropy bonus
+    # Deliberately NOT MaskPlace's own entropy_coef=0.0: with nothing else bounding actor-logit
+    # magnitude, that literal value drives softmax to exact saturation (confirmed by checkpoint
+    # inspection - dies by iteration ~4 in float32, ~6 even with jax_enable_x64), permanently
+    # zeroing the policy gradient. A small entropy bonus (PPOConfig's own general default) keeps
+    # probabilities off the 0/1 boundary so this can't happen.
+    assert config.entropy_coef == 0.01
     assert config.value_loss_fn is huber_value_loss
     assert MASKPLACE_LEARNING_RATE == 2.5e-3
 
