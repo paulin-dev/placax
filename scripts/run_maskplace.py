@@ -107,7 +107,7 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
              "300 total; resuming at or past --n_iterations runs zero further iterations.",
     )
     parser.add_argument(
-        "--macro_budget", type=str, default=str(MASKPLACE_MACRO_BUDGET),
+        "--macro_budget", type=str, default=None,
         help='Place only the N most important macros, MaskPlace\'s --pnm (default: %(default)s, '
              'MaskPlace\'s own value); pass "all" to place every macro in the netlist instead.',
     )
