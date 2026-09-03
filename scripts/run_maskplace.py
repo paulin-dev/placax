@@ -49,24 +49,24 @@ MASKPLACE_MAX_GRAD_NORM = 0.5
 
 
 def maskplace_ppo_config(entropy_coef: float = 0.0) -> PPOConfig:
-    """PPOConfig matching MaskPlace's own PPO2.py defaults: raw, unnormalized advantages/returns
+    """PPOConfig matching MaskPlace's own PPO2.py defaults exactly: entropy_coef=0.0 (no entropy
+    bonus, overridable here e.g. via --entropy_coef) and raw, unnormalized advantages/returns
     (PPO2.py's `advantage = (target_v - critic_net_output).detach()` and
-    `value_loss = F.smooth_l1_loss(critic_output, target_v)` use neither) and, by default,
-    entropy_coef=0.0 (no entropy bonus, also matching PPO2.py).
+    `value_loss = F.smooth_l1_loss(critic_output, target_v)` use neither).
 
-    Note: entropy_coef=0.0 here has a known consequence in this JAX/float32 implementation - with nothing
-    bounding actor-logit magnitude (single fixed deterministic netlist -> consistent gradient direction
-    every step -> Adam's updates accumulate roughly linearly), logits saturate completely (exact 0/1
-    probabilities, exact zero gradient) by iteration ~4 in float32 (confirmed by direct checkpoint
-    inspection), and again by iteration ~6 even with jax_enable_x64 (see placax/_device.py) - x64 only
-    buys more headroom before hitting the same wall, not immunity from it. This literal-MaskPlace config
-    is kept for faithful comparison; PPOConfig's own general default (entropy_coef=0.01, normalization ON)
-    avoids the saturation and is what other configs in this codebase should keep using. Passing a nonzero
-    entropy_coef here (normalization still OFF, e.g. via --entropy_coef) tests a narrower question: an
-    entropy bonus only ever counteracts logit growth *before* saturation (its own gradient vanishes
-    together with every other softmax-based gradient once probabilities actually hit exact 0/1) - it's
-    unverified whether 0.01 is strong enough relative to unnormalized advantage/return scale to prevent
-    saturation ever being reached at all.
+    Earlier history worth knowing: this config used to genuinely saturate (logits blowing up to
+    exact 0/1 probabilities by iteration ~4-6, confirmed by direct checkpoint inspection), and
+    normalize_advantages/normalize_returns were briefly forced to True here as a workaround.
+    That symptom's actual root cause turned out to be unrelated to normalization at all: the
+    ResNet backbone (resnet_cnn.py) ran with a frozen, eval-mode BatchNorm - fine at init, but as
+    the surrounding conv weights fine-tuned during training, nothing corrected the growing
+    mismatch against those stale statistics, and it compounded into a ~1e6-scale activation blowup
+    through the backbone's 8 blocks within ~10-16 iterations (confirmed by direct forward-pass
+    inspection), saturating the final softmax regardless of entropy_coef or normalization. Fixed
+    by switching the backbone to live (train-mode) batch statistics, matching PPO2.py - it never
+    calls .eval() on its resnet either. With that fixed, a 30-step adversarial stress test (same
+    gradient direction every step, large unnormalized loss scale) stayed bounded instead of
+    exploding, so this reverts to MaskPlace's literal, faithful values below (2026-09-03).
     """
     return PPOConfig(
         gamma=0.95, lam=1.0, clip_eps=0.2, entropy_coef=entropy_coef, value_loss_fn=huber_value_loss,
@@ -167,8 +167,7 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
         "--entropy_coef", type=float, default=0.0,
         help="Entropy bonus coefficient, passed straight to maskplace_ppo_config() (default: 0.0, "
              "MaskPlace's own value - see that function's docstring for the logit-saturation issue "
-             "this causes and what a nonzero value here does and doesn't fix). Advantage/return "
-             "normalization stay off regardless of this flag, matching MaskPlace's own PPO2.py.",
+             "this causes and what a nonzero value here does and doesn't fix on its own).",
     )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
@@ -422,7 +421,9 @@ def main() -> None:
     Log.info(
         f"training to iteration {n_iterations} "
         f"({n_episodes} episodes/buffer, 10 minibatch epochs, batch 64, "
-        f"independent actor/critic optimizers, entropy_coef={entropy_coef}) ..."
+        f"independent actor/critic optimizers, entropy_coef={entropy_coef}, "
+        f"normalize_advantages={ppo_config.normalize_advantages}, "
+        f"normalize_returns={ppo_config.normalize_returns}) ..."
     )
 
     # 8. Run the actual training/eval loop.

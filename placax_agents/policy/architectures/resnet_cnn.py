@@ -63,8 +63,19 @@ def _normalize_by_shared_max(current: jax.Array, next_: jax.Array) -> tuple[jax.
 
 
 def _run_backbone(module: nn.Module, x: jax.Array) -> dict:
-    """A plain function wrapping the backbone call so nn.remat can wrap it."""
-    return module(x, train=False)
+    """A plain function wrapping the backbone call so nn.remat can wrap it.
+
+    train=True (live batch statistics), matching MaskPlace's own PPO2.py: it never calls .eval()
+    on its resnet, so BatchNorm always normalizes against each forward pass's own live mean/var
+    rather than the frozen ImageNet running stats - self-correcting no matter how far the
+    preceding conv weights drift during training. An eval-mode backbone was tried first (frozen
+    running stats, since observations are processed one at a time) but proved fragile: as the
+    conv weights fine-tune, their output no longer matches what those frozen stats expect, and
+    nothing corrects the mismatch - confirmed by direct inspection to compound into a ~3.8e6-scale
+    activation blowup by the backbone's last block within ~10-16 iterations, saturating the final
+    softmax to exact 0/1 (2026-09-03 investigation). See ResNetCoarseFineActorCritic.apply's own
+    override for how the resulting batch_stats mutation this requires gets discarded."""
+    return module(x, train=True)
 
 
 class _FineBranch(nn.Module):
@@ -109,7 +120,11 @@ class _CoarseBranch(nn.Module):
 
 
 class ResNetCoarseFineActorCritic(nn.Module):
-    """Two-branch actor-critic: a fine local branch plus a coarse ResNet-backbone branch, merged into one policy head. Backbone always runs in eval mode since observations are processed one at a time."""
+    """Two-branch actor-critic: a fine local branch plus a coarse ResNet-backbone branch, merged into
+    one policy head. The backbone runs with live batch statistics (see _run_backbone), matching
+    MaskPlace's own PPO2.py - this module's own apply() override requests and discards the resulting
+    batch_stats mutation, so it's transparent to every AlgorithmFn call site (rollout/eval/training
+    loops keep the plain (action_logits, value) contract, exactly as for any non-BatchNorm policy)."""
 
     resnet_backbone: nn.Module
     params: EnvParams
@@ -120,6 +135,15 @@ class ResNetCoarseFineActorCritic(nn.Module):
     coarse_seed_features: int = 16  # channel count of _CoarseBranch's learned (seed, seed) starting tensor
     critic_style: str = "canvas"  # "canvas" (default) or "step_embedding" (MaskPlace's own)
     max_episode_macros: int = 2048  # only used if critic_style == "step_embedding"
+
+    def apply(self, variables, *args, **kwargs):
+        """Overrides nn.Module.apply: the backbone's live BatchNorm (_run_backbone) needs
+        mutable=["batch_stats"] to run at all, but that mutation is never read back (MaskPlace
+        itself never switches its resnet to eval mode either, so its accumulated running stats
+        are equally never actually used) - requesting and discarding it here, once, keeps every
+        caller's (action_logits, value) contract identical to a policy with no BatchNorm at all."""
+        (action_logits, value), _mutated_batch_stats = super().apply(variables, *args, mutable=["batch_stats"], **kwargs)
+        return action_logits, value
 
     def _current_and_next_wiremasks(self, obs: dict) -> tuple[jax.Array, jax.Array]:
         """Returns normalized (current, next) lookahead wiremasks, falling back to `current` if horizon==1."""
@@ -139,7 +163,7 @@ class ResNetCoarseFineActorCritic(nn.Module):
         return current, next_
 
     def _coarse_branch_features(self, canvas: jax.Array, wiremask_cur: jax.Array, wiremask_next: jax.Array) -> jax.Array:
-        """Runs the frozen-BatchNorm ResNet backbone, then the coarse-branch projection/resize."""
+        """Runs the live-BatchNorm ResNet backbone, then the coarse-branch projection/resize."""
         # Stack the 3 input channels and add a batch dim of 1 (the backbone expects a batch axis).
         coarse_input = jnp.stack([canvas, wiremask_cur, wiremask_next], axis=-1)[None]
         # Gradient checkpointing: trades memory for recompute on the backward pass only.

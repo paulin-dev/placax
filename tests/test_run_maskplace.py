@@ -24,10 +24,9 @@ def test_maskplace_ppo_config_matches_maskplace_values() -> None:
     config = maskplace_ppo_config()
     assert config.gamma == 0.95
     assert config.lam == 1.0  # no GAE smoothing -> plain discounted return
-    # MaskPlace's own literal entropy_coef=0.0 - note this saturates this JAX/float32 implementation's
-    # softmax to exact 0/1 by iteration ~4-6 (confirmed by checkpoint inspection), a known consequence
-    # kept here for faithful comparison; other configs in this codebase should use PPOConfig's own
-    # general default (entropy_coef=0.01) instead, which avoids the saturation.
+    # MaskPlace's own literal entropy_coef=0.0 - the logit-saturation this used to cause turned
+    # out to be caused by the ResNet backbone's stale eval-mode BatchNorm, not this config, and is
+    # fixed at the source now (resnet_cnn.py) - see maskplace_ppo_config()'s own docstring.
     assert config.entropy_coef == 0.0
     # MaskPlace's own advantage/return computation is raw, with no normalization.
     assert config.normalize_advantages is False
@@ -37,7 +36,7 @@ def test_maskplace_ppo_config_matches_maskplace_values() -> None:
 
 
 def test_maskplace_ppo_config_entropy_coef_is_overridable() -> None:
-    # Normalization must stay off regardless - only entropy_coef itself is meant to vary here.
+    # Normalization stays off regardless - only entropy_coef itself is meant to vary here.
     config = maskplace_ppo_config(entropy_coef=0.01)
     assert config.entropy_coef == 0.01
     assert config.normalize_advantages is False
