@@ -134,7 +134,12 @@ class ResNetCoarseFineActorCritic(nn.Module):
     fine_layers: int = 2
     coarse_seed_features: int = 16  # channel count of _CoarseBranch's learned (seed, seed) starting tensor
     critic_style: str = "canvas"  # "canvas" (default) or "step_embedding" (MaskPlace's own)
-    max_episode_macros: int = 2048  # only used if critic_style == "step_embedding"
+    # MaskPlace's own nn.Embedding(1400, 64). Only used if critic_style == "step_embedding", and it
+    # must exceed the netlist's macro count: obs["step"] indexes it directly, and JAX clamps an
+    # out-of-range index silently rather than raising, which would quietly collapse every step past
+    # the bound onto one shared embedding row. 1400 clears all 24 benchmarks in the paper (largest:
+    # adaptec4, 1,329 macros); raise it for anything bigger.
+    max_episode_macros: int = 1400
 
     def apply(self, variables, *args, **kwargs):
         """Overrides nn.Module.apply: the backbone's live BatchNorm (_run_backbone) needs

@@ -80,9 +80,15 @@ def maskplace_optimizer(
     critic_param_prefix: str = "critic_",
     value_coef: float = PPOConfig().value_coef,
 ) -> optax.GradientTransformation:
-    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-independent-backward-pass setup."""
+    """Separately-clipped Adam for actor and critic, matching MaskPlace's two-independent-backward-pass setup.
+
+    The critic's threshold is scaled by value_coef because ppo_loss hands this optimizer the value
+    gradient already multiplied by value_coef, while PPO2.py clips the *unscaled* one at max_grad_norm:
+    clipping value_coef*g_v at value_coef*max_grad_norm triggers on exactly the same ||g_v|| > 0.5 that
+    PPO2.py's `clip_grad_norm_(critic_net.parameters(), 0.5)` does. The surviving value_coef factor on
+    the update itself is then absorbed by Adam, which is invariant to a constant gradient rescale."""
     actor_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm), optax.adam(learning_rate))
-    critic_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm / value_coef), optax.adam(learning_rate))
+    critic_chain = optax.chain(optax.clip_by_global_norm(max_grad_norm * value_coef), optax.adam(learning_rate))
     return make_grouped_optimizer(critic_chain, actor_chain, critic_param_prefix)
 
 
@@ -109,7 +115,8 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
     parser.add_argument(
         "--macro_budget", type=str, default="all",
         help='Place only the N most important macros, MaskPlace\'s --pnm (default: %(default)s, '
-             'MaskPlace\'s own value); pass "all" to place every macro in the netlist instead.',
+             'matching the paper, which places every macro by RL); pass an integer to cap it instead '
+             f'- PPO2.py\'s own --pnm default is {MASKPLACE_MACRO_BUDGET}.',
     )
     parser.add_argument(
         "--n_episodes", type=str, default=str(MASKPLACE_N_EPISODES),
