@@ -87,6 +87,34 @@ iteration each. `--wall_clock_s` is also available and accumulates across resume
 the hardware as much as the method. Budgets may be combined; the first to bind stops the run, and
 which one it was is logged.
 
+### Comparing agents
+
+`scripts/compare_agents.py` is the point of all of the above: several agents, one environment, one
+budget, one scoring path.
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 \
+    --env_steps=500000 --agents=greedy_wiremask,random_search,ppo --seeds=3
+```
+
+It asserts the environment hash matches across every run *before* anything starts, so it refuses
+to produce a table rather than producing a misleading one, and it computes each agent's HPWL
+itself - an agent hands over a placement, never a score.
+
+Three agents ship. `ppo` is the learner; the other two are baselines the project previously had
+none of, which is why "better than X" could not be stated even against a trivial reference:
+
+- **`random_search`** - uniformly-random legal placements, keeping the best. The honest compute
+  floor. A method that does not clearly beat compute-matched random search has not demonstrated
+  anything, and almost nothing in this literature reports it.
+- **`greedy_wiremask`** - each macro at the legal cell that adds least wirelength. The classical
+  strong baseline, and the one that says how much of a learned policy's score comes from learning
+  rather than from the wiremask observation it was handed.
+
+Adding a fourth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
+three methods (`placax_agents/agents/base.py`); it inherits the shared evaluation, checkpointing,
+budgeting and logging automatically.
+
 ### Reproducibility
 
 **JAX on GPU is not run-to-run deterministic in this project.** Two identical runs (same seed,
@@ -181,3 +209,26 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 Writes `macros_placed.png` and `macros_with_nets.png` (macro-only, always) plus, once DREAMPlace succeeds, `full_placement.png` (every macro and every cell) and the placed design itself at `<output_dir>/<design_name>/<design_name>.gp.pl`. Prints two HPWL numbers: `real_hpwl` (macro-to-macro nets only, the RL reward's own scope) and `full_hpwl` (every net, macros and cells, from the actual final placement) - both are geometric (half-perimeter) proxies, not a routed wirelength; that needs OpenROAD.
 
 Run `python -m scripts.run_pipeline --help` for the full flag list.
+
+## Physical validation (real PPA)
+
+Every number above is a geometric half-perimeter proxy. `scripts/validate_design.py` runs the
+actual physical flow on a macro-placed DEF - standard-cell placement, then area, utilization and
+timing from a real signoff tool:
+
+```sh
+python -m scripts.validate_design --def_path=placed.def --lef=tech.lef --lef=cells.lef \
+    --use_docker --liberty=cells.lib --clock_period_ns=2.0
+```
+
+Timing needs both `--liberty` and `--clock_period_ns`; without them area and utilization still
+come back and `timing_slack` reports as a dash - not computed, never guessed.
+`placax_tools/pipeline.py`'s `place_and_validate` names neither DREAMPlace nor OpenROAD, so
+substituting RePlAce, AutoDMP or another signoff tool is a change at the call site and nowhere
+else.
+
+**Not yet verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
+dependency, so the real binary has never been driven through this path - the TCL generation,
+output parsing and the composition all have tests, but someone with a real design should run it
+before trusting the numbers. The Bookshelf benchmarks under `benchmarks/` cannot reach it at all,
+since they carry no LEF/DEF; that is why validation went unwired for so long.
