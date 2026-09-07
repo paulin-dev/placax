@@ -155,23 +155,23 @@ def test_budget_rejects_non_positive_caps(kwargs: dict) -> None:
         Budget(**kwargs)
 
 
-def test_tracker_charges_env_steps_as_episodes_times_macros() -> None:
+def test_tracker_charges_env_steps_as_episodes_times_steps_per_episode() -> None:
     # env_steps is the cross-agent currency; if this accounting is wrong, every budgeted
     # comparison is wrong with it.
     tracker = BudgetTracker(Budget(env_steps=100))
-    use = tracker.record_iteration(episodes=10, n_macros=4)
+    use = tracker.record_iteration(episodes=10, steps_per_episode=4)
     assert (use.iterations, use.episodes, use.env_steps) == (1, 10, 40)
-    tracker.record_iteration(episodes=10, n_macros=4)
+    tracker.record_iteration(episodes=10, steps_per_episode=4)
     assert tracker.exhausted() is None
-    assert tracker.record_iteration(episodes=10, n_macros=4).env_steps == 120
+    assert tracker.record_iteration(episodes=10, steps_per_episode=4).env_steps == 120
     assert tracker.exhausted() == "env_steps"
 
 
 def test_tracker_reports_iteration_cap_when_that_is_what_binds() -> None:
     tracker = BudgetTracker(Budget(iterations=2))
-    tracker.record_iteration(episodes=1, n_macros=1)
+    tracker.record_iteration(episodes=1, steps_per_episode=1)
     assert tracker.exhausted() is None
-    tracker.record_iteration(episodes=1, n_macros=1)
+    tracker.record_iteration(episodes=1, steps_per_episode=1)
     assert tracker.exhausted() == "iterations"
 
 
@@ -182,7 +182,7 @@ def test_tracker_resumes_a_budget_rather_than_starting_a_fresh_one() -> None:
     tracker = BudgetTracker(Budget(env_steps=100), prior=prior)
     assert tracker.use.env_steps == 80
     assert tracker.use.wall_clock_s >= 12.0
-    tracker.record_iteration(episodes=10, n_macros=4)
+    tracker.record_iteration(episodes=10, steps_per_episode=4)
     assert tracker.exhausted() == "env_steps"
 
 

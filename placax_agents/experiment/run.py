@@ -6,8 +6,12 @@ one took a --seed, the other hardcoded PRNGKey(0); neither wrote down a single t
 configuration. Every run now goes through here, whatever the agent, so every run gets the same
 treatment and leaves the same evidence behind:
 
-  manifest.json      the full config, its hashes, and the machine fingerprint, written at start
-  training_log.jsonl one line per iteration, each carrying the run's hash and its budget spend
+  manifest.json      the full config, its hashes, the metric definitions and the machine
+                     fingerprint, written at start
+  training_log.jsonl one line per iteration, each carrying the run's hash, its budget spend, and
+                     - on every evaluated iteration - the placement's LEGALITY alongside its
+                     score, because a wirelength number for an overlapping placement is not a
+                     result
   state.json         budget spend, so a resumed run continues the same budget
   checkpoint.bin     the agent's own state plus the RNG key and iteration count
   best_checkpoint.bin  bare weights plus the real_hpwl that earned them (agents that have weights)
@@ -21,6 +25,8 @@ import pathlib
 import time
 
 from placax.log import Log  # must precede jax imports
+from placax.core import replay
+from placax.extras.legality import jitted_legality
 from placax.extras.rewards import hpwl
 from placax.reproducibility import describe_determinism, fingerprint
 from placax_agents.agents.ppo import is_ppo_state
@@ -33,6 +39,29 @@ from placax_agents.training.algorithm.running_stats import init_running_stats
 
 import jax.numpy as jnp
 from jax import random
+
+METRICS = {
+    "real_hpwl": "Half-perimeter wirelength of the final placement, in real design units, over "
+                 "MACRO-TO-MACRO nets only - the netlist parser drops every net with fewer than "
+                 "two macros, so this is not full-netlist HPWL and is not directly comparable to "
+                 "a paper that reports one. Computed by the runner from the placement the agent "
+                 "handed over, identically for every agent.",
+    "reward_return": "Sum of the run's CONFIGURED reward over the episode, obtained by replaying "
+                     "the final placement through placax.core.step. This is what the agent was "
+                     "actually asked to optimize; real_hpwl is fixed across configs so a table "
+                     "stays readable when the reward changes.",
+    "overlap_ratio": "Fraction of total macro area covered by more than one macro. Should be 0; "
+                     "anything else means the action mask's relaxation valve fired and the "
+                     "placement is not physically realizable.",
+    "out_of_bounds_ratio": "Fraction of total macro area falling outside the canvas.",
+    "gradient_steps": "Parameter updates applied so far. Zero for a non-learning method - the "
+                      "compute env_steps deliberately does not price.",
+}
+"""What each logged metric actually means, written into every manifest.
+
+A number is only comparable if its definition travels with it, and `real_hpwl`'s definition in
+particular is easy to get wrong from the outside: it is macro-to-macro only.
+"""
 
 MANIFEST_NAME = "manifest.json"
 LOG_NAME = "training_log.jsonl"
@@ -51,6 +80,7 @@ def write_manifest(output_dir: pathlib.Path, config: ExperimentConfig) -> pathli
     path = output_dir / MANIFEST_NAME
     path.write_text(json.dumps({
         "config": config.to_dict(),
+        "metrics": METRICS,
         "fingerprint": fingerprint(),
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
     }, indent=2, sort_keys=True) + "\n")
@@ -139,6 +169,27 @@ def score_placement(benchmark, positions) -> float:
                       benchmark.valid_mask))
 
 
+def score(benchmark, positions, n_placed: int = 0) -> dict:
+    """Everything the runner measures about one placement, computed identically for every agent.
+
+    Three things rather than one, because a wirelength number alone can hide two different
+    problems. `real_hpwl` is the fixed cross-config metric. `reward_return` is what the agent was
+    actually asked to optimize - replayed through the same `step()` a policy drives, so swapping
+    the reward moves the number every agent is judged by. The legality fields say whether the
+    placement is physically realizable at all: overlap makes wires shorter, so an illegal
+    placement looks like a better result unless legality is reported beside the score.
+    """
+    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    measured = jitted_legality(positions, grid_sizes, benchmark.params).to_dict()
+    return {
+        "real_hpwl": score_placement(benchmark, positions),
+        "reward_return": float(
+            replay(positions, benchmark.reward_fn, benchmark.params, n_placed)
+        ),
+        **measured,
+    }
+
+
 def run_experiment(
     config: ExperimentConfig,
     output_dir: pathlib.Path | None,
@@ -156,6 +207,9 @@ def run_experiment(
     throwaway probe runs. Everything else about the run is identical.
     """
     built = built if built is not None else build(config)
+    # build() resolves the netlist digest, so the config it carries identifies the DESIGN and not
+    # just the path it was loaded from. Everything recorded from here on uses that one.
+    config = built.config
     benchmark, agent = built.benchmark, built.agent
 
     if output_dir is not None:
@@ -212,27 +266,44 @@ def run_experiment(
     stop_reason = tracker.exhausted()
     if stop_reason is not None:
         Log.info(f"  budget already exhausted ({stop_reason}); nothing to do")
-    elif not tracker.can_afford(built.episodes_per_iteration, built.n_macros):
+    elif not tracker.can_afford(built.episodes_per_iteration, built.steps_per_episode):
         # A budget that cannot pay for a single iteration is a configuration mistake, not a
         # finished run, so say so rather than exiting successfully having trained nothing.
         raise ValueError(
             f"budget of {config.environment.budget.env_steps:,} env steps cannot afford one "
             f"iteration of this agent, which costs {built.env_steps_per_iteration:,} "
-            f"({built.episodes_per_iteration} episodes x {built.n_macros} macros). Raise the "
-            f"budget to a multiple of that, or lower the agent's episodes per iteration."
+            f"({built.episodes_per_iteration} episodes x {built.steps_per_episode} macros). "
+            f"Raise the budget to a multiple of that, or lower the agent's episodes per "
+            f"iteration."
         )
 
-    while stop_reason is None and tracker.can_afford(built.episodes_per_iteration, built.n_macros):
+    while stop_reason is None and tracker.can_afford(
+        built.episodes_per_iteration, built.steps_per_episode
+    ):
         # 3. One agent update, whatever that means for this agent.
         key, step_key = random.split(key)
         agent_state, result = agent.update(step_key, agent_state)
-        use = tracker.record_iteration(result.episodes, built.n_macros)
+        use = tracker.record_iteration(
+            result.episodes, built.steps_per_episode, result.gradient_steps
+        )
 
         # 4. Periodic eval: the agent hands over its best placement, the runner scores it.
-        real_hpwl = None
+        #    Charged to the budget - an eval places every remaining macro, which is exactly as
+        #    much environment work as a training episode. Leaving it free meant two runs on one
+        #    env_step budget did different amounts of work if their --eval_every differed.
+        measured = None
         if eval_every > 0 and use.iterations % eval_every == 0:
             positions = agent.best_positions(agent_state)
-            real_hpwl = score_placement(benchmark, positions)
+            use = tracker.record_evaluation(built.steps_per_episode)
+            measured = score(benchmark, positions, built.n_placed)
+            real_hpwl = measured["real_hpwl"]
+            if not measured["is_legal"]:
+                Log.warning(
+                    f"  iteration {use.iterations}: placement is NOT legal "
+                    f"(overlap {measured['overlap_ratio']:.1%}, out of bounds "
+                    f"{measured['out_of_bounds_ratio']:.1%}, {measured['n_unplaced']} unplaced) - "
+                    f"its wirelength is not a realizable result"
+                )
             if placement_images_dir is not None:
                 from placax_viz.placement import save_placement_image
 
@@ -259,18 +330,21 @@ def run_experiment(
         entry = {
             "iteration": use.iterations,
             "env_steps": use.env_steps,
+            "eval_env_steps": use.eval_env_steps,
             "episodes": use.episodes,
+            "gradient_steps": use.gradient_steps,
             "wall_clock_s": round(use.wall_clock_s, 3),
             "loss": result.loss,
-            "real_hpwl": real_hpwl,
+            "real_hpwl": None,
             "full_hash": config.full_hash(),
+            **(measured or {}),
             **result.metrics,
         }
         log.append(entry)
         _append_log(log_path, entry)
         if log_every > 0 and use.iterations % log_every == 0:
             loss_str = f"{result.loss:>10.4f}" if result.loss is not None else "         -"
-            hpwl_str = f"{real_hpwl:.1f}" if real_hpwl is not None else "-"
+            hpwl_str = f"{entry['real_hpwl']:.1f}" if entry["real_hpwl"] is not None else "-"
             Log.info(f"{tracker.describe()}  loss={loss_str}  real_hpwl={hpwl_str}")
 
         # 6. Checkpoint every iteration so a crash never costs more than one.
@@ -278,10 +352,15 @@ def run_experiment(
             save_checkpoint(_bundle(agent_state, key, use.iterations), checkpoint_path)
         _write_budget_use(output_dir, config, use)
 
-        # 7. Stop on budget, or early on a stalled real_hpwl.
+        # 7. Stop on budget, on a stalled real_hpwl, or because the agent says it is done.
         stop_reason = tracker.exhausted()
         if stop_reason is None and patience > 0 and evals_without_improvement >= patience:
             stop_reason = "patience"
+        if stop_reason is None and agent.converged(agent_state):
+            # A deterministic heuristic cannot produce a different placement next iteration.
+            # Spending the rest of the budget replaying it would write thousands of identical
+            # log lines and checkpoints; the budget still records what was actually used.
+            stop_reason = "converged"
 
     # The loop also exits when the next iteration wouldn't fit, which is the env_step cap binding
     # one iteration earlier than `exhausted()` would report it.

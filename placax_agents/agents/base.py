@@ -34,11 +34,19 @@ class UpdateResult:
 
     episodes: int
     """Full episodes' worth of environment interaction this update consumed. The runner
-    multiplies by n_macros to charge env steps, so this must count real placements - a
+    multiplies by the episode length to charge env steps, so this must count real placements - a
     population of 32 candidate placements is 32 episodes, not one."""
 
     loss: float | None = None
     """The agent's own training signal, if it has one. None for methods that don't train."""
+
+    gradient_steps: int = 0
+    """Parameter updates this iteration applied. Zero for a method that does not learn.
+
+    Reported because env_steps deliberately does not price it: a buffered PPO iteration runs
+    ppo_epochs x n_batches gradient steps on the same environment interaction a random-search
+    iteration spends none on. Two runs matched on env_steps are sample-matched; whether they are
+    compute-matched is a question this number lets a reader answer instead of assume."""
 
     metrics: dict[str, float] = field(default_factory=dict)
     """Anything else worth putting in the log - population diversity, acceptance rate, entropy."""
@@ -61,4 +69,15 @@ class Agent(Protocol):
     def best_positions(self, state: Any) -> jax.Array:
         """This agent's single best placement given its current state, as (n_macros, 2) grid
         positions. The runner scores it; the agent must not."""
+        ...
+
+    def converged(self, state: Any) -> bool:
+        """Whether further iterations cannot change this agent's answer.
+
+        Almost always False - a learner always might improve. A deterministic heuristic knows it
+        will not, and saying so lets the runner stop rather than spend the rest of a large budget
+        recomputing one placement, writing an identical checkpoint and log line each time. The
+        budget still records what was actually spent, so a converged run reports the compute it
+        used rather than the compute it was offered.
+        """
         ...

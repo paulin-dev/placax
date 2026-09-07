@@ -36,10 +36,15 @@ pip install placax
 Every run is described by one `ExperimentConfig` and executed by one shared loop, so two runs can
 actually be compared. A config is split in two:
 
-- **`environment`** - benchmark, grid, macro order/budget, reward, observation, action mask, and
-  the compute budget. This must be *identical* between two runs for their results to mean
-  anything side by side.
+- **`environment`** - benchmark, grid, macro order/budget, initial placement, reward, observation,
+  action mask, the physical (cell placer / validator) stack, and the compute budget. This must be
+  *identical* between two runs for their results to mean anything side by side.
 - **`agent`** - policy, optimizer, algorithm, loop shape. This is the thing *under test*.
+
+Every agent gets the whole environment, not a convenient subset of it: the same observation, the
+same action mask, the same warm start, the same reward. A baseline that quietly skipped the
+action mask would be playing a different game while its config claimed otherwise, which is
+asserted directly in `tests/test_environment_parity.py` rather than left to each builder.
 
 That split is enforced mechanically rather than by careful reading:
 
@@ -53,17 +58,30 @@ b = presets.training("benchmarks/adaptec1", budget=budget)
 assert_comparable(a, b)   # raises, listing every axis on which they differ
 ```
 
-Two runs are comparable if and only if their `environment_hash()` matches; `full_hash()`
-additionally identifies the agent and seed. Both are written into every run's outputs, so a
-results file is attributable to the configuration that produced it without any external
-bookkeeping.
+**Four hash levels, because "comparable" is not one question:**
+
+| level | asserts | use it for |
+|---|---|---|
+| `benchmark_hash()` | the design's own contents, grid, macro order and budget | "same design?" |
+| `task_hash()` | + reward, initial placement, action-legality rules, physical stack, budget | a state-representation study, whose whole point is that the observation differs |
+| `environment_hash()` | + the observation — everything the agent did not choose | comparing agents (the default) |
+| `full_hash()` | + agent and seed | identifying one exact run |
+
+`assert_comparable(a, b, level="task")` picks the level; the default is `environment`. A looser
+level is a claim about what the comparison means, so it has to be visible at the call site.
+
+A design is identified by a **content digest of its parsed netlist**, not by its path. Two
+machines mounting the same benchmark at different paths compare as comparable; editing a netlist
+in place does not. All four hashes are written into every run's outputs, so a results file is
+attributable to the configuration that produced it without any external bookkeeping.
 
 Each run writes, into its output directory:
 
 | file | contents |
 |---|---|
-| `manifest.json` | the full config, both hashes, and a machine fingerprint (git SHA, library versions, backend, device), written **before** training so a crashed run is still attributable |
-| `training_log.jsonl` | one line per iteration, each carrying `full_hash`, `env_steps`, `episodes`, `wall_clock_s`, `loss` and `real_hpwl` |
+| `manifest.json` | the full config, all four hashes, **what every logged metric means**, and a machine fingerprint (git SHA, library versions, backend, device), written **before** training so a crashed run is still attributable |
+| `training_log.jsonl` | one line per iteration, each carrying `full_hash`, `env_steps`, `eval_env_steps`, `episodes`, `gradient_steps`, `wall_clock_s`, `loss`, and — on evaluated iterations — `real_hpwl`, `reward_return` and the placement's **legality** (`overlap_ratio`, `out_of_bounds_ratio`, `is_legal`) |
+| `ppa.json` | real measured PPA plus the tools that produced it, when the config names a validator (`scripts/validate_design.py --config=...`) |
 | `state.json` | budget spend, so a resumed run continues the same budget instead of starting a fresh one |
 | `checkpoint.bin` | resumable training state |
 | `best_checkpoint.bin` | bare weights plus the `real_hpwl` that earned them |
@@ -83,9 +101,18 @@ python -m scripts.run_maskplace --benchmark_dir=benchmarks/adaptec1 --env_steps=
 
 The loop refuses to *start* an iteration that would exceed the cap, so two different loop shapes
 given one `--env_steps` budget both finish at or below it rather than overshooting by a whole
-iteration each. `--wall_clock_s` is also available and accumulates across resumes, but measures
-the hardware as much as the method. Budgets may be combined; the first to bind stops the run, and
-which one it was is logged.
+iteration each. Evaluation rollouts are charged too — an eval places every remaining macro, which
+is exactly as much environment work as a training episode. `--wall_clock_s` is also available and
+accumulates across resumes, but measures the hardware as much as the method. Budgets may be
+combined; the first to bind stops the run, and which one it was is logged. A deterministic agent
+that reports itself converged stops early rather than replaying one placement for the rest of the
+budget; what it actually spent is what gets recorded.
+
+**This is a sample budget, not a compute budget, and the distinction is deliberate.** `env_steps`
+prices environment interaction — the one axis every agent family genuinely shares. It does not
+price what an agent does between rollouts: the buffered PPO loop runs ten epochs of minibatch
+gradient updates per iteration and random search runs none. So `gradient_steps` is logged
+alongside, and a claim of "matched compute" has to cite it rather than assume it.
 
 ### Comparing agents
 
@@ -98,8 +125,15 @@ python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 \
 ```
 
 It asserts the environment hash matches across every run *before* anything starts, so it refuses
-to produce a table rather than producing a misleading one, and it computes each agent's HPWL
+to produce a table rather than producing a misleading one, and it scores each agent's placement
 itself - an agent hands over a placement, never a score.
+
+The table reports **legality beside wirelength**. Overlapping macros have shorter wires, so an
+unrealizable placement outranks a legal one on HPWL alone; a row that is not 100% legal has not
+produced a result, whatever its number says. Legality is measured on every evaluated placement,
+which also makes the action mask's relaxation valve visible — it drops the quality rule, and then
+legality itself, rather than leaving an episode with no legal move, and until now did so
+silently.
 
 Three agents ship. `ppo` is the learner; the other two are baselines the project previously had
 none of, which is why "better than X" could not be stated even against a trivial reference:
@@ -109,7 +143,14 @@ none of, which is why "better than X" could not be stated even against a trivial
   anything, and almost nothing in this literature reports it.
 - **`greedy_wiremask`** - each macro at the legal cell that adds least wirelength. The classical
   strong baseline, and the one that says how much of a learned policy's score comes from learning
-  rather than from the wiremask observation it was handed.
+  rather than from the wiremask observation it was handed. Deterministic, so it reports itself
+  converged after one iteration instead of spending the rest of the budget on the same answer.
+
+Both baselines run inside the environment their config describes - same observation, same action
+mask, same warm start - and rank candidates by the **configured reward**, not by bare HPWL. That
+matters for the reward axis: if a baseline scored with HPWL regardless, swapping the reward would
+change what PPO optimizes and leave its baselines untouched, while `assert_comparable` reported
+the two environments as identical.
 
 Adding a fourth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
 three methods (`placax_agents/agents/base.py`); it inherits the shared evaluation, checkpointing,
@@ -218,14 +259,24 @@ timing from a real signoff tool:
 
 ```sh
 python -m scripts.validate_design --def_path=placed.def --lef=tech.lef --lef=cells.lef \
-    --use_docker --liberty=cells.lib --clock_period_ns=2.0
+    --config=runs/adaptec1/manifest_config.json --use_docker
 ```
+
+`--config` is the path that produces an attributable number: the cell placer and validator come
+from the experiment's own `EnvironmentSpec.physical` (so they are in its hash and its manifest),
+and the result is written to `ppa.json` carrying that run's `full_hash`. Without it the tools come
+from CLI flags and the number belongs to nothing - which is why this box sat outside the
+reproducibility envelope for so long.
+
+Which tools ran is part of the config; *where they are installed* deliberately is not.
+`--dreamplace_root`, `--use_docker`, `--gpu` and `--openroad_binary` are properties of the
+machine, and folding an install path into an environment hash would stop two labs running the
+same experiment from ever comparing as comparable.
 
 Timing needs both `--liberty` and `--clock_period_ns`; without them area and utilization still
 come back and `timing_slack` reports as a dash - not computed, never guessed.
 `placax_tools/pipeline.py`'s `place_and_validate` names neither DREAMPlace nor OpenROAD, so
-substituting RePlAce, AutoDMP or another signoff tool is a change at the call site and nowhere
-else.
+substituting RePlAce, AutoDMP or another signoff tool is a registry entry and a config change.
 
 **Not yet verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
 dependency, so the real binary has never been driven through this path - the TCL generation,

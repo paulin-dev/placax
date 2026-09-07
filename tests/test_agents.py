@@ -1,7 +1,8 @@
 """The Agent seam, and the two non-learning agents that prove it isn't just PPO in a costume."""
+import dataclasses
 import pathlib
 
-from placax.core import reset, step  # noqa: F401  must precede jax imports
+from placax.core import replay, reset, step  # noqa: F401  must precede jax imports
 from placax.extras.masks import boundary_mask, occupancy_mask
 from placax.extras.render import render
 from placax_agents.agents import Agent, GreedyWiremaskAgent, PPOAgent, RandomSearchAgent
@@ -40,17 +41,10 @@ def env(tmp_path: pathlib.Path):
     """A small shared environment plus its loaded benchmark, reused by every agent in a test."""
     benchmark_dir = _write_tiny_bookshelf(tmp_path)
     config = presets.training(benchmark_dir, budget=Budget(iterations=2))
-    small = type(config.environment.benchmark)(
-        benchmark_dir=str(benchmark_dir), grid=8, macro_budget=None,
-        order=config.environment.benchmark.order,
-    )
-    config = type(config)(
-        name=config.name, seed=config.seed, agent=config.agent,
-        environment=type(config.environment)(
-            benchmark=small, reward=config.environment.reward, state=config.environment.state,
-            action_mask=config.environment.action_mask, budget=config.environment.budget,
-        ),
-    )
+    config = dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment,
+        benchmark=dataclasses.replace(config.environment.benchmark, grid=8),
+    ))
     return config, build_benchmark(config)
 
 
@@ -163,14 +157,17 @@ def test_random_search_keeps_the_best_placement_across_updates(env) -> None:
     config, benchmark = env
     agent = RandomSearchAgent(benchmark, population=4)
     state = agent.init(random.PRNGKey(0))
-    best = float("inf")
+    best = -float("inf")
     for seed in range(4):
         state, _result = agent.update(random.PRNGKey(seed), state)
-        score = float(state["best_hpwl"])
-        assert score <= best  # monotonically non-increasing: an incumbent is never given up
+        score = float(state["best_return"])
+        assert score >= best  # monotonically non-decreasing: an incumbent is never given up
         best = score
-    # And the recorded incumbent must be the placement that actually earned that score.
-    assert score_placement(benchmark, state["best_positions"]) == pytest.approx(best, rel=1e-5)
+    # And the recorded incumbent must be the placement that actually earned that score. The
+    # incumbent is ranked by the CONFIGURED reward, not by bare HPWL, so this replays it through
+    # the same kernel rather than re-scoring it a second way.
+    replayed = float(replay(state["best_positions"], benchmark.reward_fn, benchmark.params))
+    assert replayed == pytest.approx(best, rel=1e-5)
 
 
 def test_random_search_population_sets_its_episode_cost(env) -> None:
@@ -204,7 +201,6 @@ def test_three_agents_run_to_the_same_env_step_budget(env, tmp_path: pathlib.Pat
     config, benchmark = env
     budget = Budget(env_steps=benchmark.params.n_macros * 8)
     configs = [
-        _with_agent(_rebudget(config, budget), "greedy_wiremask"),
         _with_agent(_rebudget(config, budget), "random_search", population=2),
         _rebudget(config, budget),
     ]
@@ -217,18 +213,32 @@ def test_three_agents_run_to_the_same_env_step_budget(env, tmp_path: pathlib.Pat
         spends.append(log[-1]["env_steps"])
         # Every agent's placement is scored by the runner, not by itself.
         assert score_placement(benchmark, built.agent.best_positions(state)) > 0
+    # Two agents that can keep improving spend the budget identically, to the env step.
     assert len(set(spends)) == 1
     assert spends[0] <= budget.env_steps
 
 
+def test_a_converged_agent_stops_early_rather_than_replaying_itself(env, tmp_path) -> None:
+    # greedy_wiremask is deterministic and stateless, so iteration 2 cannot differ from
+    # iteration 1. The budget is a CAP, not a quota: spending the remaining 7 episodes would
+    # write seven identical log lines and checkpoints and change nothing.
+    config, benchmark = env
+    budget = Budget(env_steps=benchmark.params.n_macros * 8)
+    cfg = _with_agent(_rebudget(config, budget), "greedy_wiremask")
+    built = build(cfg, benchmark=benchmark)
+    _state, log = run_experiment(
+        cfg, tmp_path / "greedy", built=built, eval_every=10 ** 9, log_every=10 ** 9
+    )
+    assert len(log) == 1
+    assert log[-1]["env_steps"] < budget.env_steps   # under the cap, and honestly reported
+
+
 def _rebudget(config, budget: Budget):
-    return type(config)(
-        name=config.name, seed=config.seed, agent=config.agent,
-        environment=type(config.environment)(
-            benchmark=config.environment.benchmark, reward=config.environment.reward,
-            state=config.environment.state, action_mask=config.environment.action_mask,
-            budget=budget,
-        ),
+    # dataclasses.replace rather than a hand-listed reconstruction: the latter silently drops any
+    # EnvironmentSpec field added later, which is how a test starts asserting about a different
+    # environment than the one under test.
+    return dataclasses.replace(
+        config, environment=dataclasses.replace(config.environment, budget=budget)
     )
 
 
@@ -243,7 +253,9 @@ def test_a_baseline_run_writes_the_same_evidence_as_a_training_run(env, tmp_path
 
     assert (output_dir / "manifest.json").exists()
     assert (output_dir / "training_log.jsonl").exists()
-    assert log[-1]["full_hash"] == cfg.full_hash()
+    # built.config, not cfg: build() resolves the netlist digest, and the resolved config is
+    # what a run records.
+    assert log[-1]["full_hash"] == built.config.full_hash()
     assert log[-1]["real_hpwl"] is not None
     # No policy weights exist, so no best_checkpoint should be invented for one.
     assert not (output_dir / "best_checkpoint.bin").exists()

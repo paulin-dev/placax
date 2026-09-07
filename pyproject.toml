@@ -23,6 +23,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["placax*", "placax_agents*", "placax_tools*", "placax_viz*"]
+# `--use_docker` clones DREAMPlace's full source into placax_tools/dreamplace/DREAMPlace/. It is
+# gitignored but still on disk, and `placax_tools*` matches every package inside it - so a wheel
+# built on a machine that has run the pipeline would vendor an entire external project (its
+# pybind11 and Limbo third-party trees included) while one built from a clean checkout would not.
+# Scoped explicitly for the same reason [tool.pytest.ini_options] below already is.
+exclude = ["placax_tools.dreamplace.DREAMPlace*"]
 
 [tool.pytest.ini_options]
 # Scoped explicitly: --use_docker clones DREAMPlace's full source (its own pybind11/etc. test suites

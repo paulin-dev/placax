@@ -22,7 +22,8 @@ from placax_agents.agents.ppo import PPOAgent
 from placax_agents.benchmark import Benchmark
 from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.registry import (
-    MASKS, OPTIMIZERS, ORDERS, POLICIES, REWARDS, STATES, VALUE_LOSSES, resolve,
+    CELL_PLACERS, INITS, MASKS, OPTIMIZERS, ORDERS, POLICIES, REWARDS, STATES, VALIDATORS,
+    VALUE_LOSSES, resolve,
 )
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.loops.buffered_train import buffered_train_step
@@ -60,11 +61,11 @@ def _loop_buffered(built, n_episodes: int = 10, ppo_epochs: int = 10, batch_size
     # =True)), so a buffer smaller than one batch yields zero minibatches and the update is
     # silently skipped - the run trains nothing while reporting loss=0.0 every iteration. Easy to
     # hit by lowering --macro_budget or --n_episodes for a quick probe, and invisible without this.
-    buffer_size = n_episodes * built.benchmark.params.n_macros
+    buffer_size = n_episodes * built.steps_per_episode
     if buffer_size < batch_size:
         Log.warning(
             f"buffer holds {buffer_size} transitions ({n_episodes} episodes x "
-            f"{built.benchmark.params.n_macros} macros) but batch_size is {batch_size}, so every "
+            f"{built.steps_per_episode} macros) but batch_size is {batch_size}, so every "
             f"update is SKIPPED and the policy never changes. Lower batch_size below "
             f"{buffer_size}, or raise n_episodes/macro_budget."
         )
@@ -76,9 +77,11 @@ def _loop_buffered(built, n_episodes: int = 10, ppo_epochs: int = 10, batch_size
             built.benchmark.cell_size, n_episodes, ppo_epochs=ppo_epochs, batch_size=batch_size,
             state_fn=built.state_fn, ppo_config=built.ppo_config,
             extra_illegal_fn=built.extra_illegal_fn,
+            initial_positions=built.initial_positions, n_placed=built.n_placed,
         )
 
-    return step_fn, n_episodes
+    # Every epoch runs one gradient step per whole minibatch; the short remainder is dropped.
+    return step_fn, n_episodes, ppo_epochs * (buffer_size // batch_size)
 
 
 def _loop_sequential(built):
@@ -89,10 +92,11 @@ def _loop_sequential(built):
             key, variables, opt_state, running_stats, built.optimizer, built.policy.apply,
             built.benchmark.params, built.benchmark.reward_fn, built.benchmark.sizes_array,
             built.benchmark.cell_size, built.state_fn, built.ppo_config, built.extra_illegal_fn,
+            built.initial_positions, built.n_placed,
         )
         return variables, opt_state, running_stats, loss
 
-    return step_fn, 1
+    return step_fn, 1, 1
 
 
 def _loop_parallel(built, n_envs: int = 8):
@@ -104,13 +108,40 @@ def _loop_parallel(built, n_envs: int = 8):
             keys, variables, opt_state, running_stats, built.optimizer, built.policy.apply,
             built.benchmark.params, built.benchmark.reward_fn, built.benchmark.sizes_array,
             built.benchmark.cell_size, built.state_fn, built.ppo_config, built.extra_illegal_fn,
+            built.initial_positions, built.n_placed,
         )
         return variables, opt_state, running_stats, loss
 
-    return step_fn, n_envs
+    return step_fn, n_envs, 1
 
 
 LOOPS = {"buffered": _loop_buffered, "sequential": _loop_sequential, "parallel": _loop_parallel}
+"""loop name -> builder(built, **kwargs) -> (step_fn, episodes_per_iteration,
+gradient_steps_per_iteration). The third value is what makes the compute side of a comparison
+reportable rather than guessed - see placax_agents/experiment/budget.py."""
+
+
+@dataclass(frozen=True)
+class ResolvedEnvironment:
+    """The environment half of a config, live: the pieces EVERY agent must run inside.
+
+    Bundled into one object so an agent builder cannot take some of it and silently skip the
+    rest. `as_kwargs()` is what an agent constructor accepts wholesale, which makes "this agent
+    honors the whole environment" the default rather than something each builder has to remember.
+    """
+
+    state_fn: Any
+    extra_illegal_fn: Any
+    initial_positions: Any
+    n_placed: int
+
+    def as_kwargs(self) -> dict:
+        return {
+            "state_fn": self.state_fn,
+            "extra_illegal_fn": self.extra_illegal_fn,
+            "initial_positions": self.initial_positions,
+            "n_placed": self.n_placed,
+        }
 
 
 @dataclass(frozen=True)
@@ -123,19 +154,39 @@ class BuiltExperiment:
     """
 
     config: ExperimentConfig
+    """The RESOLVED config: the one that was handed in, plus the netlist digest that only exists
+    once the design has actually been loaded. This is what a manifest should record."""
+
     benchmark: Benchmark
     state_fn: Any
     extra_illegal_fn: Any
     episodes_per_iteration: int
+    initial_positions: Any = None
+    n_placed: int = 0
     agent: Agent | None = None
     policy: Any = None
     optimizer: Any = None
     ppo_config: PPOConfig | None = None
     step_fn: StepFn | None = None
+    cell_placer: Any = None
+    """Left None by build(): the physical tools are constructed by `experiment.physical`, which
+    is where this machine's binary paths are known. Set it to inject a tool directly."""
+
+    validator: Any = None
 
     @property
     def n_macros(self) -> int:
         return self.benchmark.params.n_macros
+
+    @property
+    def steps_per_episode(self) -> int:
+        """Macro placements in one episode - fewer than n_macros when the run is warm-started.
+
+        The budget charges what an episode actually costs, so a warm start that hands the agent
+        30 of 543 macros buys proportionally more episodes for the same env_step budget rather
+        than being billed for placements nobody made.
+        """
+        return self.n_macros - self.n_placed
 
     @property
     def env_steps_per_iteration(self) -> int:
@@ -145,7 +196,7 @@ class BuiltExperiment:
         before running it. What actually gets charged is the episode count the agent reports
         afterwards, so an agent whose cost varies is still accounted for exactly.
         """
-        return self.episodes_per_iteration * self.n_macros
+        return self.episodes_per_iteration * self.steps_per_episode
 
     def init_variables(self, key: jax.Array):
         """Fresh policy variables, shaped from one real observation of this benchmark.
@@ -155,8 +206,8 @@ class BuiltExperiment:
         """
         from placax.core import reset
 
-        obs0 = self.state_fn(reset(self.benchmark.params), self.benchmark.params,
-                             self.benchmark.sizes_array)
+        obs0 = self.state_fn(reset(self.benchmark.params, self.initial_positions),
+                             self.benchmark.params, self.benchmark.sizes_array)
         return self.policy.init(key, obs0)
 
 
@@ -171,7 +222,7 @@ def build_benchmark(config: ExperimentConfig) -> Benchmark:
     )
 
 
-def _build_ppo_agent(config: ExperimentConfig, benchmark: Benchmark, state_fn, extra_illegal_fn):
+def _build_ppo_agent(config, benchmark, env):
     """PPO's own pieces - policy, optimizer, loop - assembled behind the Agent seam."""
     policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
     ppo_config = build_ppo_config(config.agent.algorithm)
@@ -190,27 +241,32 @@ def _build_ppo_agent(config: ExperimentConfig, benchmark: Benchmark, state_fn, e
     # The loop closes over everything above, so it is built against a partially-filled
     # BuiltExperiment; nothing it reads is set after this point.
     placeholder = BuiltExperiment(
-        config=config, benchmark=benchmark, state_fn=state_fn,
-        extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=0,
+        config=config, benchmark=benchmark, state_fn=env.state_fn,
+        extra_illegal_fn=env.extra_illegal_fn, episodes_per_iteration=0,
+        initial_positions=env.initial_positions, n_placed=env.n_placed,
         policy=policy, optimizer=optimizer, ppo_config=ppo_config,
     )
     if config.agent.loop.name not in LOOPS:
         raise KeyError(f"unknown loop {config.agent.loop.name!r}; registered: {sorted(LOOPS)}")
-    step_fn, episodes = LOOPS[config.agent.loop.name](placeholder, **config.agent.loop.kwargs)
+    step_fn, episodes, gradient_steps = LOOPS[config.agent.loop.name](
+        placeholder, **config.agent.loop.kwargs
+    )
 
-    agent = PPOAgent(benchmark, policy, optimizer, step_fn, episodes, state_fn, extra_illegal_fn)
+    agent = PPOAgent(benchmark, policy, optimizer, step_fn, episodes, env.state_fn,
+                     env.extra_illegal_fn, env.initial_positions, env.n_placed, gradient_steps)
     return agent, episodes, {"policy": policy, "optimizer": optimizer,
                              "ppo_config": ppo_config, "step_fn": step_fn}
 
 
-def _build_greedy_wiremask_agent(config, benchmark, _state_fn, _extra_illegal_fn):
+def _build_greedy_wiremask_agent(config, benchmark, env):
     """One deterministic pass, so one episode per iteration and nothing to carry."""
-    return GreedyWiremaskAgent(benchmark, **config.agent.algorithm.kwargs), 1, {}
+    agent = GreedyWiremaskAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
+    return agent, 1, {}
 
 
-def _build_random_search_agent(config, benchmark, _state_fn, _extra_illegal_fn):
+def _build_random_search_agent(config, benchmark, env):
     """A population of random legal placements per iteration; keeps the best seen."""
-    agent = RandomSearchAgent(benchmark, **config.agent.algorithm.kwargs)
+    agent = RandomSearchAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
     return agent, agent.population, {}
 
 
@@ -219,21 +275,94 @@ AGENTS = {
     "greedy_wiremask": _build_greedy_wiremask_agent,
     "random_search": _build_random_search_agent,
 }
-"""algorithm name -> builder(config, benchmark, state_fn, extra_illegal_fn) -> (agent,
-episodes_per_iteration, extra BuiltExperiment fields). Adding an agent family is one entry."""
+"""algorithm name -> builder(config, benchmark, env) -> (agent, episodes_per_iteration, extra
+BuiltExperiment fields), where `env` is the ResolvedEnvironment every agent must run inside.
+Adding an agent family is one entry.
+
+Every builder takes the SAME `env` and is expected to hand all of it to its agent. That is not a
+convention: a builder that quietly drops the action mask (as both baseline builders used to)
+produces an agent running under different constraints from the one it is about to be compared
+against, while `assert_comparable` still reports the two environments as identical - a false
+negative in exactly the check this machinery exists to provide."""
+
+
+def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, key):
+    """The run's warm start, resolved once: (initial_positions, how many macros it placed).
+
+    Once, not per episode, for two reasons. The number of macros left to place has to be a
+    static shape for the rollout scan; and "the initial placement" is a property of the
+    environment being compared, so resampling it inside the run would make two runs of the same
+    config differ on an axis the config claims to pin down.
+    """
+    init_fn = resolve(INITS, config.environment.initial_placement, benchmark,
+                      what="initial placement")
+    initial_positions = init_fn(key)
+    if initial_positions is None:
+        return None, 0
+    n_placed = int((initial_positions[:, 0] >= 0).sum())
+    if n_placed >= benchmark.params.n_macros:
+        raise ValueError(
+            f"initial placement {config.environment.initial_placement.name!r} pre-placed every "
+            f"one of the {benchmark.params.n_macros} macros, leaving the agent nothing to do"
+        )
+    return initial_positions, n_placed
+
+
+def build_physical(config: ExperimentConfig, machine: dict | None = None):
+    """(cell_placer, validator) for this config, or (None, None) for a proxy-only run.
+
+    Which tools ran is named by the config, so it is hashed and lands in the manifest. WHERE those
+    tools live is not: `machine` carries dreamplace_root, use_docker, gpu, the openroad binary -
+    everything that differs between two labs running the same experiment, and that would wreck a
+    comparison if it were folded into the environment hash.
+
+    Called by `evaluate_physical`, not by `build()`. A proxy-only experiment must not have to know
+    where DREAMPlace is installed just to construct itself.
+    """
+    machine = machine or {}
+    physical = config.environment.physical
+    cell_placer = (
+        resolve(CELL_PLACERS, _with_machine(physical.cell_placer, machine), what="cell placer")
+        if physical.cell_placer is not None else None
+    )
+    validator = (
+        resolve(VALIDATORS, _with_machine(physical.validator, machine), what="validator")
+        if physical.validator is not None else None
+    )
+    return cell_placer, validator
+
+
+def _with_machine(spec, machine: dict):
+    """`spec` with this machine's kwargs merged in. The config's own values always win."""
+    from dataclasses import replace as _replace
+
+    return _replace(spec, kwargs={**machine, **spec.kwargs})
 
 
 def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> BuiltExperiment:
     """Resolves a config into live objects. Pass `benchmark` to reuse an already-loaded netlist."""
+    import jax.random
+
     benchmark = benchmark if benchmark is not None else build_benchmark(config)
+    # Fold in the netlist's content digest now that the design has actually been parsed: from
+    # here on, this config identifies the design by what it contains rather than where it lives.
+    config = config.with_benchmark(
+        config.environment.benchmark.with_digest(benchmark.netlist_digest)
+    )
 
     # The environment half is built the same way whatever the agent is - which is the point:
-    # swapping the agent must not be able to change the benchmark, reward, observation or mask.
+    # swapping the agent must not be able to change the benchmark, reward, observation, mask or
+    # warm start.
     state_fn = resolve(STATES, config.environment.state, benchmark, what="state")
     extra_illegal_fn = (
         resolve(MASKS, config.environment.action_mask, benchmark, what="action mask")
         if config.environment.action_mask is not None else None
     )
+    # Derived from the run's seed, so a stochastic warm start is reproducible with the run.
+    initial_positions, n_placed = resolve_initial_placement(
+        config, benchmark, jax.random.PRNGKey(config.seed)
+    )
+    env = ResolvedEnvironment(state_fn, extra_illegal_fn, initial_positions, n_placed)
 
     algorithm = config.agent.algorithm
     if algorithm.name not in AGENTS:
@@ -242,16 +371,16 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
             f"SHAC needs a differentiable action space the sequential integer-grid kernel does "
             f"not provide - see docs/JAX_Placement_Environment_Spec.md \u00a712."
         )
-    agent, episodes, extras = AGENTS[algorithm.name](
-        config, benchmark, state_fn, extra_illegal_fn
-    )
+    agent, episodes, extras = AGENTS[algorithm.name](config, benchmark, env)
 
+    warm_start = f", warm start {n_placed} macros" if n_placed else ""
     Log.info(
         f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, "
         f"cell_size={benchmark.cell_size:.2f}, agent={agent.name}, {episodes} episodes/iteration "
-        f"({episodes * benchmark.params.n_macros:,} env steps/iteration)"
+        f"({episodes * (benchmark.params.n_macros - n_placed):,} env steps/iteration){warm_start}"
     )
     return BuiltExperiment(
         config=config, benchmark=benchmark, state_fn=state_fn,
-        extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=episodes, agent=agent, **extras,
+        extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=episodes,
+        initial_positions=initial_positions, n_placed=n_placed, agent=agent, **extras,
     )

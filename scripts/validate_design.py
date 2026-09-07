@@ -15,6 +15,12 @@ utilization still come back and `timing_slack` is None - not computed, not guess
 The Bookshelf benchmarks in benchmarks/ cannot reach this: they carry no LEF/DEF, which is
 exactly why validation was never wired up. Use `scripts/run_pipeline.py` for those, which stops
 at DREAMPlace and reports HPWL, and bring a DEF/LEF design here.
+
+**Prefer --config.** Passing an experiment's own config takes the cell placer and validator from
+`EnvironmentSpec.physical` and writes `ppa.json` next to that run's manifest, carrying its
+`full_hash`. Without it the tools come from the flags below and the resulting number is
+attributable to nothing - which is how a PPA measurement ends up sitting outside the
+reproducibility envelope everything else in this project lives in.
 """
 import argparse
 import pathlib
@@ -55,7 +61,46 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Clock period in ns, for timing analysis. See --liberty.")
     parser.add_argument("--openroad_binary", default="openroad",
                         help="OpenROAD executable (default: %(default)s).")
+    parser.add_argument("--config", type=pathlib.Path, default=None,
+                        help="An ExperimentConfig JSON (a run's manifest config). Takes the cell "
+                             "placer and validator from its EnvironmentSpec.physical instead of "
+                             "the flags above, and writes ppa.json carrying the run's full_hash "
+                             "- so the PPA number is attributable to the run whose placement it "
+                             "measured. Strongly preferred over the bare flags.")
+    parser.add_argument("--output_run_dir", type=pathlib.Path, default=None,
+                        help="Where to write ppa.json with --config (default: --output_dir).")
     return parser.parse_args(argv[1:])
+
+
+def _run_from_config(args, output_dir: pathlib.Path) -> None:
+    """The attributable path: tools named by the config, result written back beside its manifest."""
+    from placax_agents.experiment.build import build
+    from placax_agents.experiment.config import ExperimentConfig
+    from placax_agents.experiment.physical import evaluate_physical, write_ppa
+
+    config = ExperimentConfig.read(args.config)
+    built = build(config)
+    # Where the binaries live on this host - deliberately not part of the config or its hash.
+    machine = {
+        "dreamplace_root": args.dreamplace_root, "use_docker": args.use_docker, "gpu": args.gpu,
+        "openroad_binary": args.openroad_binary,
+    }
+    result = evaluate_physical(
+        built, args.def_path, args.lef_paths, output_dir,
+        skip_cell_placement=args.skip_cell_placement, machine=machine,
+    )
+    ppa_path = write_ppa(args.output_run_dir or output_dir, result)
+
+    print()
+    print(f"placed design: {result.def_path}")
+    print(f"  design area:  {_or_dash(result.design_area, 'u^2')}")
+    print(f"  utilization:  {_or_dash(result.utilization_pct, '%')}")
+    print(f"  timing slack: {_or_dash(result.timing_slack, 'ns')}")
+    print(f"  cell placer:  {result.cell_placer or '- (skipped)'}")
+    print(f"  validator:    {result.validator}")
+    print(f"  run:          {result.full_hash}")
+    print(f"reports: {output_dir}")
+    print(f"ppa: {ppa_path}")
 
 
 def main() -> None:
@@ -74,6 +119,15 @@ def main() -> None:
         sys.exit(1)
 
     output_dir = args.output_dir or (args.def_path.parent / "validate")
+    if args.config is not None:
+        _run_from_config(args, output_dir)
+        return
+
+    Log.warning(
+        "no --config: the cell placer and validator are coming from CLI flags, so the numbers "
+        "below will not be attributable to any recorded run. Pass --config=<a manifest's config> "
+        "to name the tools in the experiment's own configuration instead."
+    )
     validator = OpenROADValidator(
         liberty_path=args.liberty, clock_period_ns=args.clock_period_ns,
         openroad_binary=args.openroad_binary,

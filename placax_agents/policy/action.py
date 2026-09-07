@@ -8,6 +8,35 @@ import jax
 import jax.numpy as jnp
 
 
+def illegal_cells(
+    occupied: jax.Array,
+    params: EnvParams,
+    macro_size: tuple[int, int],
+    extra_illegal: jax.Array | None = None,
+) -> jax.Array:
+    """The (grid_x, grid_y) bool map of cells this macro may not be placed in.
+
+    THE one definition of legality in this project. Every agent reads it - the policy through
+    `legal_action_logits` below, the non-learning baselines directly - because a baseline that
+    computed its own legality would be running in a different environment while sharing the
+    config that claims otherwise, which is exactly the incomparability the experiment machinery
+    exists to prevent.
+
+    Note the safety valve at the end: if a placement is impossible under the full rule set, the
+    extra quality rule is dropped, and if it is still impossible, legality itself is. That second
+    relaxation emits an overlapping macro, silently and by design - the alternative is an episode
+    that cannot terminate. Its consequence is measurable rather than assumed: every evaluated
+    placement is scored by `placax.extras.legality`, so a run that relaxed reports the overlap it
+    caused instead of a quietly better HPWL.
+    """
+    # A cell is illegal if placing the macro there would overlap or go out of bounds.
+    base_illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
+    illegal = base_illegal | extra_illegal if extra_illegal is not None else base_illegal
+    # Safety valve: relax to just physical constraints if the extra rule leaves zero legal cells.
+    illegal = jnp.where(illegal.all(), base_illegal, illegal)
+    return jnp.where(illegal.all(), False, illegal)
+
+
 def legal_action_logits(
     logits: jax.Array,
     occupied: jax.Array,
@@ -16,12 +45,7 @@ def legal_action_logits(
     extra_illegal: jax.Array | None = None,
 ) -> jax.Array:
     """Sets illegal cells' logits to -inf so they're never sampled/argmax'd."""
-    # A cell is illegal if placing the macro there would overlap or go out of bounds.
-    base_illegal = occupancy_mask(occupied, macro_size) | boundary_mask(params, macro_size)
-    illegal = base_illegal | extra_illegal if extra_illegal is not None else base_illegal
-    # Safety valve: relax to just physical constraints if the extra rule leaves zero legal cells.
-    illegal = jnp.where(illegal.all(), base_illegal, illegal)
-    illegal = jnp.where(illegal.all(), False, illegal)
+    illegal = illegal_cells(occupied, params, macro_size, extra_illegal)
     # Widen to float64 here, matching MaskPlace's own `x.double()` right before its softmax:
     # the CNN itself stays float32, but softmax/log_softmax downstream of this function need
     # the extra dynamic range so growing logit spread doesn't fully saturate (and zero out

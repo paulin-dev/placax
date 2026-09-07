@@ -19,7 +19,10 @@ from placax_agents.policy.architectures.cnn import CNNActorCritic
 from placax_agents.policy.observation import make_wiremask_observation, observation
 from placax_agents.training.algorithm.loss import huber_value_loss, mse_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
-from placax_agents.training.reward import make_expert_reward, make_scaled_hpwl_reward
+from placax_agents.training.reward import (
+    make_expert_reward, make_hpwl_congestion_reward, make_scaled_hpwl_reward,
+    make_scaled_smoothed_reward,
+)
 
 import functools
 
@@ -108,7 +111,47 @@ def _reward_maskplace(
     return factory
 
 
-REWARDS = {"hpwl": _reward_hpwl, "maskplace": _reward_maskplace}
+def _reward_smoothed(_grid: int, dense: bool = False, reward_scale: float = 1.0,
+                     gamma: float = 1.0):
+    """-WAWL (log-sum-exp smoothed wirelength) in real units - HPWL's differentiable surrogate.
+
+    Registered so a reward comparison can select it from a config rather than by editing code:
+    every pin gets gradient here, where raw HPWL gives 76% of adaptec1's connected macros exactly
+    zero. See placax.extras.rewards.smoothed_wirelength and docs/Action_Space_Decision.md.
+    """
+    return functools.partial(
+        make_scaled_smoothed_reward, dense=dense, reward_scale=reward_scale, gamma=gamma
+    )
+
+
+def _reward_hpwl_congestion(grid: int, congestion_weight: float = 1.0, capacity: float = 1.0,
+                            dense: bool = False, reward_scale: float = 1.0):
+    """-(HPWL + w * RUDY overflow) - wirelength traded against routing congestion.
+
+    The second objective docs §12's reward comparison asks for ("HPWL vs. HPWL+congestion, agent
+    held fixed"), which until now could not be selected from a config at all. Size
+    congestion_weight against the HPWL term's real magnitude with scripts/measure_reward_terms.py.
+    """
+
+    def factory(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
+        # Benchmark.load builds its own EnvParams after this factory runs, so rebuild the
+        # matching one here - the same pattern _reward_maskplace uses.
+        params = EnvParams(grid=grid, n_macros=sizes_array.shape[0])
+        return make_hpwl_congestion_reward(
+            padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size, params,
+            congestion_weight=congestion_weight, capacity=capacity, dense=dense,
+            reward_scale=reward_scale,
+        )
+
+    return factory
+
+
+REWARDS = {
+    "hpwl": _reward_hpwl,
+    "maskplace": _reward_maskplace,
+    "smoothed": _reward_smoothed,
+    "hpwl_congestion": _reward_hpwl_congestion,
+}
 
 # ---------------------------------------------------------------------------
 # Observation (state representation).  (benchmark, **kwargs) -> StateFn
@@ -148,6 +191,51 @@ def _mask_wiremask_quality(benchmark, margin: float = 1.0):
 
 
 MASKS = {"wiremask_quality": _mask_wiremask_quality}
+
+# ---------------------------------------------------------------------------
+# Initial placement (warm start).  (benchmark, **kwargs) -> InitFn
+# ---------------------------------------------------------------------------
+#
+# TILOS found Circuit Training leans heavily on the initial placement handed to it by a
+# commercial tool - removing it measurably worsened routed wirelength. So "what did this run
+# start from" is a result-changing axis, and until now it was neither selectable nor recorded:
+# every run silently started from an empty canvas with nothing saying so. `empty` is that
+# behavior, named, so today's runs are on the record as having used it.
+#
+# An InitFn is resolved ONCE per run, not per episode: the warm start is a property of the
+# environment, and the number of macros the agent still has to place has to be a static shape.
+
+
+def _init_empty(_benchmark):
+    """Nothing pre-placed - the historical behavior, now written down rather than assumed."""
+    return lambda _key: None
+
+
+def _init_greedy_wiremask_prefix(benchmark, n_macros: int = 8):
+    """Pre-place the first `n_macros` macros with the greedy-wiremask heuristic.
+
+    A free, open-source warm start built entirely from shipped pieces, which is exactly the
+    question docs §5.3 leaves open: can one recover the benefit Circuit Training gets from a
+    commercial initial placement? The agent then starts from a partly-populated canvas and
+    places only what is left.
+    """
+    from placax_agents.agents.baselines import GreedyWiremaskAgent
+
+    import jax.numpy as jnp
+
+    def init_fn(_key):
+        # The heuristic is deterministic, so the key is unused and the warm start is a pure
+        # function of the netlist and the placement order.
+        placement = GreedyWiremaskAgent(benchmark).best_positions({})
+        # Keep only the prefix; everything after it returns to the unplaced sentinel.
+        return placement.at[n_macros:].set(-1)
+
+    if n_macros <= 0:
+        raise ValueError(f"greedy_wiremask_prefix needs n_macros > 0, got {n_macros}")
+    return init_fn
+
+
+INITS = {"empty": _init_empty, "greedy_wiremask_prefix": _init_greedy_wiremask_prefix}
 
 # ---------------------------------------------------------------------------
 # Policy architecture.  (benchmark, **kwargs) -> nn.Module
@@ -227,6 +315,45 @@ def _optimizer_maskplace_split(
 
 
 OPTIMIZERS = {"adam": _optimizer_adam, "maskplace_split": _optimizer_maskplace_split}
+
+# ---------------------------------------------------------------------------
+# Physical flow.  (**kwargs) -> CellPlacer / Validator
+# ---------------------------------------------------------------------------
+#
+# Registered for the same reason as everything else here: a PPA number is only attributable if
+# the tools that produced it are named in the run's own config, rather than chosen by whichever
+# CLI flags a downstream script happened to be given. Imported lazily so that neither DREAMPlace
+# nor OpenROAD is needed to import this module or to run a proxy-only experiment.
+#
+# A Spec's kwargs carry only what CHANGES THE RESULT and therefore belongs in the environment
+# hash - target_density, the liberty file, the clock period. Where the binary lives on this
+# particular machine (dreamplace_root, openroad_binary, use_docker, gpu) does not: two labs
+# running the same experiment on the same design should compare as comparable, and a wheel path
+# in an experiment hash would make that impossible. Those arrive separately, as `machine` kwargs,
+# and are recorded in the run's fingerprint rather than its config.
+
+
+def _cell_placer_dreamplace(dreamplace_root=None, **kwargs):
+    from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
+
+    if dreamplace_root is None:
+        raise ValueError(
+            "the dreamplace cell placer needs dreamplace_root (or use_docker), which is a "
+            "property of THIS MACHINE, not of the experiment - pass it as a machine kwarg to "
+            "build_physical()/evaluate_physical(), e.g. from scripts/validate_design.py's "
+            "--dreamplace_root or --use_docker."
+        )
+    return DREAMPlaceCellPlacer(dreamplace_root=dreamplace_root, **kwargs)
+
+
+def _validator_openroad(**kwargs):
+    from placax_tools.openroad.validator import OpenROADValidator
+
+    return OpenROADValidator(**kwargs)
+
+
+CELL_PLACERS = {"dreamplace": _cell_placer_dreamplace}
+VALIDATORS = {"openroad": _validator_openroad}
 
 # ---------------------------------------------------------------------------
 # Value loss, named so PPOConfig survives a JSON round trip.

@@ -1,15 +1,29 @@
-"""The compute budget: the shared currency that makes two different agents comparable.
+"""The sample budget: the shared currency that makes two different agents comparable.
+
+**Sample-matched, not compute-matched, and the difference matters.** `env_steps` prices
+environment interaction, which is the axis every agent family genuinely shares. It does NOT price
+what an agent does between rollouts: the buffered PPO loop runs ten epochs of shuffled minibatch
+gradient updates per iteration, and random search runs none, so two runs given one env_step
+budget did equal amounts of *environment* work and very unequal amounts of arithmetic. That is
+the right primary unit - it is the one an environment can define, and wall-clock measures the
+hardware as much as the method - but a claim of "matched compute" needs more than this number
+behind it. `BudgetUse` therefore also records `gradient_steps` and wall-clock, so the compute
+side of a comparison is reported rather than assumed.
 
 Before this existed, "how much compute did this run get" was expressed as `--n_iterations`, which
 meant "one episode plus one gradient step" in one training script and "ten episodes plus ten
 epochs of minibatch updates" in another. Two agents could not be given the same budget even in
 principle, so no cross-agent comparison in this project meant anything.
 
-The unit that fixes it is **env_steps**: one env step is one `placax.core.step()` call, i.e. one
-macro placed. Every agent family pays in exactly that currency regardless of how it decides where
-to put the macro - a PPO rollout, a GA genome replay, and an ACO ant walk that all place 543
-macros have all spent 543 env steps. Wall-clock is recorded alongside it but is deliberately not
-the primary unit: it measures the hardware as much as the method.
+The unit is **env_steps**: one env step is one `placax.core.step()` call, i.e. one macro placed.
+Every agent family pays in exactly that currency regardless of how it decides where to put the
+macro - a PPO rollout, a GA genome replay, and an ACO ant walk that all place 543 macros have all
+spent 543 env steps.
+
+Evaluation rollouts are charged too. An eval places every remaining macro, which is exactly as
+much environment work as a training episode; leaving it free meant two runs on one `--env_steps`
+budget did measurably different amounts of work if their `--eval_every` differed, which it does
+between the two shipped training scripts.
 
 A budget may cap any combination of the three; the run stops at whichever binds first, and which
 one it was is recorded, because "hit the step cap" and "ran out of time" are very different
@@ -62,6 +76,15 @@ class BudgetUse:
     iterations: int = 0
     episodes: int = 0
     env_steps: int = 0
+    eval_env_steps: int = 0
+    """The part of env_steps spent on evaluation rather than training. Included in env_steps (it
+    is real environment work and the budget must cap it), broken out so a comparison can tell
+    how much of a run's budget went to measuring it."""
+
+    gradient_steps: int = 0
+    """Parameter updates applied. Zero for a method that does not learn - which is the point:
+    it is what env_steps deliberately does not price."""
+
     wall_clock_s: float = 0.0
 
     def to_dict(self) -> dict:
@@ -69,6 +92,8 @@ class BudgetUse:
             "iterations": self.iterations,
             "episodes": self.episodes,
             "env_steps": self.env_steps,
+            "eval_env_steps": self.eval_env_steps,
+            "gradient_steps": self.gradient_steps,
             "wall_clock_s": self.wall_clock_s,
         }
 
@@ -78,6 +103,8 @@ class BudgetUse:
             iterations=int(data.get("iterations", 0)),
             episodes=int(data.get("episodes", 0)),
             env_steps=int(data.get("env_steps", 0)),
+            eval_env_steps=int(data.get("eval_env_steps", 0)),
+            gradient_steps=int(data.get("gradient_steps", 0)),
             wall_clock_s=float(data.get("wall_clock_s", 0.0)),
         )
 
@@ -105,17 +132,35 @@ class BudgetTracker:
             wall_clock_s=self._prior.wall_clock_s + (time.monotonic() - self._started_at),
         )
 
-    def record_iteration(self, episodes: int, n_macros: int) -> BudgetUse:
-        """Books one training iteration that collected `episodes` full episodes of `n_macros` each."""
+    def record_iteration(
+        self, episodes: int, steps_per_episode: int, gradient_steps: int = 0
+    ) -> BudgetUse:
+        """Books one training iteration that collected `episodes` episodes of `steps_per_episode`.
+
+        `steps_per_episode` is the macros an episode actually places, which is fewer than the
+        design's macro count on a warm-started run - the agent should not be billed for
+        placements the initial-placement strategy made for it.
+        """
         self._committed = replace(
             self._committed,
             iterations=self._committed.iterations + 1,
             episodes=self._committed.episodes + episodes,
-            env_steps=self._committed.env_steps + episodes * n_macros,
+            env_steps=self._committed.env_steps + episodes * steps_per_episode,
+            gradient_steps=self._committed.gradient_steps + gradient_steps,
         )
         return self.use
 
-    def can_afford(self, episodes: int, n_macros: int) -> bool:
+    def record_evaluation(self, steps: int) -> BudgetUse:
+        """Books one evaluation rollout, which places macros exactly like a training episode."""
+        self._committed = replace(
+            self._committed,
+            episodes=self._committed.episodes + 1,
+            env_steps=self._committed.env_steps + steps,
+            eval_env_steps=self._committed.eval_env_steps + steps,
+        )
+        return self.use
+
+    def can_afford(self, episodes: int, steps_per_episode: int) -> bool:
         """Whether one more iteration of this size fits inside the budget without exceeding it.
 
         Checked BEFORE running an iteration, because an iteration is atomic: stopping only once
@@ -130,7 +175,7 @@ class BudgetTracker:
         """
         if self.budget.env_steps is None:
             return True
-        return self.use.env_steps + episodes * n_macros <= self.budget.env_steps
+        return self.use.env_steps + episodes * steps_per_episode <= self.budget.env_steps
 
     def exhausted(self) -> str | None:
         """The name of the first cap that has been reached, or None while budget remains."""

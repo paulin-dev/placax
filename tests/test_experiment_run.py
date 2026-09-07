@@ -1,4 +1,5 @@
 """run_experiment: the manifest it leaves behind, the budget it honors, and resuming."""
+import dataclasses
 import json
 import pathlib
 
@@ -38,18 +39,15 @@ def toy(tmp_path: pathlib.Path):
     def make(budget: Budget, **overrides):
         config = training(benchmark_dir, budget=budget, **overrides)
         # Small grid: the preset's 64 costs compile time this test doesn't need.
-        small = type(config.environment.benchmark)(
-            benchmark_dir=str(benchmark_dir), grid=8, macro_budget=None,
-            order=config.environment.benchmark.order,
-        )
-        config = type(config)(
-            name=config.name, seed=config.seed, agent=config.agent,
-            environment=type(config.environment)(
-                benchmark=small, reward=config.environment.reward, state=config.environment.state,
-                action_mask=config.environment.action_mask, budget=budget,
-            ),
-        )
-        return config, build(config)
+        config = dataclasses.replace(config, environment=dataclasses.replace(
+            config.environment,
+            benchmark=dataclasses.replace(config.environment.benchmark, grid=8),
+        ))
+        built = build(config)
+        # build() resolves the netlist digest, so `built.config` is the one a run records and the
+        # one whose hashes appear in the outputs. Returning it - rather than the unresolved input
+        # - is what every caller should do.
+        return built.config, built
 
     return make
 

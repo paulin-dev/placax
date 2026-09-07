@@ -31,16 +31,22 @@ def parallel_train_step(
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
     extra_illegal_fn: ExtraIllegalFn | None = None,
+    initial_positions: jax.Array | None = None,
+    n_placed: int = 0,
 ):
     """Like train.train_step, but keys has a leading n_envs dimension: n_envs episodes are collected and averaged into one update."""
-    # 1. Run one episode per key, all at once via vmap instead of a Python loop.
+    # 1. Run one episode per key, all at once via vmap instead of a Python loop. Every argument
+    #    but the key is shared across episodes, the warm start included - it is a property of the
+    #    environment, identical in every env.
+    #    n_placed is a Python int fixing a static shape, so it is closed over rather than
+    #    passed as a vmap argument, which would make it a leaf of the transform.
     batched_rollout = jax.vmap(
-        collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
+        lambda k: collect_rollout(
+            k, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
+            extra_illegal_fn, initial_positions, n_placed,
+        )
     )
-    trajectories, final_states = batched_rollout(
-        keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
-        extra_illegal_fn,
-    )
+    trajectories, final_states = batched_rollout(keys)
 
     # 2. Compute GAE independently per episode (each has its own reward/value/done
     #    sequence), again batched via vmap rather than looping.
@@ -72,7 +78,8 @@ def parallel_train_step(
 # Built once at import; see train.py for why.
 _jitted_parallel_train_step = jax.jit(
     parallel_train_step,
-    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config", "extra_illegal_fn"),
+    static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config",
+                     "extra_illegal_fn", "n_placed"),
 )
 
 

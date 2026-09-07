@@ -1,5 +1,5 @@
 """Evaluates a policy's placement quality via a greedy (argmax) rollout, reporting real HPWL."""
-from placax.core import reset  # must precede jax imports
+from placax.core import reset, step  # must precede jax imports
 from placax.extras.rewards import hpwl
 from placax.types import EnvParams
 from placax_agents.policy.action import legal_action_logits
@@ -9,6 +9,16 @@ from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
 import jax.numpy as jnp
+
+
+def _no_reward(_old_positions, _new_positions, _old_placed, _new_placed) -> jax.Array:
+    """The evaluation rollout scores its own final placement, so per-step reward is unused.
+
+    Passed explicitly rather than letting evaluate() reimplement the state transition inline:
+    `step()` is the one place a macro gets placed, and a second copy of that line here is how the
+    "one shared kernel" property quietly stops being true. See placax/core.py.
+    """
+    return jnp.array(0.0)
 
 
 def evaluate(
@@ -22,9 +32,11 @@ def evaluate(
     valid_mask: jax.Array,
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
+    initial_positions: jax.Array | None = None,
+    n_placed: int = 0,
 ):
-    """Places every macro greedily (argmax over legal cells) and returns (final_positions, real_hpwl)."""
-    state = reset(params)
+    """Places every remaining macro greedily (argmax over legal cells) and returns (final_positions, real_hpwl)."""
+    state = reset(params, initial_positions)
 
     def scan_step(state, _macro_idx):
         # 1. Ask the policy for action scores at this state (we don't need the value estimate here).
@@ -47,12 +59,13 @@ def evaluate(
         grid_y = masked_logits.shape[1]
         action = jnp.array([flat_idx // grid_y, flat_idx % grid_y])
 
-        # 4. Record the placement and advance to the next macro.
-        positions = state.positions.at[state.step].set(action)
-        return state.replace(positions=positions, step=state.step + 1), None
+        # 4. Hand the action to the kernel - the same step() a training rollout drives.
+        new_state, _reward, _done = step(state, action, _no_reward, params)
+        return new_state, None
 
-    # Run scan_step once per macro to place the whole netlist.
-    final_state, _ = jax.lax.scan(scan_step, state, jnp.arange(params.n_macros))
+    # One scan step per macro still to place: a warm start shortens the episode rather than
+    # scanning past the end of the position array.
+    final_state, _ = jax.lax.scan(scan_step, state, jnp.arange(params.n_macros - n_placed))
 
     # Convert grid positions to real-unit centers to score the final layout with true HPWL.
     real_centers = to_real_centers(final_state.positions, sizes_array, cell_size)
@@ -61,5 +74,5 @@ def evaluate(
 
 # Built once at import to avoid retracing/recompiling on every call (same fix as buffered_train.py's jitted fns).
 _jitted_evaluate = jax.jit(
-    evaluate, static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn")
+    evaluate, static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn", "n_placed")
 )

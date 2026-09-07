@@ -10,8 +10,10 @@ these properties:
     to produce a table rather than producing a misleading one;
   * one compute budget in env steps, which every agent pays in identically regardless of whether
     it uses gradients, a population, or nothing at all;
-  * one scoring path - each agent hands over a placement and THIS script computes the HPWL, so a
+  * one scoring path - each agent hands over a placement and THIS script scores it, so a
     difference in the table can never be a difference in how two agents scored themselves;
+  * legality reported beside the score, because overlapping macros have shorter wires: a
+    wirelength number for an unrealizable placement would top the table on merit it doesn't have;
   * one manifest per run, recording the config and the machine, so the table can be regenerated.
 
 Seeds are the one thing you should vary: on a GPU backend a single run is not reproducible (see
@@ -32,7 +34,7 @@ from placax_agents.experiment.budget import Budget
 from placax_agents.experiment.build import build, build_benchmark
 from placax_agents.experiment.config import AgentSpec, ExperimentConfig, Spec, assert_comparable
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
-from placax_agents.experiment.run import run_experiment, score_placement
+from placax_agents.experiment.run import run_experiment, score
 
 DEFAULT_AGENTS = ("greedy_wiremask", "random_search", "ppo")
 
@@ -66,7 +68,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "per agent and seed. Default: <benchmark_dir>/comparison.")
     parser.add_argument("--eval_every", type=int, default=0,
                         help="Periodic mid-run eval (default: %(default)s, off - the final "
-                             "placement is scored regardless).")
+                             "placement is scored regardless). Note an eval rollout is charged "
+                             "to the budget like any other episode, so setting this trades "
+                             "training work for measurement; leave it at 0 unless you want the "
+                             "curve, and use the same value for every agent if you do.")
+    parser.add_argument("--level", default="environment",
+                        choices=("benchmark", "task", "environment"),
+                        help="Which invariant this comparison claims (default: %(default)s - "
+                             "everything the agent did not choose). Drop to 'task' only for a "
+                             "study that varies the observation on purpose.")
     return parser.parse_args(argv[1:])
 
 
@@ -86,7 +96,8 @@ def _agent_spec(name: str, reference: ExperimentConfig, population: int) -> Agen
 
 
 def build_comparison(
-    reference: ExperimentConfig, agents: list[str], seeds: int, population: int
+    reference: ExperimentConfig, agents: list[str], seeds: int, population: int,
+    level: str = "environment",
 ) -> list[ExperimentConfig]:
     """One config per (agent, seed), all sharing the reference's environment exactly."""
     configs = []
@@ -100,22 +111,35 @@ def build_comparison(
             ))
     # The whole point. If a future edit lets an agent perturb the environment, this stops the run
     # rather than letting an incomparable table reach a paper.
-    assert_comparable(*configs)
+    assert_comparable(*configs, level=level)
     return configs
 
 
-def _format_table(results: dict[str, list[float]], env_steps: int) -> str:
-    """Agents ranked by mean HPWL, with the spread across seeds."""
-    header = f"{'agent':<24s}{'mean HPWL':>16s}{'best':>16s}{'std':>12s}{'seeds':>7s}"
+def _format_table(results: dict[str, list[dict]], env_steps: int, level: str) -> str:
+    """Agents ranked by mean HPWL, with the spread across seeds and their legality.
+
+    Legality is a column rather than a footnote: overlapping macros shorten wires, so an illegal
+    placement outranks a legal one on HPWL alone. A row that is not 100% legal has not produced a
+    result, whatever its wirelength says.
+    """
+    header = (f"{'agent':<22s}{'mean HPWL':>15s}{'best':>15s}{'std':>11s}"
+              f"{'legal':>8s}{'overlap':>9s}{'seeds':>7s}")
     lines = [header, "-" * len(header)]
-    for name, scores in sorted(results.items(), key=lambda kv: statistics.fmean(kv[1])):
-        std = statistics.stdev(scores) if len(scores) > 1 else 0.0
+    for name, runs in sorted(results.items(),
+                             key=lambda kv: statistics.fmean(r["real_hpwl"] for r in kv[1])):
+        hpwls = [run["real_hpwl"] for run in runs]
+        legal = sum(1 for run in runs if run["is_legal"])
+        worst_overlap = max(run["overlap_ratio"] for run in runs)
+        std = statistics.stdev(hpwls) if len(hpwls) > 1 else 0.0
         lines.append(
-            f"{name:<24s}{statistics.fmean(scores):>16,.0f}{min(scores):>16,.0f}"
-            f"{std:>12,.0f}{len(scores):>7d}"
+            f"{name:<22s}{statistics.fmean(hpwls):>15,.0f}{min(hpwls):>15,.0f}"
+            f"{std:>11,.0f}{legal:>4d}/{len(runs):<3d}{worst_overlap:>8.2%}{len(runs):>7d}"
         )
     lines.append("")
-    lines.append(f"all runs: {env_steps:,} env steps, identical environment, HPWL scored by this script")
+    lines.append(f"all runs: {env_steps:,} env steps (sample-matched, not compute-matched - see "
+                 f"gradient_steps in each run's log), identical {level}, scored by this script")
+    lines.append("'legal' counts seeds whose placement had no overlap, nothing out of bounds and "
+                 "every macro placed; 'overlap' is the worst seed's overlapping macro area.")
     return "\n".join(lines)
 
 
@@ -129,18 +153,18 @@ def main() -> None:
     budget = _budget(args)
     reference = build_preset(args.preset, args.benchmark_dir, budget=budget)
     agents = [name.strip() for name in args.agents.split(",") if name.strip()]
-    configs = build_comparison(reference, agents, args.seeds, args.population)
+    configs = build_comparison(reference, agents, args.seeds, args.population, args.level)
 
     output_root = args.output_dir or (args.benchmark_dir / "comparison")
     Log.info(f"comparing {len(agents)} agents x {args.seeds} seed(s) on {args.benchmark_dir}")
-    Log.info(f"  shared environment: {reference.environment_hash()}")
+    Log.info(f"  shared {args.level}: {reference.hash_at(args.level)}")
     Log.info(f"  {describe_determinism()}")
 
     # Loaded once and shared: two agents parsing the same netlist twice would still be comparable,
     # but sharing it removes the possibility entirely and saves the parse.
     benchmark = build_benchmark(reference)
 
-    results: dict[str, list[float]] = {}
+    results: dict[str, list[dict]] = {}
     for config in configs:
         agent_name = config.name.rsplit("-seed", 1)[0]
         built = build(config, benchmark=benchmark)
@@ -148,13 +172,15 @@ def main() -> None:
             config, output_root / config.name, built=built,
             eval_every=args.eval_every, log_every=max(1, args.eval_every or 1),
         )
-        score = score_placement(benchmark, built.agent.best_positions(state))
-        results.setdefault(agent_name, []).append(score)
-        Log.info(f"  {config.name}: real_hpwl={score:,.0f}")
+        measured = score(benchmark, built.agent.best_positions(state), built.n_placed)
+        results.setdefault(agent_name, []).append(measured)
+        flag = "" if measured["is_legal"] else "  ILLEGAL"
+        Log.info(f"  {config.name}: real_hpwl={measured['real_hpwl']:,.0f} "
+                 f"return={measured['reward_return']:,.3f}{flag}")
 
     spent = budget.env_steps or (budget.iterations * built.env_steps_per_iteration)
     print()
-    print(_format_table(results, spent))
+    print(_format_table(results, spent, args.level))
     print()
     print(f"per-run manifests and logs: {output_root}")
 
