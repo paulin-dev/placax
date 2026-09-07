@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from placax.core import reset  # must precede jax imports
 from placax.netlist import load_die_size, load_netlist
 from placax.netlist.budget import freeze_order, truncate_to_budget
+from placax.netlist.digest import netlist_digest
 from placax.netlist.order import alphabetical_order
 from placax.netlist.padding import build_padded_arrays
 from placax.types import EnvParams, Nets, OrderFn, RewardFn, SizeMap
@@ -35,22 +36,29 @@ class Benchmark:
     padded_pin_offset: jax.Array
     valid_mask: jax.Array
     name_to_idx: dict[str, int]
+    netlist_digest: str = ""
+    """Content hash of the netlist as loaded, BEFORE any macro-budget truncation - so it
+    identifies the design itself, with budget and order recorded separately as the independent
+    axes they are. This is what BenchmarkSpec records instead of trusting a filesystem path."""
 
     @staticmethod
     def _load_and_truncate(
         benchmark_dir: pathlib.Path, order_fn: OrderFn, macro_budget: int | None
-    ) -> tuple[SizeMap, Nets, OrderFn, float | None]:
+    ) -> tuple[SizeMap, Nets, OrderFn, float | None, str]:
         """Loads the raw netlist and, if macro_budget is set, truncates and freezes the ordering used."""
         # Load everything first...
         macro_sizes, nets = load_netlist(benchmark_dir)
+        # ...digest the FULL design before anything is dropped, so two runs at different macro
+        # budgets still agree on which design they were run against.
+        digest = netlist_digest(macro_sizes, nets)
         # ...and grab the real die size (if this format carries one) from the FULL macro set, matching
         # MaskPlace's own die-sizing: it's independent of any macro_budget truncation applied below.
         die_size = load_die_size(benchmark_dir, macro_sizes)
         # ...then optionally drop all but the first macro_budget macros (by order_fn's ordering).
         if macro_budget is None:
-            return macro_sizes, nets, order_fn, die_size
+            return macro_sizes, nets, order_fn, die_size, digest
         macro_sizes, nets, order = truncate_to_budget(macro_sizes, nets, macro_budget, order_fn=order_fn)
-        return macro_sizes, nets, freeze_order(order), die_size
+        return macro_sizes, nets, freeze_order(order), die_size, digest
 
     @classmethod
     def load(
@@ -63,7 +71,9 @@ class Benchmark:
     ) -> "Benchmark":
         """Loads a netlist directory into a fully-built, ready-to-train Benchmark."""
         # 1. Load the netlist, optionally truncated to a macro budget, with its frozen ordering.
-        macro_sizes, nets, frozen_order_fn, die_size = cls._load_and_truncate(benchmark_dir, order_fn, macro_budget)
+        macro_sizes, nets, frozen_order_fn, die_size, digest = cls._load_and_truncate(
+            benchmark_dir, order_fn, macro_budget
+        )
         # 2. Pad/index everything into the fixed-shape arrays the JAX code operates on.
         name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
             macro_sizes, nets, order_fn=frozen_order_fn
@@ -83,7 +93,7 @@ class Benchmark:
         reward_fn = make_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size)
         return cls(
             macro_sizes, nets, params, sizes_array, cell_size, reward_fn,
-            padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx,
+            padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx, digest,
         )
 
     @property

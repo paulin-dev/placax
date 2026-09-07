@@ -23,9 +23,22 @@ def _is_wsl() -> bool:
 
 _GPU_PHYSICALLY_PRESENT: bool = _gpu_available()
 
-# No GPU: force JAX onto CPU explicitly, rather than letting it try and fail.
-if not _GPU_PHYSICALLY_PRESENT:
-    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
+def _deterministic_requested() -> bool:
+    """True if PLACAX_DETERMINISTIC asks for bit-exact runs (anything but 0/false/no/empty)."""
+    return os.environ.get("PLACAX_DETERMINISTIC", "").strip().lower() not in ("", "0", "false", "no")
+
+
+# PLACAX_DETERMINISTIC=1 pins JAX to CPU. That is not a performance knob - it is the only way to
+# get bit-exact run-to-run results out of this project, because the GPU backward pass isn't
+# deterministic and no XLA flag makes it so (measured; see placax/reproducibility.py). Checked
+# before the GPU probe so it wins over any GPU that is present.
+DETERMINISTIC: bool = _deterministic_requested()
+
+# Either an explicit determinism request or no GPU at all: pin JAX to CPU explicitly, rather
+# than letting it try and fail.
+if DETERMINISTIC or not _GPU_PHYSICALLY_PRESENT:
+    os.environ["JAX_PLATFORMS"] = "cpu" if DETERMINISTIC else os.environ.get("JAX_PLATFORMS", "cpu")
 
 # WSL2's GPU passthrough is memory-constrained - cap JAX's own preallocation.
 if _is_wsl():
@@ -54,7 +67,9 @@ def warn_if_gpu_unused() -> None:
     """Warns if a GPU is present but JAX fell back to CPU (missing CUDA extra)."""
     import jax
 
-    if _GPU_PHYSICALLY_PRESENT and jax.default_backend() == "cpu":
+    # Falling back to CPU because determinism was explicitly requested isn't a misconfiguration -
+    # it's the documented cost of PLACAX_DETERMINISTIC=1, so don't nag about it.
+    if _GPU_PHYSICALLY_PRESENT and not DETERMINISTIC and jax.default_backend() == "cpu":
         warnings.warn(
             "nvidia-smi reports a GPU, but JAX is only using the CPU backend. "
             "Run: pip install 'placax[cuda]' (or 'placax[cuda12]' as a fallback) "

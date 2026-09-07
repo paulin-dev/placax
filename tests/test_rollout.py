@@ -1,7 +1,7 @@
 import pathlib
 
 from placax.core import reset  # noqa: F401  must precede jax imports
-from placax.netlist import load_netlist  # noqa: F401
+from tests.real_benchmarks import load_real_netlist  # noqa: F401
 from placax.netlist.padding import build_padded_arrays  # noqa: F401
 from placax.extras.rewards import make_hpwl_reward  # noqa: F401
 from placax.types import EnvParams  # noqa: F401
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import pytest
 from jax import random
 
-REAL_ADAPTEC1 = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
+from tests.real_benchmarks import ADAPTEC1 as REAL_ADAPTEC1
 
 
 def _make_toy_setup(params: EnvParams):
@@ -167,7 +167,7 @@ def test_collect_rollout_final_reward_matches_hand_calculation() -> None:
 
 @pytest.mark.skipif(not REAL_ADAPTEC1.exists(), reason="real adaptec1 benchmark not available")
 def test_collect_rollout_at_real_scale() -> None:
-    macro_sizes, nets = load_netlist(REAL_ADAPTEC1)
+    macro_sizes, nets = load_real_netlist(REAL_ADAPTEC1)
     _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )

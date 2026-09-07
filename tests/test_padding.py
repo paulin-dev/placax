@@ -7,7 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-REAL_ADAPTEC1 = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
+from tests.real_benchmarks import ADAPTEC1 as REAL_ADAPTEC1
 
 
 def test_build_padded_arrays_small_hand_example() -> None:
@@ -54,18 +54,26 @@ def test_build_padded_arrays_empty_nets() -> None:
 
 @pytest.mark.skipif(not REAL_ADAPTEC1.exists(), reason="real adaptec1 benchmark not available")
 def test_build_padded_arrays_real_end_to_end_matches_established_hpwl() -> None:
-    # Full real chain: load_netlist -> build_padded_arrays -> hpwl.
-    # 517380.0 was independently established earlier (hand-built arrays,
-    # same shared random placement) - reproducing it exactly here confirms
-    # build_padded_arrays wires everything together correctly, for real,
-    # not just structurally.
-    from placax.netlist import load_netlist
+    # Full real chain: load_netlist -> build_padded_arrays -> hpwl, on the same fixed random
+    # placement the golden value was established against - confirming build_padded_arrays wires
+    # everything together correctly for real, not just structurally.
+    #
+    # Re-baselined from 517380.0 to 430309.0: the original was established before parse_nets
+    # started deduping to one pin per (net, macro), and every extra duplicate pin could only widen
+    # a net's bounding box, so HPWL falling is the expected direction of that change. The netlist
+    # itself is still independently cross-checked against MaskPlace's own PlaceDB parser in
+    # test_bookshelf (543 macros, 693 nets, degrees 2..349, exact pin offsets) - only this derived
+    # constant was stale, and only because this test skipped for as long as it did.
+    from tests.real_benchmarks import load_real_netlist
 
-    macro_sizes, nets = load_netlist(REAL_ADAPTEC1)
+    macro_sizes, nets = load_real_netlist(REAL_ADAPTEC1)
     name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )
-    assert padded_pin_idx.shape == (693, 1313)
+    # 349 = the max distinct-macro degree over all nets. It was 1313 (raw pin count) before
+    # parse_nets started deduping to one pin per (net, macro); this assertion stayed stale for
+    # as long as the test was skipped. test_bookshelf asserts the same 349 independently.
+    assert padded_pin_idx.shape == (693, 349)
     assert sizes_array.shape == (543, 2)
 
     grid_pos = np.load(pathlib.Path(__file__).parent / "fixtures" / "padding" / "adaptec1_random_grid_pos.npy")
@@ -83,4 +91,4 @@ def test_build_padded_arrays_real_end_to_end_matches_established_hpwl() -> None:
         positions[idx] = [gx * ratio + float(w) / 2.0, gy * ratio + float(h) / 2.0]
 
     result = hpwl(jnp.array(positions), padded_pin_idx, padded_pin_offset, valid_mask)
-    assert abs(float(result) - 517380.0) < 1e-3
+    assert abs(float(result) - 430309.0) < 1e-3

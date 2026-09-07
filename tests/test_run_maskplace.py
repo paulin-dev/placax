@@ -1,113 +1,119 @@
+"""scripts/run_maskplace.py is a CLI over the maskplace preset now, so this tests that surface:
+flags reaching the config correctly, and the back-compat builders other scripts still import."""
 import pathlib
 
 from placax.core import reset  # noqa: F401  must precede jax imports
-from placax.extras.rewards import make_hpwl_reward
-from placax.types import EnvParams
-from placax_agents.benchmark import Benchmark
-from placax_agents.policy.architectures.cnn import CNNActorCritic
-from placax_agents.policy.observation import observation
 from placax_agents.training.algorithm.loss import huber_value_loss
 from scripts.run_maskplace import (
     MASKPLACE_LEARNING_RATE,
     MASKPLACE_MAX_GRAD_NORM,
-    _train_and_eval_loop,
+    _budget_from_args,
+    _parse_args,
     maskplace_optimizer,
     maskplace_ppo_config,
 )
 
 import jax.numpy as jnp
 import optax
+import pytest
 from jax import random
+
+ARGV = ["run_maskplace.py"]
+
+
+# --------------------------------------------------------------------------- CLI -> config
+
+
+def test_defaults_match_the_scripts_documented_defaults() -> None:
+    args = _parse_args(ARGV)
+    assert args.benchmark_dir == pathlib.Path("benchmarks/adaptec1")
+    assert args.seed == 42
+    assert args.macro_budget == "all"
+    assert args.n_episodes == "10"
+    assert args.eval_every == 10
+    assert args.log_every == 1
+    assert args.patience == 0
+    assert args.entropy_coef == 0.0
+    assert args.regularity_weight == 0.0
+    assert args.regularity_mode == "corner"
+
+
+def test_no_budget_flag_keeps_the_previous_100_iteration_default() -> None:
+    # Preserving this matters: it is what --n_iterations meant before budgets existed.
+    assert _budget_from_args(_parse_args(ARGV)).iterations == 100
+
+
+@pytest.mark.parametrize("flag, field, value", [
+    ("--n_iterations=7", "iterations", 7),
+    ("--env_steps=5000", "env_steps", 5000),
+    ("--wall_clock_s=30", "wall_clock_s", 30.0),
+])
+def test_each_budget_flag_sets_only_its_own_cap(flag: str, field: str, value) -> None:
+    budget = _budget_from_args(_parse_args(ARGV + [flag]))
+    assert getattr(budget, field) == value
+    others = {"iterations", "env_steps", "wall_clock_s"} - {field}
+    assert all(getattr(budget, name) is None for name in others)
+
+
+def test_budget_flags_combine_and_the_first_cap_reached_wins() -> None:
+    budget = _budget_from_args(_parse_args(ARGV + ["--n_iterations=10", "--wall_clock_s=60"]))
+    assert (budget.iterations, budget.wall_clock_s, budget.env_steps) == (10, 60.0, None)
+
+
+def test_config_flag_takes_a_recorded_config_path() -> None:
+    args = _parse_args(ARGV + ["--config=runs/prev/config.json"])
+    assert args.config == pathlib.Path("runs/prev/config.json")
+
+
+# --------------------------------------------------------------------------- back-compat builders
 
 
 def test_maskplace_ppo_config_matches_maskplace_values() -> None:
     config = maskplace_ppo_config()
     assert config.gamma == 0.95
-    assert config.lam == 1.0  # no GAE smoothing -> plain discounted return
-    # MaskPlace's own literal entropy_coef=0.0 - the logit-saturation this used to cause turned
-    # out to be caused by the ResNet backbone's stale eval-mode BatchNorm, not this config, and is
-    # fixed at the source now (resnet_cnn.py) - see maskplace_ppo_config()'s own docstring.
+    assert config.lam == 1.0
+    assert config.clip_eps == 0.2
     assert config.entropy_coef == 0.0
-    # MaskPlace's own advantage/return computation is raw, with no normalization.
+    assert config.value_loss_fn is huber_value_loss
     assert config.normalize_advantages is False
     assert config.normalize_returns is False
-    assert config.value_loss_fn is huber_value_loss
-    assert MASKPLACE_LEARNING_RATE == 2.5e-3
 
 
 def test_maskplace_ppo_config_entropy_coef_is_overridable() -> None:
-    # Normalization stays off regardless - only entropy_coef itself is meant to vary here.
-    config = maskplace_ppo_config(entropy_coef=0.01)
-    assert config.entropy_coef == 0.01
-    assert config.normalize_advantages is False
-    assert config.normalize_returns is False
-
-
-def test_maskplace_optimizer_isolates_critic_prefixed_params() -> None:
-    # A large gradient on the "critic_" group must not spill over to the
-    # non-critic group's clip-by-global-norm - proof each network is
-    # clipped and stepped independently, matching MaskPlace's two
-    # separate optimizers.
-    optimizer = maskplace_optimizer(learning_rate=0.1, max_grad_norm=1.0)
-    params = {"critic_value": jnp.array(0.0), "fine_branch": jnp.array(0.0)}
-    grads = {"critic_value": jnp.array(1000.0), "fine_branch": jnp.array(0.5)}
-
-    opt_state = optimizer.init(params)
-    updates, _new_state = optimizer.update(grads, opt_state, params)
-
-    # critic_value's huge gradient gets clipped to norm 1.0 before Adam - its
-    # step should be small and bounded, not scaled by the 1000.0 magnitude.
-    assert abs(float(updates["critic_value"])) < 1.0
-    # fine_branch's much smaller, unclipped-in-effect gradient still moves.
-    assert updates["fine_branch"] != 0.0
+    assert maskplace_ppo_config(entropy_coef=0.05).entropy_coef == 0.05
 
 
 def test_maskplace_max_grad_norm_matches_maskplace_value() -> None:
     assert MASKPLACE_MAX_GRAD_NORM == 0.5
+    assert MASKPLACE_LEARNING_RATE == 2.5e-3
 
 
-def _toy_benchmark() -> Benchmark:
-    params = EnvParams(grid=8, n_macros=4)
-    sizes_array = jnp.array([[2.0, 2.0], [1.0, 1.0], [2.0, 1.0], [1.0, 2.0]], dtype=jnp.float32)
-    padded_pin_idx = jnp.array([[0, 1]])
-    padded_pin_offset = jnp.zeros((1, 2, 2), dtype=jnp.float32)
-    valid_mask = jnp.array([[True, True]])
-    reward_fn = make_hpwl_reward(padded_pin_idx, padded_pin_offset, valid_mask)
-    return Benchmark(
-        macro_sizes={}, nets=[], params=params, sizes_array=sizes_array, cell_size=1.0,
-        reward_fn=reward_fn, padded_pin_idx=padded_pin_idx, padded_pin_offset=padded_pin_offset,
-        valid_mask=valid_mask, name_to_idx={},
+def test_maskplace_optimizer_isolates_critic_prefixed_params() -> None:
+    # Actor and critic must be clipped independently, matching MaskPlace's two separate backward
+    # passes: a huge actor gradient must not shrink the critic's update through a shared norm.
+    optimizer = maskplace_optimizer(learning_rate=1.0, max_grad_norm=1.0, value_coef=1.0)
+    params = {"actor_w": jnp.ones((2,)), "critic_w": jnp.ones((2,))}
+    opt_state = optimizer.init(params)
+
+    grads = {"actor_w": jnp.full((2,), 1000.0), "critic_w": jnp.full((2,), 1e-3)}
+    updates, _ = optimizer.update(grads, opt_state, params)
+
+    # Adam normalizes magnitude, so compare directions: both groups move against their own
+    # gradient, and the critic's tiny gradient is not zeroed by the actor's enormous one.
+    assert float(updates["critic_w"][0]) < 0.0
+    assert float(updates["actor_w"][0]) < 0.0
+    assert abs(float(updates["critic_w"][0])) > 1e-6
+
+
+def test_maskplace_optimizer_accepts_a_custom_critic_prefix() -> None:
+    optimizer = maskplace_optimizer(critic_param_prefix="value_")
+    params = {"actor_w": jnp.ones((2,)), "value_w": jnp.ones((2,))}
+    updates, _ = optimizer.update(
+        {"actor_w": jnp.ones((2,)), "value_w": jnp.ones((2,))}, optimizer.init(params), params
     )
+    assert set(updates) == {"actor_w", "value_w"}
 
 
-def test_resumed_run_continues_placement_image_iteration_count(tmp_path: pathlib.Path) -> None:
-    # Regression: resuming must count placement-image iterations from where the checkpoint left
-    # off (current_iteration = start_iteration + i + 1), not restart the loop's own local counter
-    # from 1 - which would both mislabel snapshot filenames and desync the --eval_every cadence.
-    benchmark = _toy_benchmark()
-    policy = CNNActorCritic()
-    key = random.PRNGKey(0)
-    key, init_key = random.split(key)
-    obs0 = observation(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
-    variables = policy.init(init_key, obs0)
-    optimizer = optax.adam(1e-3)
-    ppo_config = maskplace_ppo_config()
-
-    checkpoint_path = tmp_path / "checkpoint.bin"
-    images_dir = tmp_path / "placements"
-
-    _train_and_eval_loop(
-        key, variables, policy, benchmark, optimizer, ppo_config, observation, None,
-        checkpoint_path, n_iterations=5, n_episodes=2,
-        log_every=1, eval_every=5, log_path=None, placement_images_dir=images_dir,
-    )
-    assert sorted(p.name for p in images_dir.glob("*.png")) == ["5.png"]
-
-    # Resume to iteration 15 (a fresh key - resume must read state from checkpoint_path, not
-    # depend on continuing the same key/variables objects, matching a real second CLI invocation).
-    _train_and_eval_loop(
-        random.PRNGKey(1), variables, policy, benchmark, optimizer, ppo_config, observation, None,
-        checkpoint_path, n_iterations=15, n_episodes=2,
-        log_every=1, eval_every=5, log_path=None, placement_images_dir=images_dir,
-    )
-    assert sorted(p.name for p in images_dir.glob("*.png")) == ["10.png", "15.png", "5.png"]
+def test_optimizer_is_a_real_optax_transformation() -> None:
+    assert isinstance(maskplace_optimizer(), optax.GradientTransformation)
+    _ = random.PRNGKey(0)  # keeps the jax import meaningful under the import-order guard

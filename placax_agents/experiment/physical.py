@@ -1,0 +1,118 @@
+"""The physical flow, driven by an ExperimentConfig rather than by a script's CLI flags.
+
+The cell placer and validator were always substitutable - `placax_tools.pipeline.place_and_validate`
+names neither DREAMPlace nor OpenROAD. What they were not was *recorded*: a PPA number came out of
+whichever flags `scripts/validate_design.py` happened to be given, and nothing tied it back to the
+run whose placement it measured. So the last box of the architecture sat outside the
+reproducibility envelope that the rest of the project is built around.
+
+This closes it. The tools are named in `EnvironmentSpec.physical`, so they are part of the
+environment hash and appear in every manifest; `evaluate_physical` constructs them from that
+config plus this host's binary paths; and the result written here carries the run's own
+`full_hash`, so a `ppa.json` is attributable to the exact configuration that produced the
+placement it measured.
+
+The split between the two is deliberate. WHICH tools ran changes the result and is hashed; WHERE
+they are installed does not, and is not - two labs running one experiment on one design have to
+compare as comparable, which an install path in the environment hash would prevent.
+
+**Still not verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
+dependency, so the real binaries have never been driven through this path - the composition, the
+TCL generation and the output parsing all have tests, but the numbers themselves are unproven.
+The Bookshelf benchmarks under `benchmarks/` cannot reach it at all, since they carry no LEF/DEF.
+That is stated here rather than left for a reader to discover.
+"""
+import json
+import pathlib
+from dataclasses import asdict, dataclass
+
+from placax_agents.experiment.build import BuiltExperiment, build_physical
+from placax_tools.pipeline import place_and_validate, validate_only
+
+PPA_NAME = "ppa.json"
+
+
+@dataclass(frozen=True)
+class PhysicalResult:
+    """A PPA measurement plus the identity of the run and the tools that produced it."""
+
+    full_hash: str
+    cell_placer: str | None
+    validator: str
+    def_path: str
+    design_area: float | None
+    utilization_pct: float | None
+    timing_slack: float | None
+    """None means not computed - the validator was given no liberty file or clock period. Never
+    a plausible-looking substitute for a number nobody measured."""
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def evaluate_physical(
+    built: BuiltExperiment,
+    def_path: pathlib.Path,
+    lef_paths: list[pathlib.Path],
+    output_dir: pathlib.Path,
+    skip_cell_placement: bool = False,
+    machine: dict | None = None,
+) -> PhysicalResult:
+    """Runs this run's configured physical flow on a macro-placed DEF and records the result.
+
+    `skip_cell_placement` validates the DEF as given - for a design whose standard cells are
+    already placed, or a Bookshelf flow where DREAMPlace has already done that natively.
+
+    `machine` carries this host's tool locations (dreamplace_root, use_docker, gpu, the openroad
+    binary). They are deliberately not part of the config: two labs running one experiment on one
+    design must compare as comparable, and an install path in the environment hash would make
+    that impossible. Tools already set on `built` are used as-is, which is how a caller injects
+    one directly.
+    """
+    config = built.config
+    physical = config.environment.physical
+    if physical.validator is None:
+        raise ValueError(
+            f"experiment {config.name!r} declares no validator, so there is no physical flow to "
+            f"run. Add one to EnvironmentSpec.physical (e.g. Spec('openroad')) - naming it in "
+            f"the config is what makes the resulting PPA number attributable."
+        )
+    if not skip_cell_placement and physical.cell_placer is None:
+        raise ValueError(
+            f"experiment {config.name!r} declares no cell placer. Add one to "
+            f"EnvironmentSpec.physical, or pass skip_cell_placement=True if this DEF's standard "
+            f"cells are already placed."
+        )
+
+    # Construct whatever the caller didn't already provide, from the config plus this machine.
+    cell_placer, validator = built.cell_placer, built.validator
+    if cell_placer is None or validator is None:
+        resolved_placer, resolved_validator = build_physical(config, machine)
+        cell_placer = cell_placer or resolved_placer
+        validator = validator or resolved_validator
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if skip_cell_placement:
+        ppa = validate_only(def_path, lef_paths, output_dir, validator)
+        placed_def = def_path
+    else:
+        placed = place_and_validate(def_path, lef_paths, output_dir, cell_placer, validator)
+        ppa, placed_def = placed.ppa, placed.def_path
+
+    return PhysicalResult(
+        full_hash=config.full_hash(),
+        cell_placer=None if skip_cell_placement else physical.cell_placer.name,
+        validator=physical.validator.name,
+        def_path=str(placed_def),
+        design_area=ppa.design_area,
+        utilization_pct=ppa.utilization_pct,
+        timing_slack=ppa.timing_slack,
+    )
+
+
+def write_ppa(output_dir: pathlib.Path, result: PhysicalResult) -> pathlib.Path:
+    """Writes ppa.json next to the run's manifest, carrying the run hash it belongs to."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / PPA_NAME
+    path.write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n")
+    return path

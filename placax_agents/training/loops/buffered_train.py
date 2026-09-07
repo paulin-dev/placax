@@ -28,21 +28,30 @@ def collect_buffer(
     n_episodes: int,
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
+    initial_positions: jax.Array | None = None,
+    n_placed: int = 0,
 ):
     """Collects n_episodes of rollout (vmapped) and flattens them into one buffer of transitions."""
     # 1. One fresh random key per episode, run all episodes at once via vmap.
     keys = jax.random.split(key, n_episodes)
+    # Everything but the key is closed over, so n_placed stays a Python int fixing a static
+    # shape rather than becoming a leaf of the vmap.
     trajectories, _ = jax.vmap(
-        collect_rollout, in_axes=(0, None, None, None, None, None, None, None, None)
-    )(keys, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn, extra_illegal_fn)
-    # 2. Flatten (n_episodes, n_macros, ...) into one buffer axis, keeping episodes in temporal order for compute_gae.
+        lambda k: collect_rollout(
+            k, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
+            extra_illegal_fn, initial_positions, n_placed,
+        )
+    )(keys)
+    # 2. Flatten (n_episodes, episode_length, ...) into one buffer axis, keeping episodes in temporal order for compute_gae.
     flatten = lambda x: x.reshape((-1,) + x.shape[2:])  # noqa: E731
     return jax.tree_util.tree_map(flatten, trajectories)
 
 
 # Built once at import so the vmapped rollout isn't retraced/recompiled (and GPU memory doesn't grow) on every call.
 _jitted_collect_buffer = jax.jit(
-    collect_buffer, static_argnames=("policy_apply_fn", "reward_fn", "state_fn", "extra_illegal_fn", "n_episodes")
+    collect_buffer,
+    static_argnames=("policy_apply_fn", "reward_fn", "state_fn", "extra_illegal_fn",
+                     "n_episodes", "n_placed"),
 )
 
 # Same reasoning as above; donate_argnums=(0, 1) lets XLA reuse the reward/value buffers for the (advantages, returns) output.
@@ -124,13 +133,15 @@ def buffered_train_step(
     state_fn: StateFn = observation,
     ppo_config: PPOConfig = PPOConfig(),
     extra_illegal_fn: ExtraIllegalFn | None = None,
+    initial_positions: jax.Array | None = None,
+    n_placed: int = 0,
 ):
     """One full buffer-collect + multi-epoch-minibatch update cycle, returning updated (variables, opt_state, running_stats, loss)."""
     # 1. Fill the buffer with n_episodes of fresh rollout data using the current policy.
     key, buffer_key = jax.random.split(key)
     buffer = _jitted_collect_buffer(
         buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes,
-        state_fn, extra_illegal_fn,
+        state_fn, extra_illegal_fn, initial_positions, n_placed,
     )
     # 2. Compute advantages/returns once for the whole buffer; valid since GAE resets at each episode's done flag.
     advantages, returns = _jitted_compute_gae(

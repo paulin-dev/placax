@@ -16,9 +16,13 @@
 
 Build a **fast, general-purpose, JAX-based environment for chip macro placement**, designed so that no part of it — training algorithm, reward function, initial-placement strategy, cell-placement/validation tools — is hard-coded. Every one of those is a swappable input, following one pattern throughout: pass a function in, the environment calls it, nothing about the core changes when that function changes.
 
-**The core is deliberately minimal: one `reset()`/`step()` kernel, not several.** PPO, SHAC, ant colony optimization, and genetic algorithms all drive the identical loop — the only thing that varies is which function decides the next action. Population methods (GA) don't need a separate batch-evaluation entry point either: `vmap` the same episode-replay function across a population of pre-committed action sequences. This was tested end-to-end with four structurally different agents against the same kernel, with zero changes to `reset()` or `step()` between them.
+**The core is deliberately minimal: one `reset()`/`step()` kernel, not several.** PPO, SHAC, ant colony optimization, and genetic algorithms all drive the identical loop — the only thing that varies is which function decides the next action. Population methods (GA) don't need a separate batch-evaluation entry point either: `placax.core.replay()` drives the same `step()` from a pre-committed action sequence, and `jax.vmap` over it scores a whole population at once.
 
-This environment enables a real comparison — SHAC-style analytic policy-gradient training (enabled by the environment's differentiability) against standard PPO — and, because the environment is genuinely general, tests other axes the same way: reward formulations, algorithm families, initial-placement strategies.
+**Three structurally different agents are shipped and tested against that kernel today** (`placax_agents/agents/`): PPO, a deterministic greedy-wiremask heuristic, and random search over legal placements — none of which required a change to `reset()` or `step()`, and two of which have no parameters, no optimizer and no gradient. Earlier drafts of this document claimed four, tested end to end; that was true of a prototype, not of this tree, and the number is stated here as what `tests/test_agents.py` actually covers.
+
+This environment is built to support a real comparison — SHAC-style analytic policy-gradient training against standard PPO — and, because the environment is general, to test other axes the same way: reward formulations, algorithm families, initial-placement strategies.
+
+**What is differentiable today, precisely.** The *metric* is: `hpwl()` is an ordinary JAX function with an exact gradient with respect to macro positions. The *policy path* is not. Two things are missing before an analytic policy gradient can use it, both measured rather than assumed (see `docs/Action_Space_Decision.md`): raw HPWL's gradient is sparse by construction — on adaptec1, 391 of 514 connected macros receive identically zero — and legality, being enforced by masking, has no gradient at all. The first now has a contained answer in the reward axis itself: `extras.rewards.smoothed_wirelength()` is the log-sum-exp surrogate DREAMPlace uses for exactly this reason, registered as the `smoothed` reward so the gradient-density measurement that should decide the action-space question can be run from a config. The second — a differentiable density term — remains real work, and SHAC remains unbuilt until it exists.
 
 The project is **not** "build the first chip-placement environment" — those exist, one per paper, each bespoke and disposable. It **is** "build the first shared, fast, general one," closer to what Gymnax/Brax/Jumanji did for JAX-based RL in other domains — none of which cover chip placement, the confirmed gap this fills.
 
@@ -133,9 +137,12 @@ An earlier version of this design described two tiers (library + per-project scr
 
 ```
 placax/                          # Tier 1 — the environment library (≈ Gymnax)
-    core.py                        reset() / step() — the kernel (Section 4.1)
+    core.py                        reset() / step() — the kernel (Section 4.1); replay() drives it
+                                    from a pre-committed action sequence (population methods)
     types.py                       EnvState, EnvParams, RewardFn, OrderFn, SizeMap, Nets, PinOffsets
     _device.py                     GPU/CPU fallback (Section 6.3) — imported before jax, everywhere
+    log.py                         the project's logger, imported before jax for the same reason
+    reproducibility.py             fingerprint() and the determinism contract (Section 6.3)
     netlist/
         __init__.py                  load_netlist() — detects format, dispatches (Bookshelf/DEF/protobuf)
         bookshelf.py, def_reader.py, def_writer.py, lef.py, protobuf_reader.py
@@ -143,61 +150,87 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
         order.py                     OrderFn implementations: alphabetical_order (default),
                                       area_desc_order, connectivity_order (Section 5.1b)
         budget.py                    truncate_to_budget() — keep only the first N macros by order_fn
+        digest.py                    netlist_digest() — content hash of a parsed netlist, so a run
+                                      records WHICH design it used rather than where it was mounted
     extras/
         rewards.py                   hpwl(), wiremask() (macro_idx=), lookahead_wiremasks(),
-                                      make_hpwl_reward(padded_pin_idx, ..., dense=)
-        masks.py                     occupancy_mask, boundary_mask, quality_mask, lookahead_illegal_masks
+                                      make_hpwl_reward(...), smoothed_wirelength()/
+                                      make_smoothed_wirelength_reward() — the log-sum-exp surrogate
+        masks.py                     occupancy_mask, boundary_mask, quality_mask, regularity_*,
+                                      lookahead_illegal_masks
+        legality.py                  legality() — overlap/out-of-bounds/completeness of a finished
+                                      placement, measured on every evaluation (Section 5.2)
+        congestion.py                rudy_density()/congestion_overflow() — the routing-congestion
+                                      proxy the reward comparison needs (Section 5.2)
         render.py                    render() — boolean canvas from placed macro footprints
-        mst.py                       Steiner-tree/RSMT cost (Prim's algorithm) — an alternative cost metric
+        mst.py                       Steiner-tree/RSMT and plain-Python HPWL, for occasional
+                                      reporting on full netlists — NOT a RewardFn (name-keyed,
+                                      O(k^2), not jittable)
 
 placax_agents/                   # Tier 2 — reusable, forkable training loops (≈ PureJaxRL)
     benchmark.py                    Benchmark.load()/.init_policy() — netlist -> ready-to-train bundle
-    types.py                        AlgorithmFn, StateFn — the two swappable-axis contracts (Section 5.1)
+    types.py                        AlgorithmFn, StateFn, ExtraIllegalFn, InitFn — the swappable-axis
+                                     contracts (Section 5.1)
+    agents/
+        base.py                       the Agent protocol: init/update/best_positions/converged
+        ppo.py                        PPOAgent — a policy, an optimizer and a loop behind that seam
+        baselines.py                  GreedyWiremaskAgent, RandomSearchAgent — no parameters at all
+    experiment/                     the reproducibility layer (Section 4.3)
+        config.py                     ExperimentConfig, EnvironmentSpec/AgentSpec/PhysicalSpec,
+                                       the four hash levels, assert_comparable
+        registry.py                   named builders for every swappable component
+        build.py                      config -> live objects, behind one uniform StepFn
+        budget.py                     Budget/BudgetTracker — env_steps, the shared sample currency
+        presets.py                    the shipped configurations, as data
+        run.py                        run_experiment() — the one loop every agent goes through
+        physical.py                   evaluate_physical() — the configured cell placer + validator
     policy/
         observation.py                observation(), lookahead_sizes(), make_wiremask_observation()
-        action.py                     legal_action_logits() (extra_illegal=...), sample_action(), action_log_prob()
+        action.py                     illegal_cells() (the one definition of legality),
+                                       legal_action_logits(), sample_action(), action_log_prob()
         scale.py                      grid-cell <-> real-unit conversion
         architectures/
             cnn.py                      CNNActorCritic
             wiremask_cnn.py             WiremaskCNNActorCritic (pairs with make_wiremask_observation)
-            resnet_cnn.py                ResNetCoarseFineActorCritic — injected (optionally ImageNet-
-                                          pretrained) ResNet coarse branch + fine branch, MaskPlace's own
-                                          shape (Section 8); build_untrained_resnet_backbone() (offline,
-                                          tests/CI)/build_pretrained_resnet_backbone() (real weights,
-                                          ckpt_dir=) construct one, extract_/load_resnet_backbone_weights()
-                                          save/load any local backbone checkpoint post-init; needs the
-                                          optional `placax[resnet]` extra only if actually exercised
+            resnet_cnn.py               ResNetCoarseFineActorCritic — injected (optionally ImageNet-
+                                         pretrained) ResNet coarse branch + fine branch (Section 8)
     training/
-        reward.py                     make_scaled_hpwl_reward(..., dense=) — the grid-unit RewardFn factory
+        reward.py                     make_scaled_hpwl_reward()/make_scaled_smoothed_reward()/
+                                       make_expert_reward() — the grid-unit RewardFn factories
         rollout.py                    collect_rollout() — one episode as a lax.scan
         algorithm/
-            config.py                   PPOConfig (gamma, lam, clip_eps, value_coef, entropy_coef, value_loss_fn);
-                                         maskplace_ppo_config()/maskplace_optimizer() presets,
-                                         MASKPLACE_LEARNING_RATE, MASKPLACE_MAX_GRAD_NORM
+            config.py                   PPOConfig
             gae.py                      compute_gae()
-            loss.py                     ppo_loss() (reads each transition's own current_macro_size, so it's
-                                         safe to call on a reordered/shuffled minibatch), mse_value_loss(),
-                                         huber_value_loss()
-            split_optimizer.py          make_grouped_optimizer()/label_params_by_name_prefix() — a
-                                         different optax transform per named parameter group (Section 5.1c)
+            loss.py                     ppo_loss(), mse_value_loss(), huber_value_loss()
+            split_optimizer.py          make_grouped_optimizer()/label_params_by_name_prefix()
             normalize.py, optimizer_step.py, running_stats.py
         loops/
-            train.py                    train_sequential() — one episode, one full-batch update, repeated
-            parallel_train.py           train_parallel() — n_envs episodes via vmap, one averaged full-batch update
-            buffered_train.py           train_buffered() — n_episodes into one buffer, ppo_epochs of shuffled
-                                         batch_size minibatch updates over it (MaskPlace's own PPO procedure,
-                                         generalized - Section 8)
+            train.py                    train_sequential() — one episode, one full-batch update
+            parallel_train.py           train_parallel() — n_envs episodes via vmap
+            buffered_train.py           train_buffered() — MaskPlace's buffer/minibatch procedure
             run.py, common.py
     ops/
-        evaluate.py, checkpoint.py, resumable_train.py
+        evaluate.py, checkpoint.py, inference.py, resumable_train.py
 
 placax_tools/                    # Cell placer / validator wrappers (Section 5.4-5.5)
-    dreamplace/cell_placer.py
-    openroad/validator.py
+    cell_placer.py                  the CellPlacer ABC
+    validator.py                    the Validator ABC, PPAResult
+    pipeline.py                     place_and_validate()/validate_only() — names neither tool
+    dreamplace/cell_placer.py       DREAMPlaceCellPlacer (+ docker.py)
+    openroad/validator.py           OpenROADValidator
+
+placax_viz/                      # Plotting/rendering, optional (`placax[viz]`)
+    placement.py, masks.py, curves.py, rollout.py, animation.py
 
 benchmarks/                      # adaptec1, bigblue1 (Bookshelf), ariane133 (protobuf) — Section 10
-scripts/                         # download_benchmarks.py, run_training.py, compare_sequential_vs_parallel.py
+scripts/                         # Tier 3 — run_training.py, run_maskplace.py, compare_agents.py,
+                                 #   run_pipeline.py, validate_design.py, download_benchmarks.py, ...
 ```
+
+**This listing is checked, not maintained by hand.** `tests/test_docs.py` fails if any path named
+here is missing from the tree, and if any shipped module is missing from here — because this
+section has now drifted from the repository twice while claiming to be "verified against the
+repo", and a third correction would only reset the clock on the same failure.
 
 **Not yet implemented** (design intent from earlier sections, not present in this tree): `placax_agents/training/algorithm/{shac,aco,ga}.py`-style loops for algorithms beyond PPO, an `offline.py`-style pretraining loop (Section 5.6), a learned `init_fn` warm-start strategy. The interface reasoning in Section 4/8 for why they'd fit still stands; they just haven't been built.
 
@@ -260,7 +293,17 @@ The mechanism itself has nothing MaskPlace-specific baked in — `label_params_b
 - `dense=False` (default): 0 every step, `-HPWL(final)` once every macro is placed — the historical sparse/terminal reward.
 - `dense=True`: `-(HPWL(placed-so-far after) - HPWL(placed-so-far before))` every step — a dense, per-action reward, the shape MaskPlace's reward uses (Section 8). Its episode sum telescopes to the exact same total as `dense=False` (HPWL of an empty placement is 0) — sparse and dense are two credit-assignment choices over the same underlying quantity, not two different reward definitions.
 
-Formulations to compare: HPWL-only, HPWL+congestion, a learned predictor (LaMPlace/EIM-style), alternative proxies (Euclidean wirelength, RUDY-based congestion, `extras/mst.py`'s Steiner-tree/RSMT cost as an alternative to bounding-box HPWL). Only HPWL (sparse and dense) is implemented today; the others remain research-plan items (Section 12).
+Formulations to compare, and where each stands as shipped — every one of these is a registry key, selectable from a config without touching code:
+
+| `REWARDS` key | what it optimizes | status |
+|---|---|---|
+| `hpwl` | `-HPWL`, real units, sparse or dense | shipped |
+| `maskplace` | MaskPlace's dense HPWL-delta/200, plus EXPlace's optional regularity term | shipped |
+| `smoothed` | `-WAWL`, the log-sum-exp surrogate — every pin gets gradient where raw HPWL gives 76% of adaptec1's connected macros none (`extras/rewards.py`) | shipped |
+| `hpwl_congestion` | `-(HPWL + w · RUDY overflow)` (`extras/congestion.py`) — the second objective Section 12's reward comparison asks for | shipped |
+| a learned predictor (LaMPlace/EIM-style) | — | research plan |
+
+Two honest limits on the new pair. RUDY is a pre-routing proxy that knows nothing about layers, vias or detours, and its bin indicators are comparisons, so it has no useful gradient — fine for PPO, not for an analytic-gradient method. And `extras/mst.py`'s Steiner/RSMT cost is deliberately **not** a `RewardFn`: it is name-keyed, plain-Python and O(k²) per net, so it is a reporting metric for occasional use, not something that can run in a jitted training loop.
 
 **Critical implementation detail (tested, caught a real bug):** real netlists are hypergraphs — nets connect 2 to dozens of pins — but `vmap` needs uniform shape. Pad every net's pin list to the longest net's length, carry an explicit boolean mask. A naive unmasked version silently gave 30.0 instead of the correct 20.0 on a 4-cell test case, no error raised. See Section 7.2 for the corrected code. `hpwl()` additionally takes an optional `placed_mask` (defaults to "every macro placed") so it can be evaluated on a **partial** assignment, not just a finished one — that's what makes the dense reward above possible without a second, separate implementation.
 

@@ -31,25 +31,184 @@ GitHub desc: A shared, differentiable JAX environment for chip macro placement
 pip install placax
 ```
 
+## Experiments
+
+Every run is described by one `ExperimentConfig` and executed by one shared loop, so two runs can
+actually be compared. A config is split in two:
+
+- **`environment`** - benchmark, grid, macro order/budget, initial placement, reward, observation,
+  action mask, the physical (cell placer / validator) stack, and the compute budget. This must be
+  *identical* between two runs for their results to mean anything side by side.
+- **`agent`** - policy, optimizer, algorithm, loop shape. This is the thing *under test*.
+
+Every agent gets the whole environment, not a convenient subset of it: the same observation, the
+same action mask, the same warm start, the same reward. A baseline that quietly skipped the
+action mask would be playing a different game while its config claimed otherwise, which is
+asserted directly in `tests/test_environment_parity.py` rather than left to each builder.
+
+That split is enforced mechanically rather than by careful reading:
+
+```python
+from placax_agents.experiment import Budget, assert_comparable, presets, run_experiment
+
+budget = Budget(env_steps=5_000_000)
+a = presets.maskplace("benchmarks/adaptec1", budget=budget)
+b = presets.training("benchmarks/adaptec1", budget=budget)
+
+assert_comparable(a, b)   # raises, listing every axis on which they differ
+```
+
+**Four hash levels, because "comparable" is not one question:**
+
+| level | asserts | use it for |
+|---|---|---|
+| `benchmark_hash()` | the design's own contents, grid, macro order and budget | "same design?" |
+| `task_hash()` | + reward, initial placement, action-legality rules, physical stack, budget | a state-representation study, whose whole point is that the observation differs |
+| `environment_hash()` | + the observation — everything the agent did not choose | comparing agents (the default) |
+| `full_hash()` | + agent and seed | identifying one exact run |
+
+`assert_comparable(a, b, level="task")` picks the level; the default is `environment`. A looser
+level is a claim about what the comparison means, so it has to be visible at the call site.
+
+A design is identified by a **content digest of its parsed netlist**, not by its path. Two
+machines mounting the same benchmark at different paths compare as comparable; editing a netlist
+in place does not. All four hashes are written into every run's outputs, so a results file is
+attributable to the configuration that produced it without any external bookkeeping.
+
+Each run writes, into its output directory:
+
+| file | contents |
+|---|---|
+| `manifest.json` | the full config, all four hashes, **what every logged metric means**, and a machine fingerprint (git SHA, library versions, backend, device), written **before** training so a crashed run is still attributable |
+| `training_log.jsonl` | one line per iteration, each carrying `full_hash`, `env_steps`, `eval_env_steps`, `episodes`, `gradient_steps`, `wall_clock_s`, `loss`, and — on evaluated iterations — `real_hpwl`, `reward_return` and the placement's **legality** (`overlap_ratio`, `out_of_bounds_ratio`, `is_legal`) |
+| `ppa.json` | real measured PPA plus the tools that produced it, when the config names a validator (`scripts/validate_design.py --config=...`) |
+| `state.json` | budget spend, so a resumed run continues the same budget instead of starting a fresh one |
+| `checkpoint.bin` | resumable training state |
+| `best_checkpoint.bin` | bare weights plus the `real_hpwl` that earned them |
+
+Re-run a recorded configuration exactly with `--config=<path to a manifest's config>`; every flag
+describing the setup is then ignored in favor of the recorded one.
+
+### Compute budget
+
+`--n_iterations` is not a comparable unit: one iteration is a single episode in the baseline loop
+and ten episodes plus ten minibatch epochs in the MaskPlace loop. Budget in **env steps** instead
+(one env step = one macro placed), which every agent family pays in identically:
+
+```sh
+python -m scripts.run_maskplace --benchmark_dir=benchmarks/adaptec1 --env_steps=5000000
+```
+
+The loop refuses to *start* an iteration that would exceed the cap, so two different loop shapes
+given one `--env_steps` budget both finish at or below it rather than overshooting by a whole
+iteration each. Evaluation rollouts are charged too — an eval places every remaining macro, which
+is exactly as much environment work as a training episode. `--wall_clock_s` is also available and
+accumulates across resumes, but measures the hardware as much as the method. Budgets may be
+combined; the first to bind stops the run, and which one it was is logged. A deterministic agent
+that reports itself converged stops early rather than replaying one placement for the rest of the
+budget; what it actually spent is what gets recorded.
+
+**This is a sample budget, not a compute budget, and the distinction is deliberate.** `env_steps`
+prices environment interaction — the one axis every agent family genuinely shares. It does not
+price what an agent does between rollouts: the buffered PPO loop runs ten epochs of minibatch
+gradient updates per iteration and random search runs none. So `gradient_steps` is logged
+alongside, and a claim of "matched compute" has to cite it rather than assume it.
+
+### Comparing agents
+
+`scripts/compare_agents.py` is the point of all of the above: several agents, one environment, one
+budget, one scoring path.
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 \
+    --env_steps=500000 --agents=greedy_wiremask,random_search,ppo --seeds=3
+```
+
+It asserts the environment hash matches across every run *before* anything starts, so it refuses
+to produce a table rather than producing a misleading one, and it scores each agent's placement
+itself - an agent hands over a placement, never a score.
+
+The table reports **legality beside wirelength**. Overlapping macros have shorter wires, so an
+unrealizable placement outranks a legal one on HPWL alone; a row that is not 100% legal has not
+produced a result, whatever its number says. Legality is measured on every evaluated placement,
+which also makes the action mask's relaxation valve visible — it drops the quality rule, and then
+legality itself, rather than leaving an episode with no legal move, and until now did so
+silently.
+
+Three agents ship. `ppo` is the learner; the other two are baselines the project previously had
+none of, which is why "better than X" could not be stated even against a trivial reference:
+
+- **`random_search`** - uniformly-random legal placements, keeping the best. The honest compute
+  floor. A method that does not clearly beat compute-matched random search has not demonstrated
+  anything, and almost nothing in this literature reports it.
+- **`greedy_wiremask`** - each macro at the legal cell that adds least wirelength. The classical
+  strong baseline, and the one that says how much of a learned policy's score comes from learning
+  rather than from the wiremask observation it was handed. Deterministic, so it reports itself
+  converged after one iteration instead of spending the rest of the budget on the same answer.
+
+Both baselines run inside the environment their config describes - same observation, same action
+mask, same warm start - and rank candidates by the **configured reward**, not by bare HPWL. That
+matters for the reward axis: if a baseline scored with HPWL regardless, swapping the reward would
+change what PPO optimizes and leave its baselines untouched, while `assert_comparable` reported
+the two environments as identical.
+
+Adding a fourth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
+three methods (`placax_agents/agents/base.py`); it inherits the shared evaluation, checkpointing,
+budgeting and logging automatically.
+
+### Reproducibility
+
+**JAX on GPU is not run-to-run deterministic in this project.** Two identical runs (same seed,
+same process, same machine) diverge - measured at ~1e-16 by the second PPO iteration and ~1e-10 by
+the fifth. It is localized to the backward pass: forward passes and rollouts reproduce exactly,
+but repeated calls to the same jitted `jax.grad(ppo_loss)` return convolution gradients differing
+by up to 7.5e-9. Neither `--xla_gpu_deterministic_ops=true` nor
+`--xla_gpu_exclude_nondeterministic_ops=true` removes it. The CPU backend *is* bit-exact, and CPU
+and GPU disagree with each other, so results are not comparable across backends either.
+
+What follows from that:
+
+- A single GPU run is not a reproducible result. Vary `--seed` and report across seeds.
+- Every run's `manifest.json` records the backend and device, so two results are never compared
+  across different hardware by accident.
+- `PLACAX_DETERMINISTIC=1` forces the CPU backend, the only configuration that actually delivers
+  bit-exactness. The checkpoint-resume tests assert bit-exactness there and, elsewhere, assert
+  resume is within the backend's own measured noise floor.
+
+See `placax/reproducibility.py` for the measurement and `tests/determinism.py` for how the noise
+floor is established.
+
 ## Training (MaskPlace pipeline)
 
 ```sh
-python scripts/run_maskplace.py --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --eval_every=5 --placement_images --patience=10
+python -m scripts.run_maskplace --benchmark_dir=benchmarks/adaptec1 --n_iterations=300 --n_episodes=10 --eval_every=5 --placement_images --patience=10
 ```
 
 - `--benchmark_dir`: path to a downloaded benchmark (see `scripts/download_benchmarks.py`); default `benchmarks/adaptec1`.
-- `--n_iterations`: target TOTAL buffered-PPO update cycle to train to, not an additional count - resuming from a checkpoint runs only the remainder needed to reach it (zero further iterations if already past it); default `100`.
-- `--macro_budget`: place only the N most important macros (MaskPlace's `--pnm`); default `128`, MaskPlace's own value. Pass `all` to place every macro in the netlist instead - not yet verified to fit in memory or train well at that scale.
-- `--n_episodes`: episodes collected per PPO update; default `10`, MaskPlace's own value. To find the largest value your GPU actually supports, use `scripts/subprocess_search.py` *separately first* (see below) rather than picking a number blind.
-- `--log_every`: print a progress line to the console every this many iterations; default `1` (every iteration).
+- `--seed`: RNG seed for policy init and rollout sampling; default `42`, MaskPlace's own. Vary it to reproduce MaskPlace's own mean±std-across-seeds reporting - which, per the note above, is the only defensible way to report a GPU result.
+- `--n_iterations`: budget in TOTAL training iterations, not an additional count - resuming at or past it runs zero further iterations. Default `100`, applied only when no other budget flag is given.
+- `--env_steps` / `--wall_clock_s`: the other two budget dimensions; see **Compute budget** above.
+- `--macro_budget`: place only the N most important macros (MaskPlace's `--pnm`); default `all`, matching the paper, which places every macro by RL. PPO2.py's own `--pnm` default is `128`.
+- `--n_episodes`: episodes collected per PPO update; default `10`, MaskPlace's own value. To find the largest value your GPU supports, use `scripts/subprocess_search.py` *separately first* rather than picking a number blind.
+- `--entropy_coef`: entropy bonus coefficient; default `0.0`, MaskPlace's own value.
+- `--regularity_weight` / `--regularity_mode`: weight and shape of EXPlace's regularity (periphery) reward term, normalized to [0, 1] per macro; default `0.0` (off - pure MaskPlace) and `corner`. Run `scripts/measure_reward_terms.py` on the benchmark to size the weight against the HPWL term's actual magnitude.
+- `--init_from`: warm-start weights from a bare-variables checkpoint (typically a previous run's `best_checkpoint.bin`) instead of random init; training then starts fresh at iteration 0 with a new optimizer state and budget.
+- `--log_every`: print a progress line every this many iterations; default `1`.
 - `--eval_every`: compute real HPWL (a full extra greedy rollout, so not cheap) every this many iterations; default `10`.
-- `--placement_images`: also write a placement snapshot PNG (`<benchmark_dir>/output_maskplace/placements/<iteration>.png` by default) - reuses the eval rollout that `--eval_every` already schedules, so it's free of extra rollouts; how many of those eval iterations actually get an image kept follows `--log_every`, not `--eval_every` (see `--placement_images_dir` to change where they're written).
-- `--no_checkpoint`: don't read or write checkpoint.bin - a quick, disposable run that won't resume from or leave behind any state.
-- `--patience`: stop early once real HPWL (per `--eval_every`) hasn't beaten its best value for this many consecutive evals; default `0` (disabled, always run the full `--n_iterations`).
+- `--placement_images` / `--placement_images_dir`: also write a placement snapshot PNG on every `--eval_every` iteration, reusing that iteration's already-scheduled eval rollout, so it costs no extra rollout.
+- `--patience`: stop early once real HPWL hasn't beaten its best for this many consecutive evals; default `0` (disabled).
+- `--config`: run a recorded `ExperimentConfig` JSON exactly, ignoring the setup flags above.
+- `--output_dir`: where the manifest, log and checkpoints go; default `<benchmark_dir>/output_maskplace`.
+- `--no_checkpoint`: run entirely in memory - no manifest, checkpoint or log written.
 
-Every iteration is appended to `<benchmark_dir>/output_maskplace/training_log.jsonl` regardless of `--log_every`, so the full history survives even if the console only shows a fraction of it.
+Run `python -m scripts.run_maskplace --help` for the full flag list. The script auto-resumes from
+its checkpoint on re-run, so it's safe to stop and restart with the same flags.
 
-Run `python scripts/run_maskplace.py --help` for the full flag list. The script auto-resumes from its checkpoint on re-run, so it's safe to stop and restart with the same flags.
+`scripts/run_training.py` is the plain-CNN baseline and takes the same budget, seed, output and
+run-control flags, plus `--n_envs` for the vmapped parallel loop. It is deliberately a weak
+baseline rather than a tuned competitor - it exists so a change to a single axis can be measured
+against something simple, which is only meaningful now that both can be pinned to one environment
+and budget.
 
 ### Finding the largest `--n_episodes` (or `--n_envs`) your hardware supports
 
@@ -91,3 +250,36 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 Writes `macros_placed.png` and `macros_with_nets.png` (macro-only, always) plus, once DREAMPlace succeeds, `full_placement.png` (every macro and every cell) and the placed design itself at `<output_dir>/<design_name>/<design_name>.gp.pl`. Prints two HPWL numbers: `real_hpwl` (macro-to-macro nets only, the RL reward's own scope) and `full_hpwl` (every net, macros and cells, from the actual final placement) - both are geometric (half-perimeter) proxies, not a routed wirelength; that needs OpenROAD.
 
 Run `python -m scripts.run_pipeline --help` for the full flag list.
+
+## Physical validation (real PPA)
+
+Every number above is a geometric half-perimeter proxy. `scripts/validate_design.py` runs the
+actual physical flow on a macro-placed DEF - standard-cell placement, then area, utilization and
+timing from a real signoff tool:
+
+```sh
+python -m scripts.validate_design --def_path=placed.def --lef=tech.lef --lef=cells.lef \
+    --config=runs/adaptec1/manifest_config.json --use_docker
+```
+
+`--config` is the path that produces an attributable number: the cell placer and validator come
+from the experiment's own `EnvironmentSpec.physical` (so they are in its hash and its manifest),
+and the result is written to `ppa.json` carrying that run's `full_hash`. Without it the tools come
+from CLI flags and the number belongs to nothing - which is why this box sat outside the
+reproducibility envelope for so long.
+
+Which tools ran is part of the config; *where they are installed* deliberately is not.
+`--dreamplace_root`, `--use_docker`, `--gpu` and `--openroad_binary` are properties of the
+machine, and folding an install path into an environment hash would stop two labs running the
+same experiment from ever comparing as comparable.
+
+Timing needs both `--liberty` and `--clock_period_ns`; without them area and utilization still
+come back and `timing_slack` reports as a dash - not computed, never guessed.
+`placax_tools/pipeline.py`'s `place_and_validate` names neither DREAMPlace nor OpenROAD, so
+substituting RePlAce, AutoDMP or another signoff tool is a registry entry and a config change.
+
+**Not yet verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
+dependency, so the real binary has never been driven through this path - the TCL generation,
+output parsing and the composition all have tests, but someone with a real design should run it
+before trusting the numbers. The Bookshelf benchmarks under `benchmarks/` cannot reach it at all,
+since they carry no LEF/DEF; that is why validation went unwired for so long.

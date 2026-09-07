@@ -19,9 +19,18 @@ def collect_rollout(
     cell_size: float,
     state_fn: StateFn = observation,
     extra_illegal_fn: ExtraIllegalFn | None = None,
+    initial_positions: jax.Array | None = None,
+    n_placed: int = 0,
 ):
-    """Samples one full episode, returning (trajectory, final_state) with per-step obs/action/reward/log_prob/value/done arrays."""
-    initial_state = reset(params)
+    """Samples one full episode, returning (trajectory, final_state) with per-step obs/action/reward/log_prob/value/done arrays.
+
+    `initial_positions`/`n_placed` are the environment's warm start: a prefix of macros already
+    placed, and how many. The episode is then the REMAINING placements, so a warm-started run is
+    a shorter episode rather than one that scans past the end of the position array and silently
+    drops its last updates. `n_placed` is static (it comes from the config, resolved once per
+    run) precisely so that length is a compile-time shape.
+    """
+    initial_state = reset(params, initial_positions)
 
     def scan_step(state, step_key):
         # obs -> policy -> mask illegal cells -> sample -> apply -> record.
@@ -53,6 +62,6 @@ def collect_rollout(
         }
         return new_state, transition
 
-    step_keys = jax.random.split(key, params.n_macros)
+    step_keys = jax.random.split(key, params.n_macros - n_placed)
     final_state, trajectory = jax.lax.scan(scan_step, initial_state, step_keys)
     return trajectory, final_state

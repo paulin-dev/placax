@@ -1,6 +1,7 @@
 """Wraps make_hpwl_reward with the grid-to-real-unit conversion."""
 from placax.extras.masks import regularity_cost, regularity_max  # must precede jax imports
-from placax.extras.rewards import make_hpwl_reward
+from placax.extras.congestion import make_congestion_cost
+from placax.extras.rewards import make_hpwl_reward, make_smoothed_wirelength_reward
 from placax.types import EnvParams, RewardFn
 from placax_agents.policy.scale import to_grid_units, to_real_centers
 
@@ -35,6 +36,96 @@ def make_scaled_hpwl_reward(
             old_placed,
             new_placed,
         )
+
+    return reward_fn
+
+
+def make_scaled_smoothed_reward(
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    sizes_array: jax.Array,
+    cell_size: float,
+    dense: bool = False,
+    reward_scale: float = 1.0,
+    gamma: float = 1.0,
+) -> RewardFn:
+    """make_scaled_hpwl_reward over the smooth log-sum-exp surrogate instead of raw HPWL.
+
+    Same units and same shape, so it substitutes wherever the HPWL reward is used - the point
+    being that the reward axis is the one place this project can already test a gradient-friendly
+    objective without touching the kernel (docs/Action_Space_Decision.md, option D).
+    """
+    base_reward_fn = make_smoothed_wirelength_reward(
+        padded_pin_idx, padded_pin_offset, valid_mask, dense=dense, reward_scale=reward_scale,
+        cell_size=cell_size, gamma=gamma,
+    )
+
+    def reward_fn(
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+    ) -> jax.Array:
+        return base_reward_fn(
+            to_real_centers(old_positions, sizes_array, cell_size),
+            to_real_centers(new_positions, sizes_array, cell_size),
+            old_placed,
+            new_placed,
+        )
+
+    return reward_fn
+
+
+def make_hpwl_congestion_reward(
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    sizes_array: jax.Array,
+    cell_size: float,
+    params: EnvParams,
+    congestion_weight: float = 1.0,
+    capacity: float = 1.0,
+    dense: bool = False,
+    reward_scale: float = 1.0,
+) -> RewardFn:
+    """-(HPWL + congestion_weight * RUDY overflow) - the second objective the reward comparison needs.
+
+    The two terms are NOT auto-balanced, for the same reason make_expert_reward's aren't: HPWL is
+    in real design units and overflow is in bins of excess wire demand, so `congestion_weight` has
+    to be sized against the HPWL term's actual magnitude on YOUR benchmark. Run
+    scripts/measure_reward_terms.py before picking one; a weight transplanted from another design
+    is meaningless.
+
+    Defaults to sparse. Congestion costs a grid-sized matmul where HPWL costs a reduction over
+    pins, so paying it once at the end of an episode is the affordable choice unless you have
+    specifically decided otherwise - see placax.extras.congestion for the cost discussion.
+    """
+    hpwl_reward_fn = make_scaled_hpwl_reward(
+        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+        dense=dense, reward_scale=1.0,
+    )
+    congestion_cost = make_congestion_cost(
+        padded_pin_idx, padded_pin_offset, valid_mask, params, cell_size, capacity
+    )
+
+    def reward_fn(
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+    ) -> jax.Array:
+        reward = hpwl_reward_fn(old_positions, new_positions, old_placed, new_placed)
+        if congestion_weight == 0.0:
+            return reward * reward_scale
+        # Congestion is a property of a layout, not of a step, so the dense form pays its DELTA -
+        # which telescopes over an episode to the same total the sparse form pays once, exactly
+        # as the HPWL term does.
+        new_cost = congestion_cost(
+            to_real_centers(new_positions, sizes_array, cell_size), new_placed
+        )
+        if dense:
+            old_cost = congestion_cost(
+                to_real_centers(old_positions, sizes_array, cell_size), old_placed
+            )
+            penalty = new_cost - old_cost
+        else:
+            penalty = jnp.where(new_placed.all(), new_cost, 0.0)
+        return (reward - congestion_weight * penalty) * reward_scale
 
     return reward_fn
 

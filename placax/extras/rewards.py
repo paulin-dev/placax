@@ -193,3 +193,78 @@ def make_hpwl_reward(
         return raw * reward_scale
 
     return reward_fn
+
+
+def smoothed_wirelength(
+    positions: jax.Array,
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    placed_mask: jax.Array | None = None,
+    cell_size: float | None = None,
+    gamma: float = 1.0,
+) -> jax.Array:
+    """Log-sum-exp ("weighted-average") wirelength - HPWL's smooth surrogate, same units.
+
+    Why this exists, measured rather than assumed: `hpwl` is a sum of per-net `max - min`, so
+    only the two pins actually ON a net's bounding box receive any gradient. On adaptec1, 391 of
+    the 514 connected macros (76%) get an identically-zero d(-HPWL)/d(position) - every one of
+    them is interior to every net it belongs to. An analytic policy gradient would move a quarter
+    of the design and leave the rest still.
+
+    Log-sum-exp replaces each `max` with `gamma * log(sum(exp(x / gamma)))` and each `min` with
+    its mirror, which every pin contributes to. It is the same trick DREAMPlace uses for exactly
+    this reason - it does not optimize raw HPWL either - and it converges to HPWL as gamma -> 0,
+    so `gamma` trades gradient density against fidelity to the metric actually being reported.
+
+    This is the contained half of what an analytic-gradient method (SHAC) needs. The other half,
+    a differentiable density/overlap term, does not exist here: legality is enforced by masking,
+    which has no gradient at all. See docs/Action_Space_Decision.md - the recommendation there is
+    to measure gradient density under this surrogate BEFORE deciding whether to build a
+    continuous action space around it, and this is the function that makes that measurable.
+    """
+    if placed_mask is None:
+        placed_mask = jnp.ones(positions.shape[0], dtype=bool)
+    pin_xy = _quantize(positions[padded_pin_idx].astype(jnp.float32) + padded_pin_offset, cell_size)
+    counted = valid_mask & placed_mask[padded_pin_idx]
+
+    # Shift by the per-net max before exponentiating (the standard LSE stabilization): without it
+    # exp(x / gamma) overflows for any real chip coordinate at a small gamma.
+    def soft_max(values: jax.Array) -> jax.Array:
+        shift = jnp.where(counted[..., None], values, -_BIG).max(axis=1, keepdims=True)
+        weights = jnp.where(counted[..., None], jnp.exp((values - shift) / gamma), 0.0)
+        return (shift + gamma * jnp.log(weights.sum(axis=1, keepdims=True))).squeeze(1)
+
+    # soft_min(x) is -soft_max(-x); sharing one implementation keeps the two exactly symmetric.
+    span = soft_max(pin_xy) + soft_max(-pin_xy)
+    # A net with fewer than two counted pins has no span, and its log(sum) would be log(0).
+    net_has_pins = counted.sum(axis=1) >= 2
+    return jnp.where(net_has_pins[:, None], span, 0.0).sum()
+
+
+def make_smoothed_wirelength_reward(
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    dense: bool = False,
+    reward_scale: float = 1.0,
+    cell_size: float | None = None,
+    gamma: float = 1.0,
+) -> RewardFn:
+    """make_hpwl_reward's shape over smoothed_wirelength instead - a drop-in RewardFn."""
+
+    def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
+        return -smoothed_wirelength(
+            positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask, cell_size, gamma
+        )
+
+    def reward_fn(
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+    ) -> jax.Array:
+        if dense:
+            raw = value_of(new_positions, new_placed) - value_of(old_positions, old_placed)
+        else:
+            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed), 0.0)
+        return raw * reward_scale
+
+    return reward_fn
