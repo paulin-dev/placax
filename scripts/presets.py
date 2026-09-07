@@ -1,50 +1,50 @@
-"""Shared presets: given only --benchmark_dir (+ --macro_budget for maskplace), rebuild the exact
-benchmark/policy/state_fn/extra_illegal_fn/optimizer setup a specific training script trains with - so
-any script that needs to reload a trained policy (scripts/visualize.py, scripts/run_pipeline.py) stays
-usable with ANY registered preset, not hardcoded to one training script's own private helpers. Add a new
-preset here (and to PRESETS) to make it available to every script that consumes this registry."""
-import functools
+"""Rebuilds a training setup from its name, for the scripts that reload a trained policy.
+
+This is now a thin adapter over `placax_agents.experiment`: the presets themselves are configs
+(placax_agents/experiment/presets.py) and building one is `experiment.build()`. That matters
+because this registry used to re-derive each setup by importing a training script's private
+helpers, which let the two drift - and they had: the maskplace entry silently dropped
+`regularity_weight`/`regularity_mode`, so a policy trained with EXPlace's periphery term was
+reloaded here against a benchmark built without it. Routing both through one config removes the
+opportunity for that class of bug rather than fixing this instance of it.
+
+Register a new preset in placax_agents/experiment/presets.py; it becomes available to every
+script that consumes this module.
+"""
 import pathlib
 
-from placax_agents.benchmark import Benchmark
-from placax_agents.policy.architectures.cnn import CNNActorCritic
-from placax_agents.policy.observation import observation
-from placax_agents.types import ExtraIllegalFn, StateFn
-
-import optax
+from placax_agents.experiment.build import BuiltExperiment, build
+from placax_agents.experiment.config import ExperimentConfig
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, PRESETS as CONFIG_PRESETS, build_preset
 
 
-def training_setup(benchmark_dir: pathlib.Path, _macro_budget: int | None):
-    """scripts/run_training.py's own setup: full netlist, plain CNN policy/observation."""
-    benchmark = Benchmark.load(benchmark_dir)
-    policy = CNNActorCritic()
-    # Bare `observation` defaults to cell_size=1.0 - bind the benchmark's real cell_size instead.
-    state_fn: StateFn = functools.partial(observation, cell_size=benchmark.cell_size)
-    extra_illegal_fn: ExtraIllegalFn | None = None
-    optimizer = optax.adam(3e-4)
-    return benchmark, policy, state_fn, extra_illegal_fn, optimizer
+def build_setup(config: ExperimentConfig) -> BuiltExperiment:
+    """Everything a config resolves to - benchmark, policy, observation, mask, optimizer, loop."""
+    return build(config)
 
 
-def maskplace_setup(benchmark_dir: pathlib.Path, macro_budget: int | None):
-    """scripts/run_maskplace.py's own setup, imported lazily so other presets skip its extra deps."""
-    from scripts.run_maskplace import (
-        WIREMASK_MARGIN,
-        _build_policy,
-        _build_state_fn,
-        _load_benchmark,
-        maskplace_optimizer,
-        maskplace_ppo_config,
-    )
-    from placax_agents.policy.action import make_wiremask_quality_illegal
+def setup_from_preset(name: str, benchmark_dir: pathlib.Path, macro_budget: int | None = None):
+    """(benchmark, policy, state_fn, extra_illegal_fn, optimizer) for a named preset.
 
-    benchmark = _load_benchmark(benchmark_dir, macro_budget)
-    policy = _build_policy(benchmark)
-    state_fn = _build_state_fn(benchmark)
-    extra_illegal_fn = make_wiremask_quality_illegal(margin=WIREMASK_MARGIN, cell_size=benchmark.cell_size)
-    optimizer = maskplace_optimizer(value_coef=maskplace_ppo_config().value_coef)
-    return benchmark, policy, state_fn, extra_illegal_fn, optimizer
+    The tuple shape is what scripts/run_pipeline.py, scripts/visualize.py and
+    scripts/place_once.py consume: they need the pieces to rebuild a policy around a checkpoint,
+    not a training loop.
+    """
+    # `training` places the whole netlist by construction, so a macro budget is meaningless
+    # there - passing one would build a config that silently disagrees with its own preset.
+    overrides = {"macro_budget": macro_budget} if name == "maskplace" else {}
+    built = build(build_preset(name, benchmark_dir, **overrides))
+    return built.benchmark, built.policy, built.state_fn, built.extra_illegal_fn, built.optimizer
 
 
-PRESETS = {"training": ("output", training_setup), "maskplace": ("output_maskplace", maskplace_setup)}
+def _preset_entry(name: str):
+    """Adapts one config preset to the (output_subdir, setup_fn) shape the scripts expect."""
+    def setup_fn(benchmark_dir: pathlib.Path, macro_budget: int | None):
+        return setup_from_preset(name, benchmark_dir, macro_budget)
+
+    return OUTPUT_SUBDIRS[name], setup_fn
+
+
+PRESETS = {name: _preset_entry(name) for name in CONFIG_PRESETS}
 """preset name -> (default output subdir under benchmark_dir, setup_fn); setup_fn(benchmark_dir,
 macro_budget) -> (benchmark, policy, state_fn, extra_illegal_fn, optimizer)."""

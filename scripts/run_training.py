@@ -1,115 +1,113 @@
-"""Runs (or resumes) extended training on a real benchmark, checkpointing and evaluating real HPWL along the way."""
+"""Trains the plain-CNN baseline setup - a thin CLI over the same shared ExperimentConfig.
+
+Structurally identical to scripts/run_maskplace.py on purpose: both build a config from
+placax_agents.experiment.presets and hand it to the same run_experiment. That is what makes the
+two comparable, and what makes the differences between them readable as data (compare the two
+presets side by side) rather than by diffing two scripts.
+"""
 import argparse
-import functools
 import pathlib
 import sys
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.log import Log
-from placax_agents.benchmark import Benchmark
-from placax_agents.ops.resumable_train import resumable_train
-from placax_agents.policy.architectures.cnn import CNNActorCritic
-from placax_agents.policy.observation import observation
-
-from jax import random
+from placax_agents.experiment.budget import Budget
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, training
+from placax_agents.experiment.run import run_experiment
+from scripts.presets import build_setup
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run (or resume) training on a real benchmark.")
+    parser = argparse.ArgumentParser(description="Train (or resume) the plain-CNN baseline setup.")
     parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
-    parser.add_argument("--n_iterations", type=int, default=100)
     parser.add_argument(
-        "--n_envs", type=int, default=1,
-        help="Parallel envs per training step (default: 1). See this module's docstring for how "
-             "to find the largest value your hardware supports.",
+        "--seed", type=int, default=0,
+        help="RNG seed for policy init and rollout sampling (default: %(default)s). This used to "
+             "be hardcoded to PRNGKey(0) with no way to vary it, which made the multi-seed "
+             "reporting this project needs impossible for the baseline.",
     )
-    parser.add_argument(
-        "--mode", choices=["sequential", "parallel"], default=None,
-        help="Force sequential/parallel training-step implementation (default: auto-detected "
-             "from the JAX backend - CPU picks sequential, GPU/TPU picks parallel).",
-    )
-    parser.add_argument(
-        "--eval_every", type=int, default=10,
-        help="Compute real HPWL (a full extra greedy rollout) every this many iterations (default: 10).",
-    )
-    parser.add_argument(
-        "--no_checkpoint", action="store_true",
-        help="Don't read or write checkpoint.bin - useful for a quick, disposable run (e.g. "
-             "when probing via scripts/subprocess_search.py) that shouldn't resume from or "
-             "leave behind any state.",
-    )
-    parser.add_argument(
-        "--placement_images", action="store_true",
-        help="Also write a placement snapshot PNG on every --eval_every iteration (default "
-             "location: <output_dir>/placements/<iteration>.png) - reuses that iteration's "
-             "already-scheduled eval rollout, so this adds no extra rollout, just one image write "
-             "per eval.",
-    )
-    parser.add_argument(
-        "--placement_images_dir", type=pathlib.Path, default=None,
-        help="Where to write placement snapshots (implies --placement_images; default: "
-             "<output_dir>/placements).",
-    )
+    parser.add_argument("--n_iterations", type=int, default=None,
+                        help="Budget in TOTAL training iterations (default: 100 if no other budget "
+                             "flag is given). Note one iteration here is ONE episode, unlike "
+                             "run_maskplace's buffered loop - use --env_steps to compare the two.")
+    parser.add_argument("--env_steps", type=int, default=None,
+                        help="Budget in env steps (macro placements) - the unit comparable across "
+                             "agents and loop shapes. Prefer this when comparing two agents.")
+    parser.add_argument("--wall_clock_s", type=float, default=None,
+                        help="Budget in seconds of training, accumulated across resumes.")
+    parser.add_argument("--n_envs", type=int, default=1,
+                        help="Episodes vmapped per update (default: %(default)s). >1 selects the "
+                             "parallel loop; see this project's subprocess_search.py for sizing it.")
+    parser.add_argument("--eval_every", type=int, default=10,
+                        help="Compute real HPWL (a full extra greedy rollout) every this many "
+                             "iterations (default: %(default)s).")
+    parser.add_argument("--log_every", type=int, default=1,
+                        help="Console progress line every this many iterations (default: %(default)s).")
+    parser.add_argument("--patience", type=int, default=0,
+                        help="Stop early once real_hpwl hasn't beaten its best for this many "
+                             "consecutive evals (default: %(default)s, disabled).")
+    parser.add_argument("--no_checkpoint", action="store_true",
+                        help="Run entirely in memory: no manifest, checkpoint or log written.")
+    parser.add_argument("--placement_images", action="store_true",
+                        help="Also write a placement snapshot PNG on every --eval_every iteration.")
+    parser.add_argument("--placement_images_dir", type=pathlib.Path, default=None,
+                        help="Where to write placement snapshots (implies --placement_images).")
+    parser.add_argument("--config", type=pathlib.Path, default=None,
+                        help="Load an ExperimentConfig JSON instead of building one from the flags.")
+    parser.add_argument("--output_dir", type=pathlib.Path, default=None,
+                        help="Where the manifest, log and checkpoints go (default: "
+                             "<benchmark_dir>/output).")
     return parser.parse_args(argv[1:])
 
 
-def _output_paths(benchmark_dir: pathlib.Path) -> tuple[pathlib.Path | None, pathlib.Path, pathlib.Path]:
-    """Returns (checkpoint_path, snapshot_dir, log_path); checkpoint_path is None if --no_checkpoint."""
-    output_dir = benchmark_dir / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir / "checkpoint.bin", output_dir / "snapshots", output_dir / "training_log.jsonl"
+def _budget_from_args(args: argparse.Namespace) -> Budget:
+    """Whichever caps were given; iterations=100 only if none were, preserving the old default."""
+    if args.n_iterations is None and args.env_steps is None and args.wall_clock_s is None:
+        return Budget(iterations=100)
+    return Budget(
+        iterations=args.n_iterations, env_steps=args.env_steps, wall_clock_s=args.wall_clock_s
+    )
 
 
 def main() -> None:
-    """CLI entry point: loads a benchmark, builds a policy, and runs/resumes training on it."""
     Log.configure()
     args = _parse_args(sys.argv)
     if not args.benchmark_dir.exists():
         Log.error(f"'{args.benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
         sys.exit(1)
 
-    Log.info(f"loading {args.benchmark_dir} ...")
-    benchmark = Benchmark.load(args.benchmark_dir)
-    Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
+    if args.config is not None:
+        from placax_agents.experiment.config import ExperimentConfig
 
-    # A fresh policy; any resuming from a checkpoint happens later, inside resumable_train itself.
-    policy = CNNActorCritic()
-    key = random.PRNGKey(0)
-    key, init_key = random.split(key)
-    variables = benchmark.init_policy(policy, init_key)
-
-    checkpoint_path, snapshot_dir, log_path = _output_paths(args.benchmark_dir)
-    output_dir = checkpoint_path.parent
-    if args.no_checkpoint:
-        checkpoint_path = None
-        placement_images_dir = args.placement_images_dir  # only if explicit - no output_dir to default into
+        config = ExperimentConfig.read(args.config)
+        Log.info(f"loaded config from {args.config} (flags describing the setup are ignored)")
     else:
-        resuming = checkpoint_path.exists()
-        Log.info(f"{'resuming from' if resuming else 'starting fresh, will save to'} {checkpoint_path}")
+        config = training(
+            args.benchmark_dir, seed=args.seed, budget=_budget_from_args(args), n_envs=args.n_envs,
+        )
+
+    Log.info(f"loading {config.environment.benchmark.benchmark_dir} ...")
+    built = build_setup(config)
+
+    if args.no_checkpoint:
+        output_dir = None
+        placement_images_dir = args.placement_images_dir
+    else:
+        output_dir = args.output_dir or (args.benchmark_dir / OUTPUT_SUBDIRS["training"])
         placement_images_dir = args.placement_images_dir or (
             output_dir / "placements" if args.placement_images else None
         )
-    if placement_images_dir is not None:
-        Log.info(f"writing a placement snapshot every {args.eval_every} iterations to {placement_images_dir}")
-    Log.info(f"running {args.n_iterations} more iterations (n_envs={args.n_envs}, mode={args.mode or 'auto'}) ...")
 
-    # resumable_train's default state_fn would silently fall back to cell_size=1.0; bind the real one here.
-    state_fn = functools.partial(observation, cell_size=benchmark.cell_size)
-
-    _final_variables, _log = resumable_train(
-        checkpoint_path, variables, key, policy.apply, benchmark.params, benchmark.reward_fn,
-        benchmark.sizes_array, benchmark.cell_size, args.n_iterations,
-        benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-        state_fn=state_fn, checkpoint_every=10, eval_every=args.eval_every, log_path=log_path,
-        n_envs=args.n_envs, mode=args.mode, snapshot_dir=snapshot_dir, snapshot_every=50,
-        placement_images_dir=placement_images_dir,
+    run_experiment(
+        config, output_dir, built=built, eval_every=args.eval_every, log_every=args.log_every,
+        patience=args.patience, placement_images_dir=placement_images_dir,
     )
 
-    print()
-    if checkpoint_path is not None:
-        print(f"checkpoint saved to {checkpoint_path} - re-run this script to continue training.")
-        print(f"snapshots (never overwritten) saved to {snapshot_dir}/")
-    print(f"full history saved to {log_path}")
+    if output_dir is not None:
+        print()
+        print(f"config + machine fingerprint: {output_dir / 'manifest.json'}")
+        print(f"per-iteration history:        {output_dir / 'training_log.jsonl'}")
+        print(f"resume with the same flags to continue from {output_dir / 'checkpoint.bin'}")
 
 
 if __name__ == "__main__":
