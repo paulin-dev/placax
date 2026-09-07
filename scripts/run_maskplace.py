@@ -1,5 +1,6 @@
 """Runs the MaskPlace-equivalent pipeline end to end, using only placax's existing pluggable pieces."""
 import argparse
+import functools
 import pathlib
 import sys
 
@@ -8,6 +9,7 @@ from placax.core import reset
 from placax.log import Log
 from placax.netlist.order import connectivity_order_for
 from placax.netlist.padding import build_macro_net_index
+from placax.types import EnvParams
 from placax_agents.benchmark import Benchmark
 from placax_agents.ops.checkpoint import load_checkpoint, save_checkpoint
 from placax_agents.ops.resumable_train import _append_log_entry, _evaluate, _save_placement_image
@@ -24,7 +26,7 @@ from placax_agents.training.algorithm.loss import huber_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
 from placax_agents.training.loops.buffered_train import buffered_train_step
 from placax_agents.training.loops.common import checkpoint_every_n, open_train_state
-from placax_agents.training.reward import make_scaled_hpwl_reward
+from placax_agents.training.reward import make_expert_reward
 
 import jax.numpy as jnp
 import optax
@@ -32,6 +34,8 @@ from jax import random
 
 WIREMASK_MARGIN = 1.0  # MaskPlace's own --soft_coefficient default
 
+MASKPLACE_GRID = 224
+"""MaskPlace's own grid resolution."""
 MASKPLACE_REWARD_DIVISOR = 200.0
 """MaskPlace's own constant divisor on its (grid-unit) reward, applied per step in PPO2.py."""
 
@@ -176,21 +180,46 @@ def _parse_args(argv: list[str]) -> tuple[pathlib.Path, int, int | None, str, in
              "MaskPlace's own value - see that function's docstring for the logit-saturation issue "
              "this causes and what a nonzero value here does and doesn't fix on its own).",
     )
+    parser.add_argument(
+        "--regularity_weight", type=float, default=0.0,
+        help="Weight on EXPlace's regularity (periphery) reward term, which penalizes placing a "
+             "macro far from the canvas edge (default: 0.0, off - pure MaskPlace). The term is "
+             "normalized to [0, 1] per macro, so this is its magnitude relative to the per-step "
+             "HPWL reward; run scripts/measure_reward_terms.py on the benchmark to size it.",
+    )
+    parser.add_argument(
+        "--regularity_mode", choices=("corner", "edge"), default="corner",
+        help="'corner' sums both axis costs so only the four corners are free; 'edge' takes their "
+             "min so the whole border is free (default: corner, EXPlace's own default).",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     return (
         args.benchmark_dir, args.n_iterations, macro_budget, args.n_episodes, args.log_every,
         args.eval_every, args.no_checkpoint, args.placement_images, args.placement_images_dir,
         args.init_from, args.patience, args.seed, args.entropy_coef,
+        args.regularity_weight, args.regularity_mode,
     )
 
 
-def _maskplace_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
-    """Converts real-unit HPWL delta to MaskPlace's own grid-unit reward magnitude (divided by 200)."""
+def _maskplace_reward_fn(
+    padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+    regularity_weight: float = 0.0, regularity_mode: str = "corner",
+):
+    """Converts real-unit HPWL delta to MaskPlace's own grid-unit reward magnitude (divided by 200).
+
+    With regularity_weight=0.0 (the default) this is exactly MaskPlace's reward; above 0 it adds
+    EXPlace's periphery term on top, which is the one change that does not need any of the
+    preprocessed clustering/dataflow data EXPlace ships separately.
+    """
     reward_scale = 1.0 / (cell_size * MASKPLACE_REWARD_DIVISOR)
-    return make_scaled_hpwl_reward(
-        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+    # Benchmark.load() builds its own EnvParams after this factory runs, so rebuild the matching
+    # one here from the grid constant and the macro count sizes_array already carries.
+    params = EnvParams(grid=MASKPLACE_GRID, n_macros=sizes_array.shape[0])
+    return make_expert_reward(
+        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size, params,
         dense=True, reward_scale=reward_scale,
+        regularity_weight=regularity_weight, regularity_mode=regularity_mode,
     )
 
 
@@ -207,15 +236,21 @@ def _maskplace_connectivity_weights(benchmark_name: str) -> tuple[float, float]:
     return 1.0, 1000.0
 
 
-def _load_benchmark(benchmark_dir: pathlib.Path, macro_budget: int | None) -> Benchmark:
+def _load_benchmark(
+    benchmark_dir: pathlib.Path, macro_budget: int | None,
+    regularity_weight: float = 0.0, regularity_mode: str = "corner",
+) -> Benchmark:
     """Connectivity order, macro budget, dense reward - loaded once, shared everywhere below."""
     candidate_weight, degree_weight = _maskplace_connectivity_weights(benchmark_dir.name)
     return Benchmark.load(
         benchmark_dir,
-        grid=224,  # MaskPlace's own grid resolution
+        grid=MASKPLACE_GRID,
         order_fn=connectivity_order_for(candidate_weight, degree_weight),
         macro_budget=macro_budget,
-        make_reward_fn=_maskplace_reward_fn,
+        make_reward_fn=functools.partial(
+            _maskplace_reward_fn,
+            regularity_weight=regularity_weight, regularity_mode=regularity_mode,
+        ),
     )
 
 
@@ -357,6 +392,7 @@ def main() -> None:
     (
         benchmark_dir, n_iterations, macro_budget, n_episodes_arg, log_every, eval_every, no_checkpoint,
         want_placement_images, placement_images_dir_arg, init_from, patience, seed, entropy_coef,
+        regularity_weight, regularity_mode,
     ) = _parse_args(sys.argv)
     if not benchmark_dir.exists():
         Log.error(f"'{benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
@@ -378,8 +414,11 @@ def main() -> None:
         sys.exit(1)
 
     # 3. Load the netlist with MaskPlace's own ordering/reward choices.
-    Log.info(f"loading {benchmark_dir} (connectivity order, macro_budget={macro_budget}, dense reward) ...")
-    benchmark = _load_benchmark(benchmark_dir, macro_budget)
+    reward_desc = "dense reward" if regularity_weight == 0.0 else (
+        f"dense reward + {regularity_mode} regularity w={regularity_weight}"
+    )
+    Log.info(f"loading {benchmark_dir} (connectivity order, macro_budget={macro_budget}, {reward_desc}) ...")
+    benchmark = _load_benchmark(benchmark_dir, macro_budget, regularity_weight, regularity_mode)
     Log.info(f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, cell_size={benchmark.cell_size:.2f}")
 
     # 4. Build the observation function, illegal-action mask, and policy network.

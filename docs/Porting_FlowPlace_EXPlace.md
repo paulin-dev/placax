@@ -88,19 +88,27 @@ vectorized. Lowest weight (0.05); do it last.
 
 ## Three friction points
 
-**1. `RewardFn` can't see the masks.** The signature is
+**1. ~~`RewardFn` can't see the masks.~~** *Resolved — this turned out to be a non-issue.*
+`RewardFn`'s signature looks too narrow to read `mask_k[action]`:
 
 ```python
 RewardFn = Callable[[old_positions, new_positions, old_placed, new_placed], jax.Array]
 ```
 
-but EXPlace's reward needs `mask_k[action]`, and the observation has *already computed* those
-maps. Recomputing inside `reward_fn` doubles the cost of the expensive one.
+but exactly one macro flips from unplaced to placed per `step()`, so both the macro index and
+its cell fall straight out of the arguments already passed:
 
-Mitigation: the `wire` term is free — `wiremask[x, y]` **is** the dense-HPWL delta, so
-`make_hpwl_reward(dense=True)` already produces exactly that term. Only the four new terms
-need a lookup, and three of the four are cheap. Still, widening `RewardFn` to take the
-pre-step observation is the clean fix, at the cost of a breaking change to `placax/types.py`.
+```python
+newly_placed = new_placed & ~old_placed
+idx = jnp.argmax(newly_placed)
+position = new_positions[idx]
+```
+
+No signature change, no breaking edit to `placax/types.py`. And the regularity map is
+*separable* (`x_cost[x] + y_cost[y]`), so reading one cell is O(1) — the map never has to be
+materialized on the reward path at all. The `wire` term is free for a different reason:
+`wiremask[x, y]` **is** the dense-HPWL delta, so `make_hpwl_reward(dense=True)` already
+produces it exactly.
 
 **2. Per-mask reward normalization is stateful across steps.** With `use_reward_scaling`,
 EXPlace tracks running per-episode `reward_min`/`reward_max` per mask and normalizes each
@@ -130,15 +138,42 @@ and a `prototype_canvas` observation channel.
 
 ## Suggested order
 
-1. `regularity_mask` + weighted-sum reward (0.45 weight, ~15 lines, no new data)
+1. ~~`regularity_mask` + weighted-sum reward~~ — **done**, see below
 2. Prototype warm-start from DREAMPlace + regulator-mode subtraction
 3. `port_mask`
 4. `hierarchy_mask` (needs clustering)
 5. `dataflow_mask` (needs `dataflow_mat`)
 
-Steps 1–2 are testable on adaptec1 without any preprocessed data from their Drive link.
+Steps 2 is testable on adaptec1 without any preprocessed data from their Drive link.
 Steps 4–5 require building the clustering and dataflow extraction that EXPlace ships as
 opaque `processed_data/`.
+
+## Step 1, as implemented
+
+- `placax/extras/masks.py`: `regularity_mask`, `regularity_cost`, `regularity_max`,
+  `lookahead_regularity_masks`. Differential-tested cell-for-cell against a port of EXPlace's
+  numpy `get_regularity_mask` across a sweep of grids, macro sizes, both modes and a non-unit
+  cell size — exact agreement.
+- `placax_agents/training/reward.py`: `make_expert_reward`, which is `make_scaled_hpwl_reward`
+  plus `- w * normalized_regularity_cost`. `regularity_weight=0.0` reproduces the old reward
+  bit for bit, so existing runs are untouched.
+- `scripts/run_maskplace.py`: `--regularity_weight` (default 0.0) and `--regularity_mode`.
+- `scripts/measure_reward_terms.py`: sizes the weight empirically, since the two terms are not
+  auto-balanced.
+
+**Deviation from EXPlace, deliberate.** EXPlace normalizes each cost by *running per-episode*
+min/max. placax's `RewardFn` is pure and has nowhere to keep that, so this normalizes by
+`regularity_max()` — a closed form for the map's peak, exact and stateless. Arguably better:
+running stats make the reward non-stationary early in an episode. But it is a difference, and
+worth an ablation before reading anything into a comparison with their published numbers.
+
+**On EXPlace's published coefficients.** Their `trade_off_coeff: [0.45, 0.2, 0.15, 0.15, 0.05]`
+are ratios between six terms *they have already normalized to a common scale*. They do not
+transfer. On adaptec1 (128 macros, grid 224, `cell_size` 51.74) the measured per-step HPWL
+reward averages 0.637 against a regularity cost averaging 0.405, so `--regularity_weight≈1.57`
+is parity and `≈4.7` reproduces their 3:1 regularity:wire ratio. Caveat: the HPWL term's
+mean/median ratio is 12.7× — most macros cost almost nothing and a few dominate — so sweep
+rather than trusting a single number.
 
 ---
 
