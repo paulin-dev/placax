@@ -120,28 +120,33 @@ class EnvironmentSpec:
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """The thing under test: how actions get chosen and how the choice is improved."""
+    """The thing under test: how actions get chosen and how the choice is improved.
 
-    policy: Spec
+    Only `algorithm` is required. A gradient-free method has no policy network, no optimizer and
+    no training loop, and forcing it to name three placeholders would make the config lie about
+    what the method is - so those three are optional and simply absent for such agents.
+    """
+
     algorithm: Spec
-    optimizer: Spec
-    loop: Spec
+    policy: Spec | None = None
+    optimizer: Spec | None = None
+    loop: Spec | None = None
 
     def to_dict(self) -> dict:
         return {
-            "policy": self.policy.to_dict(),
             "algorithm": self.algorithm.to_dict(),
-            "optimizer": self.optimizer.to_dict(),
-            "loop": self.loop.to_dict(),
+            "policy": self.policy.to_dict() if self.policy else None,
+            "optimizer": self.optimizer.to_dict() if self.optimizer else None,
+            "loop": self.loop.to_dict() if self.loop else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "AgentSpec":
         return cls(
-            policy=Spec.from_dict(data["policy"]),
             algorithm=Spec.from_dict(data["algorithm"]),
-            optimizer=Spec.from_dict(data["optimizer"]),
-            loop=Spec.from_dict(data["loop"]),
+            policy=Spec.from_dict(data.get("policy")),
+            optimizer=Spec.from_dict(data.get("optimizer")),
+            loop=Spec.from_dict(data.get("loop")),
         )
 
 

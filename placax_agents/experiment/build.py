@@ -16,6 +16,9 @@ from typing import Any, Callable
 
 from placax.log import Log  # must precede jax imports
 from placax.netlist.order import alphabetical_order
+from placax_agents.agents.base import Agent
+from placax_agents.agents.baselines import GreedyWiremaskAgent, RandomSearchAgent
+from placax_agents.agents.ppo import PPOAgent
 from placax_agents.benchmark import Benchmark
 from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.registry import (
@@ -112,17 +115,23 @@ LOOPS = {"buffered": _loop_buffered, "sequential": _loop_sequential, "parallel":
 
 @dataclass(frozen=True)
 class BuiltExperiment:
-    """Everything an ExperimentConfig resolves to, ready to run."""
+    """Everything an ExperimentConfig resolves to, ready to run.
+
+    `policy`, `optimizer`, `ppo_config` and `step_fn` are None for agents that have no such
+    thing - a heuristic or a population method - which is why the runner talks to `agent` and
+    never to those directly.
+    """
 
     config: ExperimentConfig
     benchmark: Benchmark
-    policy: Any
     state_fn: Any
     extra_illegal_fn: Any
-    optimizer: Any
-    ppo_config: PPOConfig
-    step_fn: StepFn
     episodes_per_iteration: int
+    agent: Agent | None = None
+    policy: Any = None
+    optimizer: Any = None
+    ppo_config: PPOConfig | None = None
+    step_fn: StepFn | None = None
 
     @property
     def n_macros(self) -> int:
@@ -130,11 +139,20 @@ class BuiltExperiment:
 
     @property
     def env_steps_per_iteration(self) -> int:
-        """Macro placements per training iteration - the budget's unit of account."""
+        """Macro placements per iteration - the budget's unit of account.
+
+        Declared up front because the runner has to decide whether it can AFFORD an iteration
+        before running it. What actually gets charged is the episode count the agent reports
+        afterwards, so an agent whose cost varies is still accounted for exactly.
+        """
         return self.episodes_per_iteration * self.n_macros
 
     def init_variables(self, key: jax.Array):
-        """Fresh policy variables, shaped from one real observation of this benchmark."""
+        """Fresh policy variables, shaped from one real observation of this benchmark.
+
+        Only meaningful for agents that have a policy network; kept because several scripts
+        rebuild a variables template this way to load a checkpoint into.
+        """
         from placax.core import reset
 
         obs0 = self.state_fn(reset(self.benchmark.params), self.benchmark.params,
@@ -153,15 +171,8 @@ def build_benchmark(config: ExperimentConfig) -> Benchmark:
     )
 
 
-def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> BuiltExperiment:
-    """Resolves a config into live objects. Pass `benchmark` to reuse an already-loaded netlist."""
-    benchmark = benchmark if benchmark is not None else build_benchmark(config)
-
-    state_fn = resolve(STATES, config.environment.state, benchmark, what="state")
-    extra_illegal_fn = (
-        resolve(MASKS, config.environment.action_mask, benchmark, what="action mask")
-        if config.environment.action_mask is not None else None
-    )
+def _build_ppo_agent(config: ExperimentConfig, benchmark: Benchmark, state_fn, extra_illegal_fn):
+    """PPO's own pieces - policy, optimizer, loop - assembled behind the Agent seam."""
     policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
     ppo_config = build_ppo_config(config.agent.algorithm)
 
@@ -176,23 +187,71 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
         )
     optimizer = resolve(OPTIMIZERS, optimizer_spec, what="optimizer")
 
-    # Built last: the loop closes over everything above.
+    # The loop closes over everything above, so it is built against a partially-filled
+    # BuiltExperiment; nothing it reads is set after this point.
     placeholder = BuiltExperiment(
-        config=config, benchmark=benchmark, policy=policy, state_fn=state_fn,
-        extra_illegal_fn=extra_illegal_fn, optimizer=optimizer, ppo_config=ppo_config,
-        step_fn=None, episodes_per_iteration=0,
+        config=config, benchmark=benchmark, state_fn=state_fn,
+        extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=0,
+        policy=policy, optimizer=optimizer, ppo_config=ppo_config,
     )
     if config.agent.loop.name not in LOOPS:
         raise KeyError(f"unknown loop {config.agent.loop.name!r}; registered: {sorted(LOOPS)}")
     step_fn, episodes = LOOPS[config.agent.loop.name](placeholder, **config.agent.loop.kwargs)
 
+    agent = PPOAgent(benchmark, policy, optimizer, step_fn, episodes, state_fn, extra_illegal_fn)
+    return agent, episodes, {"policy": policy, "optimizer": optimizer,
+                             "ppo_config": ppo_config, "step_fn": step_fn}
+
+
+def _build_greedy_wiremask_agent(config, benchmark, _state_fn, _extra_illegal_fn):
+    """One deterministic pass, so one episode per iteration and nothing to carry."""
+    return GreedyWiremaskAgent(benchmark, **config.agent.algorithm.kwargs), 1, {}
+
+
+def _build_random_search_agent(config, benchmark, _state_fn, _extra_illegal_fn):
+    """A population of random legal placements per iteration; keeps the best seen."""
+    agent = RandomSearchAgent(benchmark, **config.agent.algorithm.kwargs)
+    return agent, agent.population, {}
+
+
+AGENTS = {
+    "ppo": _build_ppo_agent,
+    "greedy_wiremask": _build_greedy_wiremask_agent,
+    "random_search": _build_random_search_agent,
+}
+"""algorithm name -> builder(config, benchmark, state_fn, extra_illegal_fn) -> (agent,
+episodes_per_iteration, extra BuiltExperiment fields). Adding an agent family is one entry."""
+
+
+def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> BuiltExperiment:
+    """Resolves a config into live objects. Pass `benchmark` to reuse an already-loaded netlist."""
+    benchmark = benchmark if benchmark is not None else build_benchmark(config)
+
+    # The environment half is built the same way whatever the agent is - which is the point:
+    # swapping the agent must not be able to change the benchmark, reward, observation or mask.
+    state_fn = resolve(STATES, config.environment.state, benchmark, what="state")
+    extra_illegal_fn = (
+        resolve(MASKS, config.environment.action_mask, benchmark, what="action mask")
+        if config.environment.action_mask is not None else None
+    )
+
+    algorithm = config.agent.algorithm
+    if algorithm.name not in AGENTS:
+        raise KeyError(
+            f"unknown algorithm {algorithm.name!r}; registered: {', '.join(sorted(AGENTS))}. "
+            f"SHAC needs a differentiable action space the sequential integer-grid kernel does "
+            f"not provide - see docs/JAX_Placement_Environment_Spec.md \u00a712."
+        )
+    agent, episodes, extras = AGENTS[algorithm.name](
+        config, benchmark, state_fn, extra_illegal_fn
+    )
+
     Log.info(
         f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, "
-        f"cell_size={benchmark.cell_size:.2f}, {episodes} episodes/iteration "
+        f"cell_size={benchmark.cell_size:.2f}, agent={agent.name}, {episodes} episodes/iteration "
         f"({episodes * benchmark.params.n_macros:,} env steps/iteration)"
     )
     return BuiltExperiment(
-        config=config, benchmark=benchmark, policy=policy, state_fn=state_fn,
-        extra_illegal_fn=extra_illegal_fn, optimizer=optimizer, ppo_config=ppo_config,
-        step_fn=step_fn, episodes_per_iteration=episodes,
+        config=config, benchmark=benchmark, state_fn=state_fn,
+        extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=episodes, agent=agent, **extras,
     )

@@ -80,14 +80,22 @@ def test_manifest_is_written_before_training_so_a_crashed_run_is_still_attributa
     config, built = toy(Budget(iterations=1))
     output_dir = tmp_path / "run"
 
-    def exploding_step(*_args, **_kwargs):
-        raise RuntimeError("boom")
+    class ExplodingAgent:
+        name = "exploding"
+
+        def init(self, key):
+            return {}
+
+        def update(self, key, state):
+            raise RuntimeError("boom")
+
+        def best_positions(self, state):
+            raise RuntimeError("boom")
 
     crashing = type(built)(
-        config=built.config, benchmark=built.benchmark, policy=built.policy,
-        state_fn=built.state_fn, extra_illegal_fn=built.extra_illegal_fn,
-        optimizer=built.optimizer, ppo_config=built.ppo_config, step_fn=exploding_step,
-        episodes_per_iteration=built.episodes_per_iteration,
+        config=built.config, benchmark=built.benchmark, state_fn=built.state_fn,
+        extra_illegal_fn=built.extra_illegal_fn,
+        episodes_per_iteration=built.episodes_per_iteration, agent=ExplodingAgent(),
     )
     with pytest.raises(RuntimeError, match="boom"):
         run_experiment(config, output_dir, built=crashing, eval_every=0)

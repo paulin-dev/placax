@@ -16,6 +16,8 @@ from placax_agents.experiment.config import (
     AgentSpec, BenchmarkSpec, EnvironmentSpec, ExperimentConfig, Spec,
 )
 
+BASELINES = {}  # filled below, after the builders are defined
+
 MASKPLACE_GRID = 224
 """MaskPlace's own grid resolution."""
 
@@ -135,6 +137,39 @@ def training(
     )
 
 
+def _baseline(name: str, algorithm: Spec, reference: ExperimentConfig) -> ExperimentConfig:
+    """A non-learning agent dropped into an EXISTING environment, unchanged.
+
+    Baselines are only meaningful compute-matched and environment-matched, so these take the
+    environment from the config they are being compared against rather than defining their own -
+    which makes assert_comparable pass by construction instead of by careful transcription.
+    """
+    return ExperimentConfig(
+        name=f"{name}-{pathlib.Path(reference.environment.benchmark.benchmark_dir).name}",
+        seed=reference.seed,
+        environment=reference.environment,
+        agent=AgentSpec(algorithm=algorithm),
+    )
+
+
+def greedy_wiremask(reference: ExperimentConfig) -> ExperimentConfig:
+    """The classical strong baseline: each macro at the legal cell adding least wirelength.
+
+    Deterministic and effectively free, so it answers "how much of the learned policy's score
+    comes from learning, rather than from the wiremask observation it was handed?"
+    """
+    return _baseline("greedy-wiremask", Spec("greedy_wiremask"), reference)
+
+
+def random_search(reference: ExperimentConfig, population: int = 16) -> ExperimentConfig:
+    """The compute floor: uniformly-random legal placements, keeping the best.
+
+    A method that does not clearly beat compute-matched random search has not demonstrated
+    anything, and almost nothing in this literature reports it.
+    """
+    return _baseline("random-search", Spec("random_search", {"population": population}), reference)
+
+
 PRESETS = {"maskplace": maskplace, "training": training}
 """preset name -> builder(benchmark_dir, **overrides) -> ExperimentConfig."""
 
@@ -147,3 +182,7 @@ def build_preset(name: str, benchmark_dir: pathlib.Path | str, **overrides) -> E
     if name not in PRESETS:
         raise KeyError(f"unknown preset {name!r}; registered: {', '.join(sorted(PRESETS))}")
     return PRESETS[name](benchmark_dir, **overrides)
+
+
+BASELINES.update({"greedy_wiremask": greedy_wiremask, "random_search": random_search})
+"""baseline name -> builder(reference_config, **overrides) -> ExperimentConfig sharing its environment."""
