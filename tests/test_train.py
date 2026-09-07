@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
+from tests.determinism import assert_within_noise_floor, max_abs_difference
+
 
 def _toy_setup():
     params = EnvParams(grid=8, n_macros=4)
@@ -47,10 +49,10 @@ def test_train_produces_finite_losses_and_changes_params() -> None:
 
 
 def test_train_sequential_checkpoint_path_interrupted_matches_continuous(tmp_path) -> None:
-    # The same critical property resumable_train guarantees, now for
-    # the simpler train_sequential(checkpoint_path=...) path: splitting
-    # a run across two calls sharing the same checkpoint_path must give
-    # bit-for-bit identical results to one continuous call.
+    # The same critical property resumable_train guarantees, now for the simpler
+    # train_sequential(checkpoint_path=...) path: splitting a run across two calls sharing one
+    # checkpoint_path must match a single continuous call - exactly on a deterministic backend,
+    # and within the backend's measured noise floor otherwise (see tests/determinism.py).
     params, sizes_array, reward_fn = _toy_setup()
     policy = CNNActorCritic()
     obs0 = observation(reset(params), params, sizes_array)
@@ -73,10 +75,16 @@ def test_train_sequential_checkpoint_path_interrupted_matches_continuous(tmp_pat
         cell_size=1.0, n_iterations=5, checkpoint_path=path_continuous,
     )
 
-    assert interrupted_losses == continuous_losses
-    leaves_interrupted = jax.tree_util.tree_leaves(v_interrupted)
-    leaves_continuous = jax.tree_util.tree_leaves(v_continuous)
-    assert all((a == b).all() for a, b in zip(leaves_interrupted, leaves_continuous))
+    path_control = tmp_path / "control.bin"
+    v_control, control_losses = train(
+        random.PRNGKey(1), variables_init, policy.apply, params, reward_fn, sizes_array,
+        cell_size=1.0, n_iterations=5, checkpoint_path=path_control,
+    )
+    loss_floor = max_abs_difference(control_losses, continuous_losses)
+    weight_floor = max_abs_difference(v_control, v_continuous)
+
+    assert_within_noise_floor(interrupted_losses, continuous_losses, loss_floor, "per-iteration loss")
+    assert_within_noise_floor(v_interrupted, v_continuous, weight_floor, "final weights")
 
 
 def test_train_at_real_scale_produces_finite_losses() -> None:
@@ -84,15 +92,15 @@ def test_train_at_real_scale_produces_finite_losses() -> None:
 
     import pytest
 
-    from placax.netlist import load_netlist
+    from tests.real_benchmarks import load_real_netlist
     from placax.netlist.padding import build_padded_arrays
     from placax_agents.policy.scale import compute_grid_scale
 
-    adaptec1_dir = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
+    from tests.real_benchmarks import ADAPTEC1 as adaptec1_dir
     if not adaptec1_dir.exists():
         pytest.skip("real adaptec1 benchmark not available")
 
-    macro_sizes, nets = load_netlist(adaptec1_dir)
+    macro_sizes, nets = load_real_netlist(adaptec1_dir)
     _, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )

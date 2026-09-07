@@ -2,11 +2,16 @@ import pytest
 
 from placax._device import recommended_parallelism_mode
 
+import jax
+
 
 def test_auto_detects_from_backend() -> None:
-    # this sandbox has no GPU (confirmed throughout this whole build),
-    # so auto-detection should recommend sequential
-    assert recommended_parallelism_mode() == "sequential"
+    # Assert the RULE (CPU -> sequential, accelerator -> parallel), not one machine's answer.
+    # This used to assert "sequential" unconditionally with the comment "this sandbox has no
+    # GPU", which made it a test of the developer's hardware rather than of the function, and
+    # it failed on every GPU host.
+    expected = "sequential" if jax.default_backend() == "cpu" else "parallel"
+    assert recommended_parallelism_mode() == expected
 
 
 def test_override_sequential() -> None:

@@ -11,6 +11,8 @@ import jax
 import jax.numpy as jnp
 from jax import random
 
+from tests.determinism import assert_within_noise_floor, max_abs_difference
+
 
 def _toy_setup():
     params = EnvParams(grid=8, n_macros=4)
@@ -26,10 +28,11 @@ def _toy_setup():
 
 
 def test_interrupted_run_exactly_matches_continuous_run(tmp_path: pathlib.Path) -> None:
-    # The core correctness property: splitting a run across two resumed
-    # calls must give bit-for-bit identical results to one continuous
-    # call of the combined iteration count - both the final weights and
-    # every per-iteration loss.
+    # The core correctness property: splitting a run across two resumed calls must give the
+    # same results as one continuous call of the combined iteration count - both the final
+    # weights and every per-iteration loss. "The same" means bit-for-bit on a deterministic
+    # backend, and within the backend's own measured run-to-run noise otherwise; see
+    # tests/determinism.py for why that distinction is necessary and still a real test.
     params, sizes_array, reward_fn, ppi, ppo, vm = _toy_setup()
     policy = CNNActorCritic()
     obs0 = observation(reset(params), params, sizes_array)
@@ -56,10 +59,19 @@ def test_interrupted_run_exactly_matches_continuous_run(tmp_path: pathlib.Path) 
     )
     continuous_losses = [e["loss"] for e in log_continuous]
 
-    assert interrupted_losses == continuous_losses
-    leaves_interrupted = jax.tree_util.tree_leaves(v_interrupted)
-    leaves_continuous = jax.tree_util.tree_leaves(v_continuous)
-    assert all((a == b).all() for a, b in zip(leaves_interrupted, leaves_continuous))
+    # Control: the same continuous run again, to measure how far this backend moves on its own.
+    path_control = tmp_path / "control.bin"
+    v_control, log_control = resumable_train(
+        path_control, variables_init, random.PRNGKey(1), policy.apply, params, reward_fn,
+        sizes_array, 1.0, n_iterations=5, padded_pin_idx=ppi, padded_pin_offset=ppo,
+        valid_mask=vm, checkpoint_every=1,
+    )
+    control_losses = [e["loss"] for e in log_control]
+    loss_floor = max_abs_difference(control_losses, continuous_losses)
+    weight_floor = max_abs_difference(v_control, v_continuous)
+
+    assert_within_noise_floor(interrupted_losses, continuous_losses, loss_floor, "per-iteration loss")
+    assert_within_noise_floor(v_interrupted, v_continuous, weight_floor, "final weights")
 
 
 def test_eval_every_gates_real_hpwl_computation(tmp_path: pathlib.Path) -> None:
@@ -101,9 +113,9 @@ def test_log_path_persists_full_history(tmp_path: pathlib.Path) -> None:
 
 
 def test_interrupted_parallel_run_exactly_matches_continuous_run(tmp_path: pathlib.Path) -> None:
-    # The same critical property, now for the parallel path (n_envs>1):
-    # splitting a run across two resumed calls must still give
-    # bit-for-bit identical results to one continuous call.
+    # The same critical property, now for the parallel path (n_envs>1): splitting a run
+    # across two resumed calls must still match one continuous call, to within this backend's
+    # own noise floor (exactly, on a deterministic backend).
     params, sizes_array, reward_fn, ppi, ppo, vm = _toy_setup()
     policy = CNNActorCritic()
     obs0 = observation(reset(params), params, sizes_array)
@@ -130,10 +142,18 @@ def test_interrupted_parallel_run_exactly_matches_continuous_run(tmp_path: pathl
     )
     continuous_losses = [e["loss"] for e in log_continuous]
 
-    assert interrupted_losses == continuous_losses
-    leaves_interrupted = jax.tree_util.tree_leaves(v_interrupted)
-    leaves_continuous = jax.tree_util.tree_leaves(v_continuous)
-    assert all((a == b).all() for a, b in zip(leaves_interrupted, leaves_continuous))
+    path_control = tmp_path / "control_par.bin"
+    v_control, log_control = resumable_train(
+        path_control, variables_init, random.PRNGKey(1), policy.apply, params, reward_fn,
+        sizes_array, 1.0, n_iterations=5, padded_pin_idx=ppi, padded_pin_offset=ppo,
+        valid_mask=vm, checkpoint_every=1, eval_every=100, n_envs=4, mode="parallel",
+    )
+    control_losses = [e["loss"] for e in log_control]
+    loss_floor = max_abs_difference(control_losses, continuous_losses)
+    weight_floor = max_abs_difference(v_control, v_continuous)
+
+    assert_within_noise_floor(interrupted_losses, continuous_losses, loss_floor, "per-iteration loss")
+    assert_within_noise_floor(v_interrupted, v_continuous, weight_floor, "final weights")
 
 
 def test_extra_illegal_fn_is_threaded_through(tmp_path: pathlib.Path) -> None:

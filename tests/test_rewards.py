@@ -222,16 +222,16 @@ def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> Non
 
     import numpy as np
 
-    from placax.netlist import load_netlist
+    from tests.real_benchmarks import load_real_netlist
     from placax.netlist.padding import build_padded_arrays
 
-    adaptec1_dir = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
+    from tests.real_benchmarks import ADAPTEC1 as adaptec1_dir
     if not adaptec1_dir.exists():
         import pytest
 
         pytest.skip("real adaptec1 benchmark not available")
 
-    macro_sizes, nets = load_netlist(adaptec1_dir)
+    macro_sizes, nets = load_real_netlist(adaptec1_dir)
     _name_to_idx, sizes_array, padded_pin_idx, padded_pin_offset, valid_mask = build_padded_arrays(
         macro_sizes, nets
     )
@@ -243,11 +243,18 @@ def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> Non
     positions[0] = [10, 10]
     state = EnvState(positions=jnp.array(positions), step=1)
 
-    t0 = time.perf_counter()
-    wm = wiremask(
+    call = lambda: wiremask(  # noqa: E731
         state, params, padded_pin_idx, padded_pin_offset, valid_mask,
         macro_net_idx, macro_net_offset, macro_net_valid, sizes_array,
     )
+    # Time a WARM call. The first one pays XLA compilation (several seconds on its own, and highly
+    # machine-dependent), and JAX dispatches asynchronously, so the original timing measured
+    # "compile + enqueue" rather than the work - which is what made this bound flaky once the test
+    # started actually running. block_until_ready() is what makes the number mean anything.
+    call().block_until_ready()
+    t0 = time.perf_counter()
+    wm = call()
+    wm.block_until_ready()
     elapsed = time.perf_counter() - t0
 
     assert wm.shape == (64, 64)

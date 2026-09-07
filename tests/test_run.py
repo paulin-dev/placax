@@ -54,11 +54,17 @@ def test_train_forced_parallel() -> None:
 
 
 def test_train_auto_mode_matches_recommended_parallelism() -> None:
-    # This sandbox has no GPU (confirmed throughout this whole build),
-    # so auto-detection should resolve to sequential.
+    # train(mode=None) must follow whatever auto-detection resolves to on THIS machine, and
+    # run either way. The old version asserted "sequential" unconditionally because the
+    # machine it was written on had no GPU, so it failed on every host that does.
+    import jax
+
     from placax._device import recommended_parallelism_mode
 
-    assert recommended_parallelism_mode() == "sequential"
+    assert recommended_parallelism_mode() in ("sequential", "parallel")
+    assert recommended_parallelism_mode() == (
+        "sequential" if jax.default_backend() == "cpu" else "parallel"
+    )
 
     params, sizes_array, reward_fn = _toy_setup()
     policy, variables = _init(params, sizes_array)

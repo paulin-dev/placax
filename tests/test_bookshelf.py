@@ -7,7 +7,7 @@ from placax.netlist.bookshelf import (
 )
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "bookshelf"
-REAL_ADAPTEC1 = pathlib.Path("/home/claude/maskplace/maskplace/adaptec1")
+from tests.real_benchmarks import ADAPTEC1 as REAL_ADAPTEC1
 
 
 def test_parse_nodes_keeps_only_terminals() -> None:
