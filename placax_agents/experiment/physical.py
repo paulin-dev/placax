@@ -16,17 +16,26 @@ The split between the two is deliberate. WHICH tools ran changes the result and 
 they are installed does not, and is not - two labs running one experiment on one design have to
 compare as comparable, which an install path in the environment hash would prevent.
 
+`evaluate_placement` is the entry point a run should use: it exports the agent's own placement
+into the design's format (`experiment.export`) and measures that. Until that existed, this module
+could only be pointed at a DEF someone had produced by hand, because nothing in the repository
+converted a placement into one - the flow was configured and hashed but structurally unreachable
+from a run.
+
 **Still not verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
 dependency, so the real binaries have never been driven through this path - the composition, the
-TCL generation and the output parsing all have tests, but the numbers themselves are unproven.
-The Bookshelf benchmarks under `benchmarks/` cannot reach it at all, since they carry no LEF/DEF.
+export, the TCL generation and the output parsing all have tests, but the numbers themselves are
+unproven. The Bookshelf benchmarks under `benchmarks/` still cannot reach the validator, since
+OpenROAD reads no Bookshelf; their placements export to `.pl`/`.aux` for DREAMPlace instead.
 That is stated here rather than left for a reader to discover.
 """
 import json
 import pathlib
 from dataclasses import asdict, dataclass
 
+from placax.netlist import NetlistFormat
 from placax_agents.experiment.build import BuiltExperiment, build_physical
+from placax_agents.experiment.export import write_placement
 from placax_tools.pipeline import place_and_validate, validate_only
 
 PPA_NAME = "ppa.json"
@@ -107,6 +116,36 @@ def evaluate_physical(
         design_area=ppa.design_area,
         utilization_pct=ppa.utilization_pct,
         timing_slack=ppa.timing_slack,
+    )
+
+
+def evaluate_placement(
+    built: BuiltExperiment,
+    positions,
+    lef_paths: list[pathlib.Path],
+    output_dir: pathlib.Path,
+    skip_cell_placement: bool = False,
+    machine: dict | None = None,
+) -> PhysicalResult:
+    """Measures a run's OWN placement: export it to the design's format, then run the flow on it.
+
+    This is the link that was missing. `evaluate_physical` below has always taken a `def_path`
+    "with every macro already placed", and nothing in this repository produced one - so the
+    physical flow could only ever be pointed at a file someone made by hand, and no agent's
+    placement could reach it. `positions` here is the array the agent handed the runner and
+    `score()` measured, so the design that gets validated is the placement that was reported.
+    """
+    exported = write_placement(built, positions, output_dir / "placement")
+    if exported.format is not NetlistFormat.DEF:
+        raise NotImplementedError(
+            f"this run's design is {exported.format.value}, and the validator reads DEF/LEF only. "
+            f"The placement itself was still written to {exported.path}, which DREAMPlace reads "
+            f"natively - see scripts/run_pipeline.py for that route. Bring a DEF/LEF design here "
+            f"for a PPA number."
+        )
+    return evaluate_physical(
+        built, exported.path, lef_paths, output_dir,
+        skip_cell_placement=skip_cell_placement, machine=machine,
     )
 
 

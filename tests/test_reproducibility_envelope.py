@@ -2,8 +2,14 @@
 
 Each test here corresponds to something that used to be true of a run but was recorded nowhere,
 or was recorded in a way that got the answer wrong. Together they are the "every experiment uses
-exactly the same benchmark, initial placement, constraints, reward, legalization, cell placement
-and compute budget" claim, made checkable.
+exactly the same benchmark, initial placement, constraints, reward, cell placement and compute
+budget" claim, made checkable.
+
+Two items from that list are deliberately absent, and saying so here is the point: there is no
+**legalization** component (legality is enforced by masking and MEASURED afterwards - see
+extras/legality.py - but nothing repairs a placement) and no **routing** at all (only the RUDY
+congestion proxy in the reward). Listing them as covered, which this docstring used to, made the
+suite look like it checked two invariants the project does not implement.
 """
 import dataclasses
 import json
@@ -427,3 +433,111 @@ def test_replay_vmaps_over_a_population(tmp_path: pathlib.Path) -> None:
     ])
     scores = jax.vmap(lambda p: replay(p, benchmark.reward_fn, benchmark.params))(population)
     assert scores.shape == (2,)
+
+
+# ------------------------------------------------- the comparison mechanism's own blind spots
+
+
+@pytest.mark.parametrize("level", ["benchmark", "task", "environment", "full"])
+def test_an_unresolved_config_never_false_alarms_at_any_level(tmp_path: pathlib.Path, level: str) -> None:
+    """The digest fallback has to hold at every level, not just the default one.
+
+    `_digest_of` walked the identity by guessing at key names, and at the "full" level - where the
+    benchmark sits two wrappers down, under "environment" - it found nothing. So the fallback that
+    exists to stop a config-without-a-digest reading as a DIFFERENT DESIGN never fired there, and
+    the one mechanism that has to be trustworthy raised on two configs naming the same netlist.
+    Parameterized over every level so the next wrapper added cannot reintroduce it quietly.
+    """
+    directory = _bookshelf(tmp_path / "bench")
+    unresolved = _small(training(directory, budget=Budget(iterations=1)))
+    resolved = build(unresolved).config
+    assert resolved.environment.benchmark.netlist_digest is not None
+    assert unresolved.environment.benchmark.netlist_digest is None
+    assert_comparable(unresolved, resolved, level=level)
+
+
+@pytest.mark.parametrize("level", ["benchmark", "task", "environment", "full"])
+def test_two_designs_are_still_caught_at_every_level(tmp_path: pathlib.Path, level: str) -> None:
+    # The other direction of the same fix: tolerating a MISSING digest must not tolerate a
+    # different one. Both configs are resolved here, so the digest is live and has to bite.
+    edited = NODES.replace("a 4 4 terminal", "a 8 8 terminal")
+    one = build(_small(training(_bookshelf(tmp_path / "one"), budget=Budget(iterations=1)))).config
+    other = build(_small(training(
+        _bookshelf(tmp_path / "other", nodes=edited), budget=Budget(iterations=1)
+    ))).config
+    with pytest.raises(ValueError, match="netlist_digest"):
+        assert_comparable(one, other, level=level)
+
+
+def test_a_default_written_out_hashes_like_a_default_left_unsaid(tmp_path: pathlib.Path) -> None:
+    """Two spellings of one component are one component, and must hash alike.
+
+    Before this, `Spec("hpwl")` and `Spec("hpwl", {...the defaults...})` produced different
+    hashes, so `assert_comparable` rejected two identical experiments and a config read back from
+    JSON could never match one built from a preset - a hash over the spelling of a config rather
+    than over the config.
+    """
+    directory = _bookshelf(tmp_path / "bench")
+    spelled = _small(training(directory, budget=Budget(iterations=1)))
+    bare = _small(training(directory, budget=Budget(iterations=1)), reward=Spec("hpwl"))
+
+    assert spelled.environment.reward.kwargs  # the preset really does spell its defaults out
+    assert not bare.environment.reward.kwargs
+    assert spelled.environment_hash() == bare.environment_hash()
+    assert_comparable(spelled, bare)
+
+
+def test_a_non_default_value_still_changes_the_hash(tmp_path: pathlib.Path) -> None:
+    # Completing defaults must not flatten real differences - the failure mode that would make
+    # the whole mechanism useless in the opposite direction.
+    directory = _bookshelf(tmp_path / "bench")
+    base = _small(training(directory, budget=Budget(iterations=1)))
+    dense = _small(training(directory, budget=Budget(iterations=1)),
+                   reward=Spec("hpwl", {"dense": True}))
+    assert base.environment_hash() != dense.environment_hash()
+
+
+def test_completing_defaults_leaves_the_written_config_as_the_author_wrote_it(tmp_path) -> None:
+    # Hashing completes a Spec; serialization does not. A written config is a record of what
+    # someone wrote, and has to round-trip unchanged.
+    config = _small(training(_bookshelf(tmp_path / "bench"), budget=Budget(iterations=1)),
+                    reward=Spec("hpwl"))
+    assert json.loads(config.to_json())["environment"]["reward"] == {"name": "hpwl", "kwargs": {}}
+    assert ExperimentConfig.from_json(config.to_json()) == config
+
+
+def test_the_physical_stack_is_not_completed_with_its_builders_defaults() -> None:
+    """Machine paths must never reach the environment hash, which completing them would do.
+
+    `_cell_placer_dreamplace` and `OpenROADValidator` both carry defaults for things that belong
+    to a host, not an experiment - `dreamplace_root`, `openroad_binary`. Completing those would
+    fold an install path into the hash and stop two labs running one experiment from comparing.
+    """
+    from placax_agents.experiment.config import EnvironmentSpec
+
+    physical = PhysicalSpec(cell_placer=Spec("dreamplace"), validator=Spec("openroad"))
+    identity = EnvironmentSpec(
+        benchmark=training("b").environment.benchmark, reward=Spec("hpwl"), state=Spec("canvas"),
+        budget=Budget(iterations=1), physical=physical,
+    ).task_identity()
+    written = json.dumps(identity["physical"])
+    assert "dreamplace_root" not in written and "openroad_binary" not in written
+    assert identity["physical"] == physical.to_dict()
+
+
+def test_a_derived_kwarg_is_recorded_at_the_value_the_run_uses(tmp_path: pathlib.Path) -> None:
+    """The split optimizer's value_coef is derived from PPO's, so the record has to show that.
+
+    It used to be injected inside the agent builder, after the config had been hashed and written
+    - so a run with a non-default value_coef recorded the optimizer's own 0.5 while actually
+    running PPO's. The manifest described a run that never happened.
+    """
+    config = _small(maskplace(_bookshelf(tmp_path / "bench"), budget=Budget(iterations=1)))
+    config = dataclasses.replace(config, agent=dataclasses.replace(
+        config.agent,
+        algorithm=Spec("ppo", {**config.agent.algorithm.kwargs, "value_coef": 0.25}),
+    ))
+    assert "value_coef" not in config.agent.optimizer.kwargs
+
+    resolved = build(config).config
+    assert resolved.agent.optimizer.kwargs["value_coef"] == 0.25

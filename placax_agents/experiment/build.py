@@ -11,7 +11,7 @@ collects per call, so the caller can charge the budget in env steps rather than 
 A future non-gradient agent (ACO, GA) becomes another entry in LOOPS with the same signature; it
 needs no changes anywhere else.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from placax.log import Log  # must precede jax imports
@@ -227,16 +227,10 @@ def _build_ppo_agent(config, benchmark, env):
     policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
     ppo_config = build_ppo_config(config.agent.algorithm)
 
-    # The split optimizer needs the value_coef the loss actually applies, so its clip threshold
-    # lands on the same raw gradient norm the reference clips. Supplying it here keeps that
-    # coupling in one place instead of asking every config to restate the number consistently.
-    optimizer_spec = config.agent.optimizer
-    if optimizer_spec.name == "maskplace_split" and "value_coef" not in optimizer_spec.kwargs:
-        optimizer_spec = type(optimizer_spec)(
-            name=optimizer_spec.name,
-            kwargs={**optimizer_spec.kwargs, "value_coef": ppo_config.value_coef},
-        )
-    optimizer = resolve(OPTIMIZERS, optimizer_spec, what="optimizer")
+    # The split optimizer's value_coef is derived from the algorithm's, but that happens in
+    # `_with_derived_kwargs` on the way into build() rather than here - so the config that gets
+    # hashed and written to the manifest carries the value the run actually used.
+    optimizer = resolve(OPTIMIZERS, config.agent.optimizer, what="optimizer")
 
     # The loop closes over everything above, so it is built against a partially-filled
     # BuiltExperiment; nothing it reads is set after this point.
@@ -339,6 +333,31 @@ def _with_machine(spec, machine: dict):
     return _replace(spec, kwargs={**machine, **spec.kwargs})
 
 
+def _with_derived_kwargs(config: ExperimentConfig) -> ExperimentConfig:
+    """The config with any kwarg one component derives from another written in explicitly.
+
+    Exactly one such coupling exists today: `maskplace_split`'s critic clip threshold is scaled
+    by the value_coef the PPO loss actually applies, so that clipping `value_coef * g_v` triggers
+    on the same raw ||g_v|| the reference clips. Deriving it here rather than inside the agent
+    builder is what keeps the record honest - the config that gets HASHED and written to the
+    manifest then carries the value the run really used, instead of recording the optimizer's own
+    default while the run quietly uses PPO's.
+    """
+    agent = config.agent
+    optimizer = agent.optimizer
+    if (
+        optimizer is None
+        or optimizer.name != "maskplace_split"
+        or agent.algorithm.name != "ppo"
+        or "value_coef" in optimizer.kwargs
+    ):
+        return config
+    value_coef = build_ppo_config(agent.algorithm).value_coef
+    return replace(config, agent=replace(agent, optimizer=replace(
+        optimizer, kwargs={**optimizer.kwargs, "value_coef": value_coef}
+    )))
+
+
 def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> BuiltExperiment:
     """Resolves a config into live objects. Pass `benchmark` to reuse an already-loaded netlist."""
     import jax.random
@@ -349,6 +368,9 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     config = config.with_benchmark(
         config.environment.benchmark.with_digest(benchmark.netlist_digest)
     )
+    # ...and any kwarg one component derives from another, for the same reason: what is recorded
+    # has to be what ran.
+    config = _with_derived_kwargs(config)
 
     # The environment half is built the same way whatever the agent is - which is the point:
     # swapping the agent must not be able to change the benchmark, reward, observation, mask or

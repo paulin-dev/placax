@@ -14,7 +14,7 @@ def test_parse_args_defaults_to_all_macros_no_dreamplace_and_maskplace_preset() 
     (
         benchmark_dir, preset, checkpoint, macro_budget, output_dir, dreamplace_root, use_docker, gpu,
         target_density, python_executable, dreamplace_extra_config, viz_resolution,
-        nets_sample_fraction, nets_seed,
+        nets_sample_fraction, nets_seed, config,
     ) = _parse_args(["x", "--benchmark_dir=benchmarks/adaptec1"])
     assert preset == "maskplace"  # backward-compatible default: this pipeline used to only support this
     assert macro_budget is None  # "all" is the production default
@@ -23,6 +23,14 @@ def test_parse_args_defaults_to_all_macros_no_dreamplace_and_maskplace_preset() 
     assert viz_resolution == 1024
     assert nets_sample_fraction == 1.0
     assert nets_seed == 0
+    assert config is None  # the preset-name path stays the default, with a warning at run time
+
+
+def test_parse_args_carries_a_config_path_when_one_is_given() -> None:
+    # --config is what lets this pipeline rebuild the environment a checkpoint was trained in,
+    # rather than whatever a preset name resolves to today.
+    args = _parse_args(["x", "--config=runs/adaptec1/manifest.json"])
+    assert args[14] == pathlib.Path("runs/adaptec1/manifest.json")
 
 
 def test_parse_args_accepts_any_registered_preset() -> None:

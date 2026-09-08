@@ -16,7 +16,7 @@ The Bookshelf benchmarks in benchmarks/ cannot reach this: they carry no LEF/DEF
 exactly why validation was never wired up. Use `scripts/run_pipeline.py` for those, which stops
 at DREAMPlace and reports HPWL, and bring a DEF/LEF design here.
 
-**Prefer --config.** Passing an experiment's own config takes the cell placer and validator from
+**Prefer --config.** Passing a run's own `manifest.json` takes the cell placer and validator from
 `EnvironmentSpec.physical` and writes `ppa.json` next to that run's manifest, carrying its
 `full_hash`. Without it the tools come from the flags below and the resulting number is
 attributable to nothing - which is how a PPA measurement ends up sitting outside the
@@ -62,7 +62,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--openroad_binary", default="openroad",
                         help="OpenROAD executable (default: %(default)s).")
     parser.add_argument("--config", type=pathlib.Path, default=None,
-                        help="An ExperimentConfig JSON (a run's manifest config). Takes the cell "
+                        help="A run's manifest.json (or a bare ExperimentConfig JSON). Takes the cell "
                              "placer and validator from its EnvironmentSpec.physical instead of "
                              "the flags above, and writes ppa.json carrying the run's full_hash "
                              "- so the PPA number is attributable to the run whose placement it "

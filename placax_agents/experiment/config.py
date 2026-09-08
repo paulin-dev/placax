@@ -41,6 +41,14 @@ Every component is named by a registry key plus JSON-scalar kwargs rather than h
 Python object, because a config that cannot round-trip through JSON cannot be written into a
 results file - and a configuration that is not written down is not reproducible, whatever the
 code around it does.
+
+**A hash is taken over what a config MEANS, not over how completely it was spelled out.** Every
+Spec's kwargs are completed with its builder's own defaults on the way into a hash (see
+`defaults.py`), so `Spec("hpwl")` and `Spec("hpwl", {"dense": False, "reward_scale": 1.0})` -
+one reward, one set of values - hash alike. Without that, `assert_comparable` rejected two
+identical experiments written by two people, and a config read back from JSON could never match
+one built from a preset. What gets *written down* is still exactly what the author wrote: the
+completion happens in `identity()`, never in `to_dict()`, so a config round-trips unchanged.
 """
 import hashlib
 import json
@@ -59,7 +67,21 @@ class Spec:
     kwargs: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        """Exactly what was written down - the provenance half, unchanged by anything here."""
         return {"name": self.name, "kwargs": dict(self.kwargs)}
+
+    def identity(self, slot: str) -> dict:
+        """This component as a HASH sees it: its name, and its kwargs completed with defaults.
+
+        `Spec("hpwl")` and `Spec("hpwl", {"dense": False, "reward_scale": 1.0})` are one reward
+        with one set of values, so they must hash alike; completing both against the builder's
+        own signature is what makes that true. `slot` says which registry to read the defaults
+        from, since a Spec on its own does not know whether it is a reward or a policy.
+        See placax_agents/experiment/defaults.py.
+        """
+        from placax_agents.experiment.defaults import complete_kwargs
+
+        return {"name": self.name, "kwargs": complete_kwargs(slot, self.name, self.kwargs)}
 
     @classmethod
     def from_dict(cls, data: dict | str | None) -> "Spec | None":
@@ -112,12 +134,22 @@ class BenchmarkSpec:
             "netlist_digest": self.netlist_digest,
             "grid": self.grid,
             "macro_budget": self.macro_budget,
-            "order": self.order.to_dict(),
+            "order": self.order.identity("order"),
         }
 
     def to_dict(self) -> dict:
-        # Provenance (where it was loaded from) plus identity (what it actually was).
-        return {"benchmark_dir": self.benchmark_dir, **self.identity()}
+        # Provenance (where it was loaded from) plus what it actually was. Deliberately NOT
+        # `**self.identity()`: an identity completes each Spec's defaults for hashing, while what
+        # gets written down stays exactly what the author wrote, so a config round-trips through
+        # JSON unchanged.
+        return {
+            "benchmark_dir": self.benchmark_dir,
+            "design": self.design,
+            "netlist_digest": self.netlist_digest,
+            "grid": self.grid,
+            "macro_budget": self.macro_budget,
+            "order": self.order.to_dict(),
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "BenchmarkSpec":
@@ -178,16 +210,21 @@ class EnvironmentSpec:
         """
         return {
             "benchmark": self.benchmark.identity(),
-            "reward": self.reward.to_dict(),
-            "initial_placement": self.initial_placement.to_dict(),
-            "action_mask": self.action_mask.to_dict() if self.action_mask else None,
+            "reward": self.reward.identity("reward"),
+            "initial_placement": self.initial_placement.identity("initial_placement"),
+            "action_mask": self.action_mask.identity("action_mask") if self.action_mask else None,
+            # The physical stack is deliberately NOT completed with its builders' defaults: those
+            # signatures mix experiment settings (target_density, liberty) with this machine's
+            # install paths (dreamplace_root, openroad_binary), and completing them would fold a
+            # machine-specific value into the environment hash - the one thing build_physical's
+            # config/machine split exists to prevent. See defaults.py.
             "physical": self.physical.to_dict(),
             "budget": self.budget.to_dict(),
         }
 
     def identity(self) -> dict:
         """The task plus the observation: everything the agent did not choose."""
-        return {**self.task_identity(), "state": self.state.to_dict()}
+        return {**self.task_identity(), "state": self.state.identity("state")}
 
     def to_dict(self) -> dict:
         return {
@@ -235,6 +272,15 @@ class AgentSpec:
             "loop": self.loop.to_dict() if self.loop else None,
         }
 
+    def identity(self) -> dict:
+        """The agent as `full_hash` sees it, every Spec completed with its own defaults."""
+        return {
+            "algorithm": self.algorithm.identity("algorithm"),
+            "policy": self.policy.identity("policy") if self.policy else None,
+            "optimizer": self.optimizer.identity("optimizer") if self.optimizer else None,
+            "loop": self.loop.identity("loop") if self.loop else None,
+        }
+
     @classmethod
     def from_dict(cls, data: dict) -> "AgentSpec":
         return cls(
@@ -256,6 +302,18 @@ def _hash(data: dict) -> str:
 
 COMPARISON_LEVELS = ("benchmark", "task", "environment", "full")
 """Increasingly strict definitions of "the same run setup" - see this module's docstring."""
+
+
+def _unwrap_manifest(data: dict) -> dict:
+    """The config inside `data`, whether that is a bare config or a run's whole manifest.
+
+    A manifest is `{"config": ..., "metrics": ..., "fingerprint": ...}`; a bare config has
+    "name" at the top. Detected by shape rather than by filename, so a caller can pass either
+    without saying which it has.
+    """
+    if "name" not in data and isinstance(data.get("config"), dict):
+        return data["config"]
+    return data
 
 
 @dataclass(frozen=True)
@@ -293,7 +351,7 @@ class ExperimentConfig:
     def full_hash(self) -> str:
         """Identifies the exact run, agent and seed included."""
         return _hash({"environment": self.environment.identity(),
-                      "agent": self.agent.to_dict(), "seed": self.seed})
+                      "agent": self.agent.identity(), "seed": self.seed})
 
     def hash_at(self, level: str) -> str:
         """The hash for a named comparison level, so callers can parameterize over strictness."""
@@ -328,6 +386,14 @@ class ExperimentConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ExperimentConfig":
+        """Reads a config dict, or a whole manifest that carries one under "config".
+
+        The manifest is the only file a run actually writes that holds a config, so it is the
+        file someone will reach for when a script asks for one. Refusing it with `KeyError:
+        'name'` made every documented `--config` path - including the attributable-PPA path in
+        `scripts/validate_design.py` - unusable against real run output.
+        """
+        data = _unwrap_manifest(data)
         return cls(
             name=data["name"],
             environment=EnvironmentSpec.from_dict(data["environment"]),
@@ -356,16 +422,34 @@ _LEVEL_IDENTITY = {
     "task": lambda config: config.environment.task_identity(),
     "environment": lambda config: config.environment.identity(),
     "full": lambda config: {"environment": config.environment.identity(),
-                            "agent": config.agent.to_dict(), "seed": config.seed},
+                            "agent": config.agent.identity(), "seed": config.seed},
 }
+
+
+def _benchmark_identity(identity: dict) -> dict | None:
+    """The benchmark identity nested inside a level identity, whatever level produced it.
+
+    Each level wraps the one below it, so the benchmark sits at a different depth in each: the
+    "benchmark" level IS one, "task"/"environment" nest it under `benchmark`, and "full" nests
+    that whole environment under `environment` first. The wrappers are walked by name, in order,
+    rather than guessed at: the previous version looked for a `benchmark` key at the top of a
+    full identity, where the only keys are `environment`/`agent`/`seed`, so at that level the
+    digest was neither found (the fallback below never fired) nor stripped - and comparing an
+    unresolved config against a built one reported "different designs", the exact false alarm
+    this machinery exists to prevent.
+    """
+    node = identity
+    if "environment" in node:  # "full" wraps the environment identity
+        node = node["environment"]
+    if "benchmark" in node:  # "task" and "environment" wrap the benchmark identity
+        node = node["benchmark"]
+    return node if "netlist_digest" in node else None
 
 
 def _digest_of(identity: dict) -> str | None:
     """The netlist digest inside a level identity, wherever that level nests it."""
-    benchmark = identity.get("benchmark", identity)
-    if "benchmark" in benchmark:  # the "full" level nests one layer deeper
-        benchmark = benchmark["benchmark"]
-    return benchmark.get("netlist_digest")
+    benchmark = _benchmark_identity(identity)
+    return benchmark.get("netlist_digest") if benchmark is not None else None
 
 
 def _strip_digest(identity: dict) -> dict:
@@ -373,10 +457,9 @@ def _strip_digest(identity: dict) -> dict:
     import copy
 
     stripped = copy.deepcopy(identity)
-    benchmark = stripped.get("benchmark", stripped)
-    if "benchmark" in benchmark:
-        benchmark = benchmark["benchmark"]
-    benchmark.pop("netlist_digest", None)
+    benchmark = _benchmark_identity(stripped)
+    if benchmark is not None:
+        benchmark.pop("netlist_digest", None)
     return stripped
 
 

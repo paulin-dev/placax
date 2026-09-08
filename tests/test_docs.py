@@ -23,7 +23,10 @@ SPEC = REPO_ROOT / "docs" / "JAX_Placement_Environment_Spec.md"
 
 DOCS = sorted((REPO_ROOT / "docs").glob("*.md")) + [REPO_ROOT / "README.md"]
 
-PACKAGES = ("placax", "placax_agents", "placax_tools", "placax_viz")
+PACKAGES = ("placax", "placax_agents", "placax_tools", "placax_viz", "scripts")
+"""Checked in both directions against the spec's file listing. `scripts` is in the list
+because leaving it out is how the listing came to describe Tier 3 with an ellipsis while
+four scripts went unnamed - the same silent drift this test exists to catch one tier up."""
 
 _PATH_RE = re.compile(
     r"(?<![\w./-])((?:placax|placax_agents|placax_tools|placax_viz|scripts|tests)(?:/[\w.\-]+)+)"

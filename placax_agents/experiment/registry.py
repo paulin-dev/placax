@@ -264,6 +264,18 @@ def _policy_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
     return CNNActorCritic(features=features, num_conv_layers=num_conv_layers)
 
 
+def _policy_wiremask_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
+    """The plain CNN plus a wiremask input channel. Requires the `wiremask` state representation.
+
+    Shipped and documented since v4 but unregistered until now, which meant an architecture the
+    spec describes could not be selected from a config at all - the one place a component being
+    "available" has to mean something.
+    """
+    from placax_agents.policy.architectures.wiremask_cnn import WiremaskCNNActorCritic
+
+    return WiremaskCNNActorCritic(features=features, num_conv_layers=num_conv_layers)
+
+
 def _policy_resnet_coarse_fine(benchmark, critic_style: str = "step_embedding", pretrained: bool = True):
     """MaskPlace's own network shape: fine + coarse-ResNet branches, step-embedding critic."""
     from placax_agents.policy.architectures.resnet_cnn import ResNetCoarseFineActorCritic
@@ -274,7 +286,11 @@ def _policy_resnet_coarse_fine(benchmark, critic_style: str = "step_embedding", 
     )
 
 
-POLICIES = {"cnn": _policy_cnn, "resnet_coarse_fine": _policy_resnet_coarse_fine}
+POLICIES = {
+    "cnn": _policy_cnn,
+    "wiremask_cnn": _policy_wiremask_cnn,
+    "resnet_coarse_fine": _policy_resnet_coarse_fine,
+}
 
 # ---------------------------------------------------------------------------
 # Optimizer.  (**kwargs) -> optax.GradientTransformation

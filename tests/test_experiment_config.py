@@ -194,3 +194,28 @@ def test_tracker_wall_clock_exhausts_immediately_past_a_prior_spend() -> None:
 def test_budget_use_round_trips_through_dict() -> None:
     use = BudgetUse(iterations=3, episodes=30, env_steps=120, wall_clock_s=1.5)
     assert BudgetUse.from_dict(use.to_dict()) == use
+
+
+def test_read_accepts_a_runs_manifest_not_just_a_bare_config(tmp_path: pathlib.Path) -> None:
+    """The manifest is the only file a run writes that holds a config, so it has to be readable.
+
+    `write_manifest` nests the config under "config" alongside the metrics and the fingerprint,
+    while `from_dict` read "name" off the top level - so every documented `--config` path, the
+    attributable-PPA one in scripts/validate_design.py included, died on `KeyError: 'name'` when
+    pointed at real run output.
+    """
+    from placax_agents.experiment.run import write_manifest
+
+    config = _config()
+    manifest_path = write_manifest(tmp_path / "run", config)
+    assert json.loads(manifest_path.read_text())["config"]["name"] == config.name
+    assert ExperimentConfig.read(manifest_path) == config
+
+
+def test_read_still_accepts_a_bare_config_written_by_write(tmp_path: pathlib.Path) -> None:
+    # Detected by shape, so both files work through one entry point and no caller has to say
+    # which kind it holds.
+    config = _config()
+    path = tmp_path / "config.json"
+    config.write(path)
+    assert ExperimentConfig.read(path) == config
