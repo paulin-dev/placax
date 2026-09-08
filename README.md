@@ -18,7 +18,9 @@ This is the detailled description
 
 
 
-GitHub desc: A shared, differentiable JAX environment for chip macro placement
+GitHub desc: A shared, fast JAX environment for chip macro placement
+
+("differentiable" is deliberately not claimed here: `hpwl()` has an exact gradient with respect to macro positions, but the POLICY path does not - legality is enforced by masking, which has no gradient at all, and raw HPWL gives 391 of adaptec1's 514 connected macros exactly zero. See docs/Action_Space_Decision.md.)
 
 
 ## Architecture
@@ -128,7 +130,14 @@ It asserts the environment hash matches across every run *before* anything start
 to produce a table rather than producing a misleading one, and it scores each agent's placement
 itself - an agent hands over a placement, never a score.
 
-The table reports **legality beside wirelength**. Overlapping macros have shorter wires, so an
+The table reports **each agent's actual spend beside its score**. A budget is what a run was
+*offered*; `greedy_wiremask` reports itself converged after one iteration and spends a few hundred
+env steps of a budget in the millions, so a single budget line printed under every row claimed a
+compute match the runner had already declined. `env steps` and `grad steps` are columns now, and
+everything the table shows is also written to `results.json` beside the per-run manifests, so a
+table can be regenerated and checked without re-running an agent.
+
+The table also reports **legality beside wirelength**. Overlapping macros have shorter wires, so an
 unrealizable placement outranks a legal one on HPWL alone; a row that is not 100% legal has not
 produced a result, whatever its number says. Legality is measured on every evaluated placement,
 which also makes the action mask's relaxation valve visible — it drops the quality rule, and then
@@ -234,7 +243,8 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 ```
 
 - `--benchmark_dir`: path to a downloaded Bookshelf benchmark (only format supported so far); default `benchmarks/adaptec1`.
-- `--preset`: which benchmark/policy/state_fn/reward setup to rebuild before loading the checkpoint - must match what it was actually trained with; default `maskplace` (`scripts/run_maskplace.py`'s own setup). `training` uses `scripts/run_training.py`'s plain CNN setup instead. See `scripts/presets.py` to register a custom one - this pipeline isn't tied to MaskPlace specifically.
+- `--config`: **strongly preferred.** A run's own `manifest.json` (or a bare `ExperimentConfig` JSON). Rebuilds the exact environment the checkpoint was trained in - reward, observation, action mask, macro budget *and initial placement* - and writes a manifest beside the outputs so they are attributable. Without it this pipeline replays a checkpoint in whatever a preset name resolves to today, which is the same hand-matching problem `ExperimentConfig` removed from training.
+- `--preset`: which setup to rebuild when no `--config` is given - must match what the checkpoint was actually trained with; default `maskplace` (`scripts/run_maskplace.py`'s own setup). `training` uses `scripts/run_training.py`'s plain CNN setup instead.
 - `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `<benchmark_dir>/<preset's own output subdir>/best_checkpoint.bin` if it exists, else `.../checkpoint.bin`.
 - `--macro_budget`: default `all` - every macro placed, the production default. Neither shipped preset's network has any architectural dependence on macro count, so a checkpoint trained with any budget (e.g. MaskPlace's own default of 128) still loads and places every macro with no shape mismatch and no retraining. Pass an integer instead to match a specific training budget, e.g. for a fast/partial preview.
 - `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `<benchmark_dir>/<preset's own output subdir>/pipeline`.
@@ -259,7 +269,7 @@ timing from a real signoff tool:
 
 ```sh
 python -m scripts.validate_design --def_path=placed.def --lef=tech.lef --lef=cells.lef \
-    --config=runs/adaptec1/manifest_config.json --use_docker
+    --config=runs/adaptec1/manifest.json --use_docker
 ```
 
 `--config` is the path that produces an attributable number: the cell placer and validator come
@@ -278,8 +288,16 @@ come back and `timing_slack` reports as a dash - not computed, never guessed.
 `placax_tools/pipeline.py`'s `place_and_validate` names neither DREAMPlace nor OpenROAD, so
 substituting RePlAce, AutoDMP or another signoff tool is a registry entry and a config change.
 
+`evaluate_placement` is the entry point for a run's own output: it exports the agent's placement
+into the design's format (`placax_agents/experiment/export.py` - a `.pl`/`.aux` pair for
+Bookshelf, a rewritten DEF otherwise) and measures that, so no DEF has to be produced by hand.
+Until that existed, nothing in this repository converted a placement into a file an external tool
+could open, and the whole physical box - configured, hashed and documented - was unreachable from
+any run.
+
 **Not yet verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
-dependency, so the real binary has never been driven through this path - the TCL generation,
-output parsing and the composition all have tests, but someone with a real design should run it
-before trusting the numbers. The Bookshelf benchmarks under `benchmarks/` cannot reach it at all,
-since they carry no LEF/DEF; that is why validation went unwired for so long.
+dependency, so the real binary has never been driven through this path - the export, the TCL
+generation, the output parsing and the composition all have tests, but someone with a real design
+should run it before trusting the numbers. The Bookshelf benchmarks under `benchmarks/` still
+cannot reach the *validator*, since OpenROAD reads no Bookshelf; their placements export to
+`.pl`/`.aux` for DREAMPlace instead.

@@ -14,7 +14,11 @@ these properties:
     difference in the table can never be a difference in how two agents scored themselves;
   * legality reported beside the score, because overlapping macros have shorter wires: a
     wirelength number for an unrealizable placement would top the table on merit it doesn't have;
-  * one manifest per run, recording the config and the machine, so the table can be regenerated.
+  * one manifest per run, recording the config and the machine, plus a results.json holding every
+    number the table shows beside the run hash that produced it - so the table can be regenerated
+    and checked without re-running a single agent;
+  * each row's ACTUAL spend printed beside its score, because the budget is what a run was
+    offered and a converged agent stops long before it.
 
 Seeds are the one thing you should vary: on a GPU backend a single run is not reproducible (see
 placax.reproducibility), so --seeds runs each agent several times and reports the spread.
@@ -23,20 +27,24 @@ placax.reproducibility), so --seeds runs each agent several times and reports th
         --env_steps=500000 --agents=greedy_wiremask,random_search,ppo --seeds=3
 """
 import argparse
+import json
 import pathlib
 import statistics
 import sys
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.log import Log
-from placax.reproducibility import describe_determinism
+from placax.reproducibility import describe_determinism, fingerprint
 from placax_agents.experiment.budget import Budget
 from placax_agents.experiment.build import build, build_benchmark
 from placax_agents.experiment.config import AgentSpec, ExperimentConfig, Spec, assert_comparable
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
-from placax_agents.experiment.run import run_experiment, score
+from placax_agents.experiment.run import METRICS, run_experiment, score
 
 DEFAULT_AGENTS = ("greedy_wiremask", "random_search", "ppo")
+
+RESULTS_NAME = "results.json"
+"""The table as data, written beside the per-run manifests."""
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -115,15 +123,22 @@ def build_comparison(
     return configs
 
 
-def _format_table(results: dict[str, list[dict]], env_steps: int, level: str) -> str:
-    """Agents ranked by mean HPWL, with the spread across seeds and their legality.
+def _format_table(results: dict[str, list[dict]], budget: Budget, level: str) -> str:
+    """Agents ranked by mean HPWL, with the spread across seeds, their legality and their spend.
 
     Legality is a column rather than a footnote: overlapping macros shorten wires, so an illegal
     placement outranks a legal one on HPWL alone. A row that is not 100% legal has not produced a
     result, whatever its wirelength says.
+
+    So is spend. The budget is what every agent was OFFERED; what a row actually used is a
+    different number, and for a deterministic agent that reports `converged` it is dramatically
+    different - `greedy_wiremask` stops after one iteration and spends a single episode of a
+    budget that may run to millions of steps. Printing one budget line under every row implied a
+    compute match that the run itself had already refused, in the one table this script exists to
+    make trustworthy.
     """
     header = (f"{'agent':<22s}{'mean HPWL':>15s}{'best':>15s}{'std':>11s}"
-              f"{'legal':>8s}{'overlap':>9s}{'seeds':>7s}")
+              f"{'legal':>8s}{'overlap':>9s}{'env steps':>13s}{'grad steps':>12s}{'seeds':>7s}")
     lines = [header, "-" * len(header)]
     for name, runs in sorted(results.items(),
                              key=lambda kv: statistics.fmean(r["real_hpwl"] for r in kv[1])):
@@ -131,16 +146,49 @@ def _format_table(results: dict[str, list[dict]], env_steps: int, level: str) ->
         legal = sum(1 for run in runs if run["is_legal"])
         worst_overlap = max(run["overlap_ratio"] for run in runs)
         std = statistics.stdev(hpwls) if len(hpwls) > 1 else 0.0
+        spent = statistics.fmean(run["env_steps"] for run in runs)
+        gradients = statistics.fmean(run["gradient_steps"] for run in runs)
         lines.append(
             f"{name:<22s}{statistics.fmean(hpwls):>15,.0f}{min(hpwls):>15,.0f}"
-            f"{std:>11,.0f}{legal:>4d}/{len(runs):<3d}{worst_overlap:>8.2%}{len(runs):>7d}"
+            f"{std:>11,.0f}{legal:>4d}/{len(runs):<3d}{worst_overlap:>8.2%}"
+            f"{spent:>13,.0f}{gradients:>12,.0f}{len(runs):>7d}"
         )
     lines.append("")
-    lines.append(f"all runs: {env_steps:,} env steps (sample-matched, not compute-matched - see "
-                 f"gradient_steps in each run's log), identical {level}, scored by this script")
+    offered = ", ".join(
+        f"{value:,} {unit}" for unit, value in
+        (("env steps", budget.env_steps), ("iterations", budget.iterations),
+         ("s wall clock", budget.wall_clock_s))
+        if value is not None
+    )
+    lines.append(f"budget OFFERED to every run: {offered}, identical {level}, scored by this script.")
+    lines.append("'env steps' is what each agent actually SPENT (mean over seeds) - a deterministic "
+                 "agent that reports convergence stops early and spends a fraction of the budget.")
+    lines.append("Rows are sample-matched where their env steps agree, never compute-matched: "
+                 "'grad steps' is what env steps deliberately does not price.")
     lines.append("'legal' counts seeds whose placement had no overlap, nothing out of bounds and "
                  "every macro placed; 'overlap' is the worst seed's overlapping macro area.")
     return "\n".join(lines)
+
+
+def _write_results(path: pathlib.Path, results: dict[str, list[dict]], reference: ExperimentConfig,
+                   budget: Budget, level: str) -> pathlib.Path:
+    """The table as data, so it can be regenerated and checked without re-running anything.
+
+    The script's own docstring has always promised this ("so the table can be regenerated"), and
+    a printed table plus a directory of manifests did not deliver it: reconstructing a row meant
+    re-running the agent. Every number the table shows is written here beside the hash of the
+    environment it was produced under and the full hash of the run that produced it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "level": level,
+        "shared_hash": reference.hash_at(level),
+        "budget": budget.to_dict(),
+        "metrics": METRICS,
+        "fingerprint": fingerprint(),
+        "runs": {name: sorted(runs, key=lambda run: run["seed"]) for name, runs in results.items()},
+    }, indent=2, sort_keys=True) + "\n")
+    return path
 
 
 def main() -> None:
@@ -153,6 +201,8 @@ def main() -> None:
     budget = _budget(args)
     reference = build_preset(args.preset, args.benchmark_dir, budget=budget)
     agents = [name.strip() for name in args.agents.split(",") if name.strip()]
+    if not agents:
+        raise SystemExit("--agents is empty; name at least one agent to compare")
     configs = build_comparison(reference, agents, args.seeds, args.population, args.level)
 
     output_root = args.output_dir or (args.benchmark_dir / "comparison")
@@ -168,21 +218,39 @@ def main() -> None:
     for config in configs:
         agent_name = config.name.rsplit("-seed", 1)[0]
         built = build(config, benchmark=benchmark)
-        state, _log = run_experiment(
+        state, log = run_experiment(
             config, output_root / config.name, built=built,
             eval_every=args.eval_every, log_every=max(1, args.eval_every or 1),
         )
         measured = score(benchmark, built.agent.best_positions(state), built.n_placed)
-        results.setdefault(agent_name, []).append(measured)
+        # What this run actually spent, from its own last log line - not what the budget offered.
+        # An agent that reports convergence stops early, and a table that prints the budget over
+        # such a row claims a compute match the run itself declined.
+        final = log[-1] if log else {}
+        results.setdefault(agent_name, []).append({
+            **measured,
+            "seed": config.seed,
+            "env_steps": final.get("env_steps", 0),
+            "eval_env_steps": final.get("eval_env_steps", 0),
+            "gradient_steps": final.get("gradient_steps", 0),
+            "iterations": final.get("iteration", 0),
+            # build() resolves the netlist digest, so hash the config it produced, not the one
+            # handed in - that is the one identifying the design by its contents.
+            "full_hash": built.config.full_hash(),
+        })
         flag = "" if measured["is_legal"] else "  ILLEGAL"
         Log.info(f"  {config.name}: real_hpwl={measured['real_hpwl']:,.0f} "
-                 f"return={measured['reward_return']:,.3f}{flag}")
+                 f"return={measured['reward_return']:,.3f} "
+                 f"spent={final.get('env_steps', 0):,} env steps{flag}")
 
-    spent = budget.env_steps or (budget.iterations * built.env_steps_per_iteration)
     print()
-    print(_format_table(results, spent, args.level))
+    print(_format_table(results, budget, args.level))
     print()
+    results_path = _write_results(
+        output_root / RESULTS_NAME, results, built.config, budget, args.level
+    )
     print(f"per-run manifests and logs: {output_root}")
+    print(f"the table as data:          {results_path}")
 
 
 if __name__ == "__main__":

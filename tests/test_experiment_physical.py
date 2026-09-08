@@ -163,3 +163,76 @@ def test_a_proxy_only_run_never_imports_the_physical_tools(design) -> None:
     ))
     built = build(proxy_only)
     assert built.cell_placer is None and built.validator is None
+
+
+# -------------------------------------------- the run's own placement reaching the flow
+
+
+def _add_bookshelf_placement_files(benchmark_dir: pathlib.Path) -> None:
+    """The .pl/.wts/.scl a real Bookshelf design carries, added AFTER the benchmark is built.
+
+    After, not in the fixture: `Benchmark.load` reads a real die size out of the .pl when one is
+    there, which would change this design's cell_size and with it every other test in this file.
+    Export reads the .pl at export time, so writing them here is enough and changes nothing else.
+    """
+    (benchmark_dir / "s.pl").write_text(
+        "UCLA pl 1.0\n\na\t0\t0\t: N\nb\t0\t0\t: N\nc\t0\t0\t: N\n"
+    )
+    (benchmark_dir / "s.wts").write_text("UCLA wts 1.0\n")
+    (benchmark_dir / "s.scl").write_text("UCLA scl 1.0\n")
+
+
+def test_a_runs_placement_can_reach_the_physical_flow_without_a_hand_made_def(
+    design, tmp_path: pathlib.Path
+) -> None:
+    """The connection that did not exist: agent placement -> design file -> validator.
+
+    `evaluate_physical` takes a DEF "with every macro already placed", and until
+    `experiment.export` nothing in this repository produced one - so the flow was configured,
+    hashed and completely unreachable from a run. Here the placement goes in as positions and a
+    PPA number comes out, with no file made by hand anywhere in between.
+    """
+    import jax.numpy as jnp
+
+    from placax.netlist import NetlistFormat
+    from placax_agents.experiment.physical import evaluate_placement
+
+    config, _def_path, lef_paths, output_dir = design
+    built = _build_with_stand_ins(config)
+    _add_bookshelf_placement_files(config.environment.benchmark.path)
+    positions = jnp.array([[i, i] for i in range(built.benchmark.params.n_macros)])
+
+    # This design is Bookshelf, which OpenROAD cannot read - so the flow refuses, by design, and
+    # says where the placement went. That refusal is the honest half of the fix.
+    with pytest.raises(NotImplementedError, match="DEF/LEF only"):
+        evaluate_placement(built, positions, lef_paths, output_dir)
+
+    exported = output_dir / "placement" / "s.aux"
+    assert exported.exists(), "the placement is written even when the validator cannot read it"
+
+    from placax_agents.experiment.export import write_placement
+
+    assert write_placement(built, positions, tmp_path / "again").format is NetlistFormat.BOOKSHELF
+
+
+def test_the_exported_placement_is_the_one_that_was_scored(design) -> None:
+    # A second rollout would be a different placement. The exported design has to be the array the
+    # runner measured, or the PPA number describes something nobody reported.
+    import jax.numpy as jnp
+
+    from placax_agents.experiment.export import write_placement
+    from placax_agents.experiment.run import score
+
+    config, _def_path, _lef_paths, output_dir = design
+    built = _build_with_stand_ins(config)
+    _add_bookshelf_placement_files(config.environment.benchmark.path)
+    positions = jnp.array([[i, i] for i in range(built.benchmark.params.n_macros)])
+
+    measured = score(built.benchmark, positions, built.n_placed)
+    exported = write_placement(built, positions, output_dir / "placement")
+
+    placed_text = (exported.path.parent / "s.pl").read_text()
+    cell = built.benchmark.cell_size
+    for name, idx in built.benchmark.name_to_idx.items():
+        assert f"{name}\t{int(round(idx * cell))}\t{int(round(idx * cell))}\t" in placed_text
+    assert measured["real_hpwl"] > 0  # the scored placement is the exported one, not a rerun

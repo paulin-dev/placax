@@ -179,11 +179,18 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
         config.py                     ExperimentConfig, EnvironmentSpec/AgentSpec/PhysicalSpec,
                                        the four hash levels, assert_comparable
         registry.py                   named builders for every swappable component
+        defaults.py                   completes a Spec's kwargs from its builder's own signature
+                                       before hashing, so a config hashes by what it MEANS rather
+                                       than by how completely it was spelled out
         build.py                      config -> live objects, behind one uniform StepFn
         budget.py                     Budget/BudgetTracker — env_steps, the shared sample currency
         presets.py                    the shipped configurations, as data
         run.py                        run_experiment() — the one loop every agent goes through
-        physical.py                   evaluate_physical() — the configured cell placer + validator
+        export.py                     write_placement() — a run's placement back into the design's
+                                       own format (.pl/.aux or DEF); the bridge from an agent's
+                                       output to anything an external tool can open
+        physical.py                   evaluate_physical()/evaluate_placement() — the configured
+                                       cell placer + validator, run on this run's own placement
     policy/
         observation.py                observation(), lookahead_sizes(), make_wiremask_observation()
         action.py                     illegal_cells() (the one definition of legality),
@@ -223,8 +230,20 @@ placax_viz/                      # Plotting/rendering, optional (`placax[viz]`)
     placement.py, masks.py, curves.py, rollout.py, animation.py
 
 benchmarks/                      # adaptec1, bigblue1 (Bookshelf), ariane133 (protobuf) — Section 10
-scripts/                         # Tier 3 — run_training.py, run_maskplace.py, compare_agents.py,
-                                 #   run_pipeline.py, validate_design.py, download_benchmarks.py, ...
+scripts/                         # Tier 3 — what changes per experiment (listed in full: this
+                                 #   section is checked against the tree by tests/test_docs.py)
+    run_training.py                 trains the plain-CNN preset
+    run_maskplace.py                trains the MaskPlace-equivalent preset
+    compare_agents.py               several agents, one environment, one budget, one table
+    run_pipeline.py                 a trained checkpoint -> macro placement -> DREAMPlace
+    validate_design.py              the physical flow on a macro-placed DEF (real PPA)
+    place_once.py                   one greedy rollout from a checkpoint, nothing else
+    visualize.py                    placement/mask/curve renders from a checkpoint
+    presets.py                      thin adapter: preset name -> a built experiment
+    measure_reward_terms.py         relative magnitudes of a composite reward's terms
+    download_benchmarks.py          fetches the ISPD/other benchmark suites
+    subprocess_search.py            finds the largest --n_envs/--n_episodes this box fits
+    compare_sequential_vs_parallel.py   throughput of the two loop shapes
 ```
 
 **This listing is checked, not maintained by hand.** `tests/test_docs.py` fails if any path named

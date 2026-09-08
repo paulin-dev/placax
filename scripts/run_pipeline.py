@@ -13,14 +13,18 @@ from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
 from placax.log import Log
 from placax.extras.mst import hpwl_wirelength
-from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions, write_aux, write_pl
+from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
+from placax_agents.experiment.build import build
+from placax_agents.experiment.config import ExperimentConfig
+from placax_agents.experiment.export import write_placement
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
+from placax_agents.experiment.run import write_manifest
 from placax_agents.ops.evaluate import evaluate
-from placax_agents.ops.inference import is_bare_checkpoint, load_policy_variables, positions_to_named_lower_left
+from placax_agents.ops.inference import is_bare_checkpoint, load_policy_variables
 from placax_agents.policy.scale import to_grid_units
 from placax_tools.cell_placer import CellPlacer
 from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 from placax_viz.placement import save_full_placement_image, save_placement_image, save_placement_with_nets_image
-from scripts.presets import PRESETS
 
 import numpy as np
 from jax import random
@@ -34,11 +38,11 @@ def _parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
     parser.add_argument(
-        "--preset", choices=sorted(PRESETS), default="maskplace",
-        help="Which benchmark/policy/state_fn/reward setup to rebuild before loading the checkpoint - "
+        "--preset", choices=sorted(OUTPUT_SUBDIRS), default="maskplace",
+        help="Which setup to rebuild before loading the checkpoint when no --config is given - "
              "must match what the checkpoint was actually trained with (scripts/run_maskplace.py's "
              "checkpoints need --preset=maskplace, the default; scripts/run_training.py's need "
-             "--preset=training). See scripts/presets.py to register a custom setup.",
+             "--preset=training). Prefer --config, which removes the guessing entirely.",
     )
     parser.add_argument(
         "--checkpoint", type=pathlib.Path, default=None,
@@ -95,6 +99,14 @@ def _parse_args(argv: list[str]):
              "(show every net).",
     )
     parser.add_argument("--nets_seed", type=int, default=0, help="Seed for --nets_sample_fraction's subsample.")
+    parser.add_argument(
+        "--config", type=pathlib.Path, default=None,
+        help="A run's manifest.json (or a bare ExperimentConfig JSON). STRONGLY PREFERRED over "
+             "--preset: it rebuilds the exact environment the checkpoint was trained in - reward, "
+             "observation, action mask, macro budget AND initial placement - instead of asking you "
+             "to hand-match a preset name to a checkpoint. --preset and --macro_budget are ignored "
+             "when this is given.",
+    )
     args = parser.parse_args(argv[1:])
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
     dreamplace_root = args.dreamplace_root
@@ -108,7 +120,7 @@ def _parse_args(argv: list[str]):
     return (
         args.benchmark_dir, args.preset, args.checkpoint, macro_budget, args.output_dir, dreamplace_root,
         args.use_docker, args.gpu, args.target_density, args.python_executable, dreamplace_extra_config,
-        args.viz_resolution, args.nets_sample_fraction, args.nets_seed,
+        args.viz_resolution, args.nets_sample_fraction, args.nets_seed, args.config,
     )
 
 
@@ -120,7 +132,7 @@ def _resolve_checkpoint(
     whatever the file is actually called, not just the conventional best_checkpoint.bin/checkpoint.bin
     names. Only the DEFAULT --checkpoint path (when none is given) uses that naming convention, to pick
     which of the two conventional files to default to, under the given preset's own default output
-    subdir (e.g. output_maskplace, output - see scripts/presets.py's PRESETS)."""
+    subdir (e.g. output_maskplace, output - see placax_agents/experiment/presets.py)."""
     checkpoint_path = checkpoint_arg or (benchmark_dir / default_subdir / "best_checkpoint.bin")
     if checkpoint_arg is None and not checkpoint_path.exists():
         checkpoint_path = benchmark_dir / default_subdir / "checkpoint.bin"
@@ -154,7 +166,7 @@ def main() -> None:
     (
         benchmark_dir, preset, checkpoint_arg, macro_budget, output_dir_arg, dreamplace_root, use_docker, gpu,
         target_density, python_executable, dreamplace_extra_config, viz_resolution, nets_sample_fraction,
-        nets_seed,
+        nets_seed, config_path,
     ) = _parse_args(sys.argv)
     # Resolve to absolute paths up front: every path written into the DREAMPlace config/.aux below must
     # stay valid inside the Docker container too, which runs with a different cwd (/DREAMPlace) than this
@@ -168,7 +180,23 @@ def main() -> None:
         sys.exit(1)
     design_name = aux_candidates[0].stem
 
-    default_subdir, setup_fn = PRESETS[preset]
+    # Rebuild the environment from a CONFIG where one was given, so this pipeline runs the
+    # checkpoint in the environment it was trained in rather than in whatever a preset name
+    # happens to resolve to today. Hand-matching a --preset string to a checkpoint is exactly the
+    # error class ExperimentConfig removed upstream, and it survived down here far too long.
+    if config_path is not None:
+        config = ExperimentConfig.read(config_path)
+        default_subdir = OUTPUT_SUBDIRS.get(preset, "output")
+        Log.info(f"rebuilding the environment from {config_path} (--preset/--macro_budget ignored)")
+    else:
+        default_subdir = OUTPUT_SUBDIRS[preset]
+        overrides = {"macro_budget": macro_budget} if preset == "maskplace" else {}
+        config = build_preset(preset, benchmark_dir, **overrides)
+        Log.warning(
+            "no --config: the environment is being rebuilt from the preset name alone, which is "
+            "only correct if this checkpoint was trained with exactly that preset. Pass "
+            "--config=<a run's manifest.json> to rebuild the environment it actually used."
+        )
     checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, default_subdir, checkpoint_arg)
     if not checkpoint_path.exists():
         Log.error(f"'{checkpoint_path}' not found - train first (--preset={preset} expects a checkpoint "
@@ -178,25 +206,34 @@ def main() -> None:
     output_dir = output_dir_arg or (benchmark_dir / default_subdir / "pipeline")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Load the same benchmark/policy/state_fn/reward setup the checkpoint was trained with - via
-    # scripts/presets.py, so this pipeline works with any registered preset, not just MaskPlace.
-    Log.info(f"loading {benchmark_dir} (preset={preset}, macro_budget={macro_budget}) ...")
-    benchmark, policy, state_fn, extra_illegal_fn, preset_optimizer = setup_fn(benchmark_dir, macro_budget)
+    # 1. Resolve the config into the same benchmark/policy/observation/mask/warm start the
+    # checkpoint was trained with. One build() call, the same one every training run goes through.
+    Log.info(f"loading {benchmark_dir} ...")
+    built = build(config)
+    benchmark, policy, state_fn = built.benchmark, built.policy, built.state_fn
+    # The outputs below are attributable now: a manifest sits beside them naming the config, its
+    # hashes and this machine.
+    manifest_path = write_manifest(output_dir, built.config)
+    Log.info(f"manifest -> {manifest_path}  run={built.config.full_hash()}")
 
     # 2. Load the trained weights - inference only, nothing here ever trains.
-    obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
+    obs0 = state_fn(reset(benchmark.params, built.initial_positions), benchmark.params,
+                    benchmark.sizes_array)
     variables_template = policy.init(random.PRNGKey(0), obs0)
-    optimizer = None if bare else preset_optimizer
+    optimizer = None if bare else built.optimizer
     variables = load_policy_variables(variables_template, checkpoint_path, bare=bare, optimizer=optimizer)
     Log.info(f"loaded weights from {checkpoint_path} ({'bare' if bare else 'full'} checkpoint)")
 
-    # 3. One greedy rollout: place every macro.
+    # 3. One greedy rollout, placing every macro the environment left to the agent. The warm-start
+    # prefix and the macro count come from the config: replaying a warm-started checkpoint from an
+    # empty canvas, as this script used to, is a different environment and a different result.
     positions, hpwl_value = evaluate(
         variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
-        state_fn, extra_illegal_fn,
+        state_fn, built.extra_illegal_fn, built.initial_positions, built.n_placed,
     )
-    Log.info(f"placed {positions.shape[0]} macros, real_hpwl={float(hpwl_value):.2f}")
+    Log.info(f"placed {positions.shape[0]} macros ({built.n_placed} pre-placed by the "
+             f"environment's initial placement), real_hpwl={float(hpwl_value):.2f}")
 
     # 4. Render the macro-only placement, with and without net connections.
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
@@ -214,31 +251,13 @@ def main() -> None:
     )
     Log.info(f"wrote {nets_png}")
 
-    # 5. Write the macro placement to disk. DREAMPlace runs as an external subprocess reading files
-    # from disk (docs/JAX_Placement_Environment_Spec.md section 5.7's deliberate choice), so this is
-    # required, not optional: a new .pl with macros FIXED at their RL positions (cells copied verbatim
-    # from the original .pl - DREAMPlace replaces them), plus a new .aux pointing at it.
-    macro_placements = positions_to_named_lower_left(
-        positions, benchmark.sizes_array, benchmark.cell_size, benchmark.name_to_idx
-    )
-    original_pl_text = (benchmark_dir / f"{design_name}.pl").read_text()
-    new_pl_path = output_dir / f"{design_name}.pl"
-    new_pl_path.write_text(write_pl(original_pl_text, macro_placements))
-    # Limbo's Bookshelf .aux grammar (BookshelfScanner.ll's STRING token) requires filenames to START
-    # with a letter - an absolute path (leading '/') fails to parse. Symlinking the unchanged
-    # nodes/nets/wts/scl next to the new .pl/.aux (bare names only, matching every real Bookshelf
-    # benchmark's own convention) sidesteps that entirely instead of relying on a lexer quirk, and avoids
-    # copying the multi-hundred-MB .nets file.
-    for suffix in ("nodes", "nets", "wts", "scl"):
-        link_path = output_dir / f"{design_name}.{suffix}"
-        if not link_path.exists():
-            link_path.symlink_to((benchmark_dir / f"{design_name}.{suffix}").resolve())
-    new_aux_path = output_dir / f"{design_name}.aux"
-    new_aux_path.write_text(write_aux(
-        f"{design_name}.nodes", f"{design_name}.nets", f"{design_name}.wts",
-        new_pl_path.name, f"{design_name}.scl",
-    ))
-    Log.info(f"wrote {new_pl_path} ({len(macro_placements)} macros fixed) and {new_aux_path}")
+    # 5. Write the macro placement into the design's own format. DREAMPlace runs as an external
+    # subprocess reading files from disk (docs/JAX_Placement_Environment_Spec.md section 5.7's
+    # deliberate choice), so this is required, not optional. The writing itself lives in
+    # placax_agents.experiment.export, shared with the physical evaluation, so the file measured
+    # by a PPA run and the file written here can never be two different notions of "the placement".
+    exported = write_placement(built, positions, output_dir)
+    new_aux_path = exported.path
 
     if dreamplace_root is None:
         print()
