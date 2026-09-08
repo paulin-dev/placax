@@ -15,10 +15,10 @@ from placax.log import Log
 from placax.extras.mst import hpwl_wirelength
 from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
 from placax_agents.experiment.build import build
-from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.export import write_placement
-from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS
 from placax_agents.experiment.run import write_manifest
+from scripts.presets import config_for
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.ops.inference import is_bare_checkpoint, load_policy_variables
 from placax_agents.policy.scale import to_grid_units
@@ -108,20 +108,19 @@ def _parse_args(argv: list[str]):
              "when this is given.",
     )
     args = parser.parse_args(argv[1:])
-    macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
-    dreamplace_root = args.dreamplace_root
-    if dreamplace_root is None and args.use_docker:
-        dreamplace_root = DEFAULT_DOCKER_DREAMPLACE_ROOT
-    if dreamplace_root is not None:
+    args.macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
+    if args.dreamplace_root is None and args.use_docker:
+        args.dreamplace_root = DEFAULT_DOCKER_DREAMPLACE_ROOT
+    if args.dreamplace_root is not None:
         # Docker bind mounts (-v) need an absolute host path, not one resolved relative to whatever
         # directory `docker` itself happens to run from.
-        dreamplace_root = dreamplace_root.resolve()
-    dreamplace_extra_config = json.loads(args.dreamplace_extra_config) if args.dreamplace_extra_config else {}
-    return (
-        args.benchmark_dir, args.preset, args.checkpoint, macro_budget, args.output_dir, dreamplace_root,
-        args.use_docker, args.gpu, args.target_density, args.python_executable, dreamplace_extra_config,
-        args.viz_resolution, args.nets_sample_fraction, args.nets_seed, args.config,
+        args.dreamplace_root = args.dreamplace_root.resolve()
+    args.dreamplace_extra_config = (
+        json.loads(args.dreamplace_extra_config) if args.dreamplace_extra_config else {}
     )
+    # Returned whole rather than as a positional tuple: this used to be fifteen values unpacked by
+    # position, which broke every caller and test the moment a flag was added in the middle.
+    return args
 
 
 def _resolve_checkpoint(
@@ -163,11 +162,17 @@ def _build_cell_placer(
 
 def main() -> None:
     Log.configure()
-    (
-        benchmark_dir, preset, checkpoint_arg, macro_budget, output_dir_arg, dreamplace_root, use_docker, gpu,
-        target_density, python_executable, dreamplace_extra_config, viz_resolution, nets_sample_fraction,
-        nets_seed, config_path,
-    ) = _parse_args(sys.argv)
+    args = _parse_args(sys.argv)
+    benchmark_dir = args.benchmark_dir
+    preset, checkpoint_arg = args.preset, args.checkpoint
+    macro_budget, output_dir_arg = args.macro_budget, args.output_dir
+    dreamplace_root, use_docker, gpu = args.dreamplace_root, args.use_docker, args.gpu
+    target_density, python_executable = args.target_density, args.python_executable
+    dreamplace_extra_config = args.dreamplace_extra_config
+    viz_resolution = args.viz_resolution
+    nets_sample_fraction, nets_seed = args.nets_sample_fraction, args.nets_seed
+    config_path = args.config
+
     # Resolve to absolute paths up front: every path written into the DREAMPlace config/.aux below must
     # stay valid inside the Docker container too, which runs with a different cwd (/DREAMPlace) than this
     # process - a relative path here would silently resolve against the WRONG directory in --use_docker mode.
@@ -184,19 +189,9 @@ def main() -> None:
     # checkpoint in the environment it was trained in rather than in whatever a preset name
     # happens to resolve to today. Hand-matching a --preset string to a checkpoint is exactly the
     # error class ExperimentConfig removed upstream, and it survived down here far too long.
-    if config_path is not None:
-        config = ExperimentConfig.read(config_path)
-        default_subdir = OUTPUT_SUBDIRS.get(preset, "output")
-        Log.info(f"rebuilding the environment from {config_path} (--preset/--macro_budget ignored)")
-    else:
-        default_subdir = OUTPUT_SUBDIRS[preset]
-        overrides = {"macro_budget": macro_budget} if preset == "maskplace" else {}
-        config = build_preset(preset, benchmark_dir, **overrides)
-        Log.warning(
-            "no --config: the environment is being rebuilt from the preset name alone, which is "
-            "only correct if this checkpoint was trained with exactly that preset. Pass "
-            "--config=<a run's manifest.json> to rebuild the environment it actually used."
-        )
+    default_subdir = OUTPUT_SUBDIRS[preset]
+    config = config_for(config_path, preset, benchmark_dir, macro_budget)
+
     checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, default_subdir, checkpoint_arg)
     if not checkpoint_path.exists():
         Log.error(f"'{checkpoint_path}' not found - train first (--preset={preset} expects a checkpoint "
@@ -314,7 +309,7 @@ def main() -> None:
     Log.info(f"full-design HPWL ({len(full_nets)} nets, macros + cells) = {full_hpwl:.2f}")
 
     print()
-    print(f"pipeline complete")
+    print("pipeline complete")
     print(f"  real_hpwl(macros only, {benchmark.params.n_macros} macros, {len(benchmark.nets)} macro-macro nets) "
           f"= {float(hpwl_value):.2f}")
     print(f"  full_hpwl(macros + cells, {len(names)} nodes, {len(full_nets)} nets) = {full_hpwl:.2f}")

@@ -111,17 +111,40 @@ def _reward_maskplace(
     return factory
 
 
+SMOOTHED_GAMMA_CELLS = 1.0
+"""Default log-sum-exp smoothing, in GRID CELLS - see `_reward_smoothed` for the measurement."""
+
+
 def _reward_smoothed(_grid: int, dense: bool = False, reward_scale: float = 1.0,
-                     gamma: float = 1.0):
+                     gamma_cells: float = SMOOTHED_GAMMA_CELLS):
     """-WAWL (log-sum-exp smoothed wirelength) in real units - HPWL's differentiable surrogate.
 
-    Registered so a reward comparison can select it from a config rather than by editing code:
-    every pin gets gradient here, where raw HPWL gives 76% of adaptec1's connected macros exactly
-    zero. See placax.extras.rewards.smoothed_wirelength and docs/Action_Space_Decision.md.
+    **gamma is in grid cells, not in design units, and that is load-bearing.** log-sum-exp
+    replaces each `max` with `gamma * log(sum(exp(x / gamma)))`, so gamma has to be commensurate
+    with the coordinates. A design's coordinates run to ~1e4, and an absolute `gamma=1.0` makes
+    `exp(x / gamma)` saturate in float32 - the surrogate degenerates back to a hard max, and the
+    gradient gets *worse* than raw HPWL's. Measured on adaptec1, 543 macros, 514 connected, as
+    the fraction of connected macros receiving a nonzero d(-WAWL)/d(position):
+
+        gamma (cells)   dense    fidelity vs true HPWL
+        raw HPWL        42.2%    exact
+        0.006  (=1.0)    1.4%    +0.00%     <- the old absolute default, degenerate
+        0.166           57.2%    +0.08%
+        0.552           98.8%    +0.33%
+        1.0            100.0%    +1.00%
+        2.8            100.0%    +4.96%
+
+    One grid cell buys complete gradient coverage for one percent of fidelity, which is what
+    settles docs/Action_Space_Decision.md's option D: the sparse-gradient half of SHAC's problem
+    is solved and cheap. The remaining half - a differentiable density/overlap term - is not.
     """
-    return functools.partial(
-        make_scaled_smoothed_reward, dense=dense, reward_scale=reward_scale, gamma=gamma
-    )
+    def factory(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
+        return make_scaled_smoothed_reward(
+            padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+            dense=dense, reward_scale=reward_scale, gamma=gamma_cells * cell_size,
+        )
+
+    return factory
 
 
 def _reward_hpwl_congestion(grid: int, congestion_weight: float = 1.0, capacity: float = 1.0,
@@ -221,8 +244,6 @@ def _init_greedy_wiremask_prefix(benchmark, n_macros: int = 8):
     """
     from placax_agents.agents.baselines import GreedyWiremaskAgent
 
-    import jax.numpy as jnp
-
     def init_fn(_key):
         # The heuristic is deterministic, so the key is unused and the warm start is a pure
         # function of the netlist and the placement order.
@@ -236,6 +257,50 @@ def _init_greedy_wiremask_prefix(benchmark, n_macros: int = 8):
 
 
 INITS = {"empty": _init_empty, "greedy_wiremask_prefix": _init_greedy_wiremask_prefix}
+
+# ---------------------------------------------------------------------------
+# Legalization.  (benchmark, **kwargs) -> LegalizeFn
+# ---------------------------------------------------------------------------
+#
+# A LegalizeFn takes {macro_name: (x, y)} REAL-unit lower-left corners plus the macro sizes, and
+# returns the same shape made physically realizable. It runs at the boundary between the
+# environment and the physical world (`experiment.export`), never inside the episode: it moves
+# already-placed macros, which the sequential-constructive kernel has no action for, and putting
+# it in the loop would change what the reward is computed over. See docs/Action_Space_Decision.md
+# - a perturbation action space is what would let a legalizer participate in the episode proper.
+#
+# Measured before being written, on adaptec1: the grid's rows land on a real placement row 0 times
+# out of 224, but the worst-case snap is pitch/2 = 6 units = 0.116 of a grid cell. So this is a
+# correctness fix with a negligible wirelength cost, which is worth knowing rather than assuming
+# in either direction.
+
+
+def _legalizer_row_snap(benchmark, clamp_to_core: bool = True):
+    """Snaps every macro to the nearest legal site and row, keeping it inside the core area."""
+    rows = benchmark.rows
+    if rows is None:
+        raise ValueError(
+            "the row_snap legalizer needs the design's placement rows, and this benchmark "
+            "carries none (a protobuf netlist, or a Bookshelf directory with no .scl). Legality "
+            "against rows cannot be defined for it, so leave EnvironmentSpec.legalization at None."
+        )
+
+    def legalize(placement: dict, macro_sizes: dict) -> dict:
+        legalized = {}
+        for name, (x, y) in placement.items():
+            width, height = macro_sizes.get(name, (0.0, 0.0))
+            if clamp_to_core:
+                legalized[name] = rows.snap(x, y, width, height)
+            else:
+                # Snap only - a macro outside the core stays outside, and is reported as illegal
+                # rather than silently dragged in.
+                legalized[name] = rows.snap(x, y)
+        return legalized
+
+    return legalize
+
+
+LEGALIZERS = {"row_snap": _legalizer_row_snap}
 
 # ---------------------------------------------------------------------------
 # Policy architecture.  (benchmark, **kwargs) -> nn.Module
@@ -264,6 +329,22 @@ def _policy_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
     return CNNActorCritic(features=features, num_conv_layers=num_conv_layers)
 
 
+def _policy_mlp(benchmark, features: int = 256, num_layers: int = 2):
+    """Reads raw coordinates rather than the canvas image - §12's non-CNN arm.
+
+    The state-representation study runs on THIS axis rather than on `state`: `observation()`
+    returns both an image and the coordinates, and the architecture picks which it consumes. Two
+    arms therefore share an environment exactly and differ only in `agent.policy`, which is a
+    stronger comparison than the spec assumed - it holds at environment_hash, not just task_hash.
+    """
+    from placax_agents.policy.architectures.mlp import MLPActorCritic
+
+    return MLPActorCritic(
+        grid_x=benchmark.params.grid_x, grid_y=benchmark.params.effective_grid_y,
+        size_scale=float(benchmark.sizes_array.max()), features=features, num_layers=num_layers,
+    )
+
+
 def _policy_wiremask_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
     """The plain CNN plus a wiremask input channel. Requires the `wiremask` state representation.
 
@@ -288,6 +369,7 @@ def _policy_resnet_coarse_fine(benchmark, critic_style: str = "step_embedding", 
 
 POLICIES = {
     "cnn": _policy_cnn,
+    "mlp": _policy_mlp,
     "wiremask_cnn": _policy_wiremask_cnn,
     "resnet_coarse_fine": _policy_resnet_coarse_fine,
 }

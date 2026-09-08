@@ -29,6 +29,7 @@ unproven. The Bookshelf benchmarks under `benchmarks/` still cannot reach the va
 OpenROAD reads no Bookshelf; their placements export to `.pl`/`.aux` for DREAMPlace instead.
 That is stated here rather than left for a reader to discover.
 """
+import dataclasses
 import json
 import pathlib
 from dataclasses import asdict, dataclass
@@ -54,6 +55,21 @@ class PhysicalResult:
     timing_slack: float | None
     """None means not computed - the validator was given no liberty file or clock period. Never
     a plausible-looking substitute for a number nobody measured."""
+
+    routed_wirelength: float | None = None
+    via_count: int | None = None
+    drc_violations: int | None = None
+    """Present only when the validator was configured to route. Routed wirelength is the number
+    every HPWL in this project is a proxy FOR, and DRC is where a placement with excellent
+    wirelength is found to be unroutable - so a PPA record that cannot carry them cannot answer
+    the question the proxy was standing in for."""
+
+    legalizer: str | None = None
+    max_displacement: float = 0.0
+    off_rows_after: int = 0
+    """What it cost to make this placement physically realizable before measuring it. A PPA number
+    for a placement that had to move 649 units to reach a legal row describes a different
+    placement from the one the agent was scored on, and the record has to show that."""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -116,6 +132,9 @@ def evaluate_physical(
         design_area=ppa.design_area,
         utilization_pct=ppa.utilization_pct,
         timing_slack=ppa.timing_slack,
+        routed_wirelength=ppa.routed_wirelength,
+        via_count=ppa.via_count,
+        drc_violations=ppa.drc_violations,
     )
 
 
@@ -136,16 +155,22 @@ def evaluate_placement(
     `score()` measured, so the design that gets validated is the placement that was reported.
     """
     exported = write_placement(built, positions, output_dir / "placement")
-    if exported.format is not NetlistFormat.DEF:
+    if exported.format is not NetlistFormat.DEF:  # noqa: SIM102  - the message needs `exported`
         raise NotImplementedError(
             f"this run's design is {exported.format.value}, and the validator reads DEF/LEF only. "
             f"The placement itself was still written to {exported.path}, which DREAMPlace reads "
             f"natively - see scripts/run_pipeline.py for that route. Bring a DEF/LEF design here "
             f"for a PPA number."
         )
-    return evaluate_physical(
+    result = evaluate_physical(
         built, exported.path, lef_paths, output_dir,
         skip_cell_placement=skip_cell_placement, machine=machine,
+    )
+    # Carry what legalization cost into the PPA record: this number describes the design that was
+    # actually measured, which is the legalized one, not the raw grid placement.
+    return dataclasses.replace(
+        result, legalizer=exported.legalizer, max_displacement=exported.max_displacement,
+        off_rows_after=exported.off_rows_after,
     )
 
 

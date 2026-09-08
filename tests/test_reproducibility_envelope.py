@@ -388,10 +388,39 @@ def test_the_smoothed_surrogate_approaches_hpwl_as_gamma_shrinks() -> None:
 def test_the_smoothed_reward_is_selectable_from_a_config(tmp_path: pathlib.Path) -> None:
     directory = _bookshelf(tmp_path / "bench")
     config = _small(training(directory, budget=Budget(iterations=1)),
-                    reward=Spec("smoothed", {"dense": True, "gamma": 1.0}))
+                    reward=Spec("smoothed", {"dense": True, "gamma_cells": 1.0}))
     built = build(config)
     positions = built.agent.best_positions(built.agent.init(random.PRNGKey(0)))
     assert float(replay(positions, built.benchmark.reward_fn, built.benchmark.params)) != 0.0
+
+
+def test_the_smoothed_rewards_smoothing_is_measured_in_grid_cells(tmp_path) -> None:
+    """gamma has to scale with the design, and the absolute default did not.
+
+    log-sum-exp replaces each `max` with `gamma * log(sum(exp(x / gamma)))`, so gamma must be
+    commensurate with the coordinates it smooths. A real design's coordinates run to ~1e4, where
+    an absolute `gamma=1.0` makes `exp(x / gamma)` saturate in float32: the surrogate collapses
+    back to a hard max and delivers gradient to 1.4% of adaptec1's connected macros - worse than
+    raw HPWL's 42.2%, while appearing to work. One grid cell gives 100% coverage for 1% fidelity.
+    """
+    directory = _bookshelf(tmp_path / "bench")
+    coarse = build(_small(training(directory, budget=Budget(iterations=1)),
+                          reward=Spec("smoothed", {"gamma_cells": 4.0})))
+    fine = build(_small(training(directory, budget=Budget(iterations=1)),
+                        reward=Spec("smoothed", {"gamma_cells": 0.01})))
+    positions = fine.agent.best_positions(fine.agent.init(random.PRNGKey(0)))
+
+    # More smoothing overestimates wirelength more, which is the fidelity cost being traded away.
+    # If gamma were absolute rather than cell-scaled, both would smooth by the same amount and
+    # these would be indistinguishable.
+    coarse_return = float(replay(positions, coarse.benchmark.reward_fn, coarse.benchmark.params))
+    fine_return = float(replay(positions, fine.benchmark.reward_fn, fine.benchmark.params))
+    assert coarse_return < fine_return
+
+    # And the old spelling is gone rather than silently ignored - it named an absolute value.
+    with pytest.raises(TypeError, match="gamma"):
+        build(_small(training(directory, budget=Budget(iterations=1)),
+                     reward=Spec("smoothed", {"gamma": 1.0})))
 
 
 # --------------------------------------------------------------------------- the kernel

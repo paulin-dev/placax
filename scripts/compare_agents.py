@@ -51,7 +51,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--benchmark_dir", type=pathlib.Path,
-                        default=pathlib.Path("benchmarks/adaptec1"))
+                        default=pathlib.Path("benchmarks/adaptec1"),
+                        help="A single design to compare on (default: %(default)s).")
+    parser.add_argument("--benchmark_dirs", default=None,
+                        help="Comma-separated designs, to run the same protocol as a SUITE. Every "
+                             "design's environment is asserted separately, and the protocol - "
+                             "everything except which netlist - is asserted across them. Results "
+                             "are aggregated by mean rank, since HPWL is not comparable between "
+                             "designs.")
     parser.add_argument("--preset", default="training", choices=sorted(OUTPUT_SUBDIRS),
                         help="Which preset supplies the shared ENVIRONMENT - benchmark, grid, "
                              "order, reward, observation and mask (default: %(default)s). Its own "
@@ -85,7 +92,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Which invariant this comparison claims (default: %(default)s - "
                              "everything the agent did not choose). Drop to 'task' only for a "
                              "study that varies the observation on purpose.")
-    return parser.parse_args(argv[1:])
+    parsed = parser.parse_args(argv[1:])
+    parsed.benchmark_dirs = (
+        [pathlib.Path(part.strip()) for part in parsed.benchmark_dirs.split(",") if part.strip()]
+        if parsed.benchmark_dirs else [parsed.benchmark_dir]
+    )
+    return parsed
 
 
 def _budget(args: argparse.Namespace) -> Budget:
@@ -170,51 +182,87 @@ def _format_table(results: dict[str, list[dict]], budget: Budget, level: str) ->
     return "\n".join(lines)
 
 
-def _write_results(path: pathlib.Path, results: dict[str, list[dict]], reference: ExperimentConfig,
-                   budget: Budget, level: str) -> pathlib.Path:
-    """The table as data, so it can be regenerated and checked without re-running anything.
+def _rank_summary(by_design: dict[str, dict[str, list[dict]]]) -> str:
+    """Agents ranked per design, then averaged - the only defensible way to aggregate designs.
+
+    Averaging HPWL across benchmarks is meaningless: adaptec1 and bigblue1 differ by orders of
+    magnitude, so a mean is dominated by whichever design happens to be largest and says nothing
+    about which method is better. Ranking within each design and averaging the ranks is what the
+    comparison actually supports, and it is the aggregation BBOPlace-Bench-style claims need.
+    """
+    agents = sorted({name for designs in by_design.values() for name in designs})
+    ranks: dict[str, list[int]] = {name: [] for name in agents}
+    for design, results in by_design.items():
+        ordered = sorted(results, key=lambda name: statistics.fmean(
+            run["real_hpwl"] for run in results[name]))
+        for position, name in enumerate(ordered, start=1):
+            ranks[name].append(position)
+
+    header = (f"{'agent':<22s}{'mean rank':>11s}{'wins':>7s}{'designs':>9s}"
+              f"{'all legal':>11s}")
+    lines = ["", f"ACROSS {len(by_design)} DESIGNS", "=" * len(header), header, "-" * len(header)]
+    for name in sorted(agents, key=lambda n: statistics.fmean(ranks[n]) if ranks[n] else 99):
+        placings = ranks[name]
+        wins = sum(1 for position in placings if position == 1)
+        legal = all(
+            run["is_legal"]
+            for results in by_design.values() for run in results.get(name, [])
+        )
+        lines.append(f"{name:<22s}{statistics.fmean(placings):>11.2f}{wins:>7d}"
+                     f"{len(placings):>9d}{('yes' if legal else 'NO'):>11s}")
+    lines.append("")
+    lines.append("Ranked within each design, then averaged - HPWL is not comparable ACROSS "
+                 "designs, so a mean of it would be dominated by the largest one.")
+    lines.append("'all legal' is yes only when every design and every seed was legal; a row "
+                 "marked NO failed to produce a result somewhere, whatever its rank says.")
+    return "\n".join(lines)
+
+
+def _write_results(path: pathlib.Path, by_design: dict[str, dict[str, list[dict]]],
+                   references: dict[str, ExperimentConfig], budget: Budget,
+                   level: str, protocol_hash: str) -> pathlib.Path:
+    """The tables as data, so they can be regenerated and checked without re-running anything.
 
     The script's own docstring has always promised this ("so the table can be regenerated"), and
     a printed table plus a directory of manifests did not deliver it: reconstructing a row meant
-    re-running the agent. Every number the table shows is written here beside the hash of the
-    environment it was produced under and the full hash of the run that produced it.
+    re-running the agent. Every number shown is written here beside the hash of the environment it
+    was produced under, the protocol shared across designs, and each run's own full hash.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "level": level,
-        "shared_hash": reference.hash_at(level),
+        "protocol_hash": protocol_hash,
         "budget": budget.to_dict(),
         "metrics": METRICS,
         "fingerprint": fingerprint(),
-        "runs": {name: sorted(runs, key=lambda run: run["seed"]) for name, runs in results.items()},
+        "designs": {
+            design: {
+                "shared_hash": references[design].hash_at(level),
+                "runs": {name: sorted(runs, key=lambda run: run["seed"])
+                         for name, runs in results.items()},
+            }
+            for design, results in by_design.items()
+        },
     }, indent=2, sort_keys=True) + "\n")
     return path
 
 
-def main() -> None:
-    Log.configure()
-    args = _parse_args(sys.argv)
-    if not args.benchmark_dir.exists():
-        Log.error(f"'{args.benchmark_dir}' not found - run scripts/download_benchmarks.py first.")
-        sys.exit(1)
-
-    budget = _budget(args)
-    reference = build_preset(args.preset, args.benchmark_dir, budget=budget)
-    agents = [name.strip() for name in args.agents.split(",") if name.strip()]
-    if not agents:
-        raise SystemExit("--agents is empty; name at least one agent to compare")
+def _run_design(benchmark_dir, args, budget, agents) -> tuple[ExperimentConfig, dict, pathlib.Path]:
+    """Every agent x seed on ONE design, sharing one loaded netlist and one asserted environment."""
+    reference = build_preset(args.preset, benchmark_dir, budget=budget)
     configs = build_comparison(reference, agents, args.seeds, args.population, args.level)
+    output_root = (args.output_dir or (benchmark_dir / "comparison"))
+    if len(args.benchmark_dirs) > 1 and args.output_dir is not None:
+        output_root = output_root / benchmark_dir.name
 
-    output_root = args.output_dir or (args.benchmark_dir / "comparison")
-    Log.info(f"comparing {len(agents)} agents x {args.seeds} seed(s) on {args.benchmark_dir}")
+    Log.info(f"{benchmark_dir.name}: {len(agents)} agents x {args.seeds} seed(s)")
     Log.info(f"  shared {args.level}: {reference.hash_at(args.level)}")
-    Log.info(f"  {describe_determinism()}")
 
     # Loaded once and shared: two agents parsing the same netlist twice would still be comparable,
     # but sharing it removes the possibility entirely and saves the parse.
     benchmark = build_benchmark(reference)
-
     results: dict[str, list[dict]] = {}
+    built = None
     for config in configs:
         agent_name = config.name.rsplit("-seed", 1)[0]
         built = build(config, benchmark=benchmark)
@@ -242,15 +290,59 @@ def main() -> None:
         Log.info(f"  {config.name}: real_hpwl={measured['real_hpwl']:,.0f} "
                  f"return={measured['reward_return']:,.3f} "
                  f"spent={final.get('env_steps', 0):,} env steps{flag}")
+    return built.config, results, output_root
+
+
+def main() -> None:
+    Log.configure()
+    args = _parse_args(sys.argv)
+    missing = [str(d) for d in args.benchmark_dirs if not d.exists()]
+    if missing:
+        Log.error(f"not found: {', '.join(missing)} - run scripts/download_benchmarks.py first.")
+        sys.exit(1)
+
+    budget = _budget(args)
+    agents = [name.strip() for name in args.agents.split(",") if name.strip()]
+    if not agents:
+        raise SystemExit("--agents is empty; name at least one agent to compare")
+
+    # Across designs the environments CANNOT match - they are different netlists - so the suite
+    # asserts the protocol instead: same grid, order, budget, reward, observation, mask, warm
+    # start, legalization and physical stack, on every design. Without it "we ran the same
+    # experiment on five benchmarks" is a claim rather than a check.
+    references = {d.name: build_preset(args.preset, d, budget=budget) for d in args.benchmark_dirs}
+    if len(references) > 1:
+        assert_comparable(*references.values(), level="protocol")
+        Log.info(f"suite of {len(references)} designs, shared protocol: "
+                 f"{next(iter(references.values())).protocol_hash()}")
+    Log.info(f"  {describe_determinism()}")
+
+    by_design: dict[str, dict[str, list[dict]]] = {}
+    resolved: dict[str, ExperimentConfig] = {}
+    roots = []
+    for benchmark_dir in args.benchmark_dirs:
+        config, results, root = _run_design(benchmark_dir, args, budget, agents)
+        by_design[benchmark_dir.name] = results
+        resolved[benchmark_dir.name] = config
+        roots.append(root)
 
     print()
-    print(_format_table(results, budget, args.level))
-    print()
+    for design, results in by_design.items():
+        if len(by_design) > 1:
+            print(f"--- {design} ---")
+        print(_format_table(results, budget, args.level))
+        print()
+    if len(by_design) > 1:
+        print(_rank_summary(by_design))
+        print()
+
+    results_root = args.output_dir or roots[0]
     results_path = _write_results(
-        output_root / RESULTS_NAME, results, built.config, budget, args.level
+        results_root / RESULTS_NAME, by_design, resolved, budget, args.level,
+        next(iter(resolved.values())).protocol_hash(),
     )
-    print(f"per-run manifests and logs: {output_root}")
-    print(f"the table as data:          {results_path}")
+    print(f"per-run manifests and logs: {', '.join(str(root) for root in dict.fromkeys(roots))}")
+    print(f"the tables as data:         {results_path}")
 
 
 if __name__ == "__main__":

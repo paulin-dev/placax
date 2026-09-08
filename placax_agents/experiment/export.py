@@ -23,13 +23,15 @@ through untouched, because both writers rewrite only the instances they are hand
 """
 import pathlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from placax.log import Log  # must precede jax imports
 from placax.netlist import NetlistFormat, detect_format
 from placax.netlist.bookshelf import write_aux, write_pl
 from placax.netlist.def_writer import write_placed_def
-from placax_agents.ops.inference import positions_to_named_lower_left
+from placax_agents.policy.scale import to_real_lower_left
+
+import numpy as np
 
 _DEF_UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)")
 
@@ -51,6 +53,22 @@ class ExportedPlacement:
 
     n_macros: int
     """How many macro positions were written - fewer than the design's total under a budget."""
+
+    legalizer: str | None = None
+    """Which legalizer ran, or None if the config named none."""
+
+    max_displacement: float = 0.0
+    mean_displacement: float = 0.0
+    """How far legalization moved macros, in real units. Reported rather than assumed: this is
+    the cost of making a placement realizable, and a run should be able to say whether that cost
+    was a rounding error or a redesign. On adaptec1 a row snap moves a macro at most 6 units -
+    0.116 of a grid cell - which is worth having as a number instead of a belief."""
+
+    off_rows_before: int = 0
+    off_rows_after: int = 0
+    """Macros not sitting on a legal site/row, before and after legalization. `after` should be
+    zero; anything else means the legalizer could not place them and the design is not realizable.
+    Both are 0 when the design carries no rows to check against."""
 
 
 def _export_bookshelf(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
@@ -96,17 +114,66 @@ def _export_def(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
     return ExportedPlacement(NetlistFormat.DEF, def_path, built.config.full_hash(), len(named))
 
 
+def _real_placement(built, positions) -> dict[str, tuple[float, float]]:
+    """{macro: (x, y)} real-unit lower-left corners, with the canvas origin applied.
+
+    The origin is added here and nowhere else. HPWL is translation-invariant, so shifting every
+    macro by a constant cannot change a reward, a wiremask or a grid legality check - which is why
+    the environment never carries it. It matters only once a coordinate has to mean something to a
+    tool other than this one, and this is that boundary.
+    """
+    benchmark = built.benchmark
+    lower_left = np.asarray(to_real_lower_left(positions, benchmark.cell_size), dtype=float)
+    origin_x, origin_y = benchmark.origin
+    return {
+        name: (float(lower_left[idx, 0]) + origin_x, float(lower_left[idx, 1]) + origin_y)
+        for name, idx in benchmark.name_to_idx.items()
+    }
+
+
+def _off_rows(placement: dict, macro_sizes: dict, rows) -> int:
+    """How many macros are not on a legal site and row, wholly inside the core."""
+    if rows is None:
+        return 0
+    return sum(
+        not rows.is_legal(x, y, *macro_sizes.get(name, (0.0, 0.0)))
+        for name, (x, y) in placement.items()
+    )
+
+
 def write_placement(built, positions, output_dir: pathlib.Path) -> ExportedPlacement:
     """Writes `positions` back into the design's own format, and says where it landed.
 
     `positions` are the grid cells an agent handed the runner - the same array `score()` measures,
     so the exported design is the placement that was reported, not a second rollout of it.
+
+    The run's configured legalizer, if it has one, is applied here: this is the boundary between a
+    placement that is legal on the GRID (guaranteed by masking) and one that is legal on the DIE
+    (rows, sites, core area), and how far the two differ is reported rather than assumed.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark = built.benchmark
-    named = positions_to_named_lower_left(
-        positions, benchmark.sizes_array, benchmark.cell_size, benchmark.name_to_idx
-    )
+    placement = _real_placement(built, positions)
+    macro_sizes = benchmark.macro_sizes
+    rows = benchmark.rows
+
+    off_before = _off_rows(placement, macro_sizes, rows)
+    legalizer = built.config.environment.legalization
+    max_move = mean_move = 0.0
+    if built.legalize_fn is not None:
+        legalized = built.legalize_fn(placement, macro_sizes)
+        moves = [
+            float(np.hypot(legalized[name][0] - x, legalized[name][1] - y))
+            for name, (x, y) in placement.items()
+        ]
+        max_move = max(moves, default=0.0)
+        mean_move = float(np.mean(moves)) if moves else 0.0
+        placement = legalized
+    off_after = _off_rows(placement, macro_sizes, rows)
+
+    # Rounded last: both Bookshelf .pl and DEF PLACED take integers, and rounding before
+    # legalizing would snap to a row and then step off it again.
+    named = {name: (int(round(x)), int(round(y))) for name, (x, y) in placement.items()}
 
     benchmark_dir = built.config.environment.benchmark.path
     design_format = detect_format(benchmark_dir)
@@ -120,8 +187,17 @@ def write_placement(built, positions, output_dir: pathlib.Path) -> ExportedPlace
             f"be written back out - those are the two formats the cell placers and validators in "
             f"placax_tools actually read. A protobuf netlist carries no placement file to rewrite."
         )
+    exported = replace(
+        exported, legalizer=legalizer.name if legalizer else None,
+        max_displacement=max_move, mean_displacement=mean_move,
+        off_rows_before=off_before, off_rows_after=off_after,
+    )
     Log.info(f"  wrote {exported.n_macros} macro positions to {exported.path} "
              f"(run {exported.full_hash})")
+    if rows is not None:
+        Log.info(f"  off-row macros: {off_before} before legalization, {off_after} after"
+                 + (f"; moved at most {max_move:.1f} units" if built.legalize_fn else
+                    " (no legalizer configured)"))
     return exported
 
 

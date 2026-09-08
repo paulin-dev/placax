@@ -11,49 +11,44 @@ import jax.numpy as jnp
 
 
 def test_parse_args_defaults_to_all_macros_no_dreamplace_and_maskplace_preset() -> None:
-    (
-        benchmark_dir, preset, checkpoint, macro_budget, output_dir, dreamplace_root, use_docker, gpu,
-        target_density, python_executable, dreamplace_extra_config, viz_resolution,
-        nets_sample_fraction, nets_seed, config,
-    ) = _parse_args(["x", "--benchmark_dir=benchmarks/adaptec1"])
-    assert preset == "maskplace"  # backward-compatible default: this pipeline used to only support this
-    assert macro_budget is None  # "all" is the production default
-    assert dreamplace_root is None and use_docker is False
-    assert dreamplace_extra_config == {}
-    assert viz_resolution == 1024
-    assert nets_sample_fraction == 1.0
-    assert nets_seed == 0
-    assert config is None  # the preset-name path stays the default, with a warning at run time
+    # Read by NAME, not by position. This used to be a fifteen-value tuple unpacked positionally,
+    # which broke every caller the moment a flag was added - and one was.
+    args = _parse_args(["x", "--benchmark_dir=benchmarks/adaptec1"])
+    assert args.preset == "maskplace"  # backward-compatible default: all this pipeline once had
+    assert args.macro_budget is None  # "all" is the production default
+    assert args.dreamplace_root is None and args.use_docker is False
+    assert args.dreamplace_extra_config == {}
+    assert args.viz_resolution == 1024
+    assert args.nets_sample_fraction == 1.0
+    assert args.nets_seed == 0
+    assert args.config is None  # the preset-name path stays the default, with a warning at run time
 
 
 def test_parse_args_carries_a_config_path_when_one_is_given() -> None:
     # --config is what lets this pipeline rebuild the environment a checkpoint was trained in,
     # rather than whatever a preset name resolves to today.
     args = _parse_args(["x", "--config=runs/adaptec1/manifest.json"])
-    assert args[14] == pathlib.Path("runs/adaptec1/manifest.json")
+    assert args.config == pathlib.Path("runs/adaptec1/manifest.json")
 
 
 def test_parse_args_accepts_any_registered_preset() -> None:
     for preset_name in PRESETS:
-        (_, preset, *_rest) = _parse_args(["x", f"--preset={preset_name}"])
-        assert preset == preset_name
+        assert _parse_args(["x", f"--preset={preset_name}"]).preset == preset_name
 
 
 def test_parse_args_macro_budget_integer_overrides_all() -> None:
-    (_, _, _, macro_budget, *_rest) = _parse_args(["x", "--macro_budget=64"])
-    assert macro_budget == 64
+    assert _parse_args(["x", "--macro_budget=64"]).macro_budget == 64
 
 
 def test_parse_args_dreamplace_extra_config_is_parsed_json() -> None:
     args = _parse_args(["x", '--dreamplace_extra_config={"num_bins_x": 256, "random_seed": 7}'])
-    dreamplace_extra_config = args[10]
-    assert dreamplace_extra_config == {"num_bins_x": 256, "random_seed": 7}
+    assert args.dreamplace_extra_config == {"num_bins_x": 256, "random_seed": 7}
 
 
 def test_parse_args_nets_sample_fraction_and_seed() -> None:
     args = _parse_args(["x", "--nets_sample_fraction=0.2", "--nets_seed=7"])
-    assert args[12] == 0.2
-    assert args[13] == 7
+    assert args.nets_sample_fraction == 0.2
+    assert args.nets_seed == 7
 
 
 def test_resolve_checkpoint_uses_the_given_default_subdir(tmp_path) -> None:

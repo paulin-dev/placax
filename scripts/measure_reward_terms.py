@@ -20,7 +20,9 @@ from placax.extras.rewards import wiremask
 from placax.netlist.padding import build_macro_net_index
 from placax.types import EnvState
 from placax_agents.policy.scale import to_grid_units, to_real_centers
-from scripts.run_maskplace import MASKPLACE_REWARD_DIVISOR, _load_benchmark
+from placax_agents.experiment.build import build_benchmark
+from placax_agents.experiment.presets import maskplace
+from placax_agents.experiment.registry import MASKPLACE_REWARD_DIVISOR
 
 import jax
 import jax.numpy as jnp
@@ -83,7 +85,8 @@ def main() -> None:
         sys.exit(1)
 
     macro_budget = None if args.macro_budget.lower() == "all" else int(args.macro_budget)
-    benchmark = _load_benchmark(args.benchmark_dir, macro_budget)
+    # Through the config, like every other consumer - not a training script's private helper.
+    benchmark = build_benchmark(maskplace(args.benchmark_dir, macro_budget=macro_budget))
     reward_scale = 1.0 / (benchmark.cell_size * MASKPLACE_REWARD_DIVISOR)
     print(
         f"{args.benchmark_dir.name}: {len(benchmark.macro_sizes)} macros, grid {benchmark.params.grid_x}"

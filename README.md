@@ -144,8 +144,9 @@ which also makes the action mask's relaxation valve visible — it drops the qua
 legality itself, rather than leaving an episode with no legal move, and until now did so
 silently.
 
-Three agents ship. `ppo` is the learner; the other two are baselines the project previously had
-none of, which is why "better than X" could not be stated even against a trivial reference:
+Four agents ship, across two genuinely different families. `ppo` is the learner; `genetic` is a
+population method; the other two are baselines the project previously had none of, which is why
+"better than X" could not be stated even against a trivial reference:
 
 - **`random_search`** - uniformly-random legal placements, keeping the best. The honest compute
   floor. A method that does not clearly beat compute-matched random search has not demonstrated
@@ -154,6 +155,12 @@ none of, which is why "better than X" could not be stated even against a trivial
   strong baseline, and the one that says how much of a learned policy's score comes from learning
   rather than from the wiremask observation it was handed. Deterministic, so it reports itself
   converged after one iteration instead of spending the rest of the budget on the same answer.
+- **`genetic`** - a population of placement *preferences*, decoded through the run's own legality
+  mask and bred under its configured reward. The first agent here from a non-sequential family,
+  which is what makes the spec's "PPO vs. GA, reward and benchmark held fixed" comparison
+  runnable. The encoding is preferences rather than coordinates on purpose: a GA given a
+  wirelength objective and no legality constraint does not merely risk overlap, it converges to
+  it, because overlapping macros have shorter wires.
 
 Both baselines run inside the environment their config describes - same observation, same action
 mask, same warm start - and rank candidates by the **configured reward**, not by bare HPWL. That
@@ -161,9 +168,43 @@ matters for the reward axis: if a baseline scored with HPWL regardless, swapping
 change what PPO optimizes and leave its baselines untouched, while `assert_comparable` reported
 the two environments as identical.
 
-Adding a fourth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
+Adding a fifth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
 three methods (`placax_agents/agents/base.py`); it inherits the shared evaluation, checkpointing,
-budgeting and logging automatically.
+budgeting and logging automatically, plus the environment wiring in
+`placax_agents/agents/environment_bound.py` that stops it running under different rules from
+whatever it is being compared against.
+
+### Across several designs
+
+`--benchmark_dirs=benchmarks/adaptec1,benchmarks/bigblue1` runs the same protocol as a suite. Two
+runs on different netlists can never share an `environment_hash` — they are different designs — so
+a suite asserts the new **`protocol`** level instead: the environment with the design removed, so
+grid, order, canvas, reward, observation, mask, warm start, legalization, physical stack and
+budget must all still match. Results are aggregated by **mean rank within each design**, never by
+averaging HPWL across them: adaptec1 and bigblue1 differ by orders of magnitude, so a mean would
+be decided by whichever design is largest rather than by which method is better.
+
+### Rows, the canvas, and legalization
+
+Placements are legal on the **grid** by construction, because illegal cells are masked. They were
+not legal on the **die**, and nothing said so. Measured on adaptec1: all 543 macros sat off a real
+placement row, and ~15% of the canvas lay outside the placeable core area entirely, because the
+canvas was the die extent anchored at the origin while the rows span 459..11151.
+
+Two hashed axes address it. `BenchmarkSpec.canvas="core"` scales and anchors the grid to the row
+region (`die` remains the default, since it is what every existing result used, and it is
+MaskPlace's own). `EnvironmentSpec.legalization="row_snap"` snaps macros onto real rows and sites
+at export time, and reports how far it had to move them. The two are coupled, which is why they
+were measured together:
+
+| canvas | legalizer | off-row macros | max displacement |
+|---|---|---|---|
+| `die` | none | 543 / 543 | — |
+| `die` | `row_snap` | 543 → 0 | 649.12 units |
+| `core` | `row_snap` | 542 → 0 | **6.02 units** |
+
+On the die canvas, legalizing means dragging macros back into the core — a different placement
+from the one that was scored. On the core canvas it is half a row pitch, the theoretical floor.
 
 ### Reproducibility
 

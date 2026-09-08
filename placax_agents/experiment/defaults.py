@@ -104,10 +104,12 @@ def _algorithm_defaults(name: str) -> dict:
         return defaults
 
     from placax_agents.agents import baselines
+    from placax_agents.agents.genetic import GeneticAgent
 
     agent_class = {
         "greedy_wiremask": baselines.GreedyWiremaskAgent,
         "random_search": baselines.RandomSearchAgent,
+        "genetic": GeneticAgent,
     }.get(name)
     return _defaults_from_signature(agent_class.__init__) if agent_class is not None else {}
 

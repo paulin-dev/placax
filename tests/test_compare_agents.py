@@ -100,17 +100,56 @@ def test_results_json_carries_every_number_the_table_shows(tmp_path: pathlib.Pat
     reference = training("benchmarks/adaptec1", budget=BUDGET)
     results = {"ppo": [_run(900.0, env_steps=500_000, seed=1, gradient_steps=7),
                        _run(950.0, env_steps=500_000, seed=0, gradient_steps=7)]}
-    path = _write_results(tmp_path / "results.json", results, reference, BUDGET, "environment")
+    path = _write_results(tmp_path / "results.json", {"adaptec1": results},
+                          {"adaptec1": reference}, BUDGET, "environment",
+                          reference.protocol_hash())
 
     data = json.loads(path.read_text())
     assert data["level"] == "environment"
-    assert data["shared_hash"] == reference.environment_hash()
+    assert data["protocol_hash"] == reference.protocol_hash()
+    assert data["designs"]["adaptec1"]["shared_hash"] == reference.environment_hash()
     assert data["budget"]["env_steps"] == 500_000
     assert set(data["fingerprint"]) >= {"packages", "device", "git_revision"}
     assert "real_hpwl" in data["metrics"]
     # Seeds land in a stable order, so two runs of one comparison produce comparable files.
-    assert [run["seed"] for run in data["runs"]["ppo"]] == [0, 1]
-    assert data["runs"]["ppo"][0]["env_steps"] == 500_000
+    runs = data["designs"]["adaptec1"]["runs"]["ppo"]
+    assert [run["seed"] for run in runs] == [0, 1]
+    assert runs[0]["env_steps"] == 500_000
+
+
+def test_a_suite_ranks_within_each_design_rather_than_averaging_across_them() -> None:
+    """HPWL is not comparable between designs, so the aggregate cannot be a mean of it.
+
+    adaptec1 and bigblue1 differ by orders of magnitude; averaging their wirelengths would let the
+    larger design decide the winner on its own. Ranking inside each design and averaging the ranks
+    is what the comparison actually supports.
+    """
+    from scripts.compare_agents import _rank_summary
+
+    summary = _rank_summary({
+        # Consistent winner, despite tiny numbers on one design and huge ones on the other.
+        "small": {"good": [_run(10.0, 1)], "bad": [_run(20.0, 1)]},
+        "large": {"good": [_run(1_000_000.0, 1)], "bad": [_run(2_000_000.0, 1)]},
+    })
+    good_row = next(line for line in summary.splitlines() if line.startswith("good"))
+    bad_row = next(line for line in summary.splitlines() if line.startswith("bad"))
+    assert "1.00" in good_row and "2.00" in bad_row
+    assert summary.index("good") < summary.index("bad")
+    assert "ACROSS 2 DESIGNS" in summary
+
+
+def test_the_suite_summary_flags_an_agent_that_was_illegal_anywhere() -> None:
+    # Winning on rank while producing an unrealizable placement on one design is not winning.
+    from scripts.compare_agents import _rank_summary
+
+    summary = _rank_summary({
+        "one": {"cheat": [_run(1.0, 1, is_legal=False, overlap=0.4)], "honest": [_run(9.0, 1)]},
+        "two": {"cheat": [_run(1.0, 1)], "honest": [_run(9.0, 1)]},
+    })
+    cheat_row = next(line for line in summary.splitlines() if line.startswith("cheat"))
+    honest_row = next(line for line in summary.splitlines() if line.startswith("honest"))
+    assert cheat_row.rstrip().endswith("NO")
+    assert honest_row.rstrip().endswith("yes")
 
 
 def test_a_comparison_refuses_to_be_built_across_two_environments() -> None:

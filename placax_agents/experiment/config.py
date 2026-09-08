@@ -114,6 +114,14 @@ class BenchmarkSpec:
     macro_budget: int | None = None
     order: Spec = field(default_factory=lambda: Spec("alphabetical"))
     netlist_digest: str | None = None
+    canvas: str = "die"
+    """What the grid is scaled and anchored to: the die extent (default, and MaskPlace's own), or
+    the design's placeable core area.
+
+    Hashed, and defaulted to the historical behaviour rather than to the correct one, because it
+    moves cell_size and therefore every reward and every HPWL. On adaptec1 the die canvas puts 15%
+    of its cells outside the placement rows, where a macro cannot legally sit - see
+    `Benchmark._canvas`. Runs that predate this field were all `die`, and say so."""
 
     @property
     def path(self) -> pathlib.Path:
@@ -134,6 +142,7 @@ class BenchmarkSpec:
             "netlist_digest": self.netlist_digest,
             "grid": self.grid,
             "macro_budget": self.macro_budget,
+            "canvas": self.canvas,
             "order": self.order.identity("order"),
         }
 
@@ -148,6 +157,7 @@ class BenchmarkSpec:
             "netlist_digest": self.netlist_digest,
             "grid": self.grid,
             "macro_budget": self.macro_budget,
+            "canvas": self.canvas,
             "order": self.order.to_dict(),
         }
 
@@ -159,6 +169,7 @@ class BenchmarkSpec:
             macro_budget=data.get("macro_budget"),
             order=Spec.from_dict(data.get("order", "alphabetical")),
             netlist_digest=data.get("netlist_digest"),
+            canvas=data.get("canvas", "die"),
         )
 
 
@@ -200,6 +211,16 @@ class EnvironmentSpec:
     budget: Budget
     action_mask: Spec | None = None
     initial_placement: Spec = field(default_factory=lambda: Spec("empty"))
+    legalization: Spec | None = None
+    """How a finished placement is made physically realizable before it reaches a real tool.
+
+    None is the honest default and describes every run this project has produced: legality is
+    enforced by MASKING during the episode, which makes placements legal on the GRID, and nothing
+    then reconciles them with the design's actual rows and sites. The slot exists at None so that
+    absence is recorded and hashed rather than merely unstated - the same reason
+    `initial_placement="empty"` exists - and so the day a legalizer is used, `assert_comparable`
+    refuses to put its runs in a table beside runs that had none."""
+
     physical: PhysicalSpec = field(default_factory=PhysicalSpec)
 
     def task_identity(self) -> dict:
@@ -213,6 +234,7 @@ class EnvironmentSpec:
             "reward": self.reward.identity("reward"),
             "initial_placement": self.initial_placement.identity("initial_placement"),
             "action_mask": self.action_mask.identity("action_mask") if self.action_mask else None,
+            "legalization": self.legalization.identity("legalization") if self.legalization else None,
             # The physical stack is deliberately NOT completed with its builders' defaults: those
             # signatures mix experiment settings (target_density, liberty) with this machine's
             # install paths (dreamplace_root, openroad_binary), and completing them would fold a
@@ -226,6 +248,24 @@ class EnvironmentSpec:
         """The task plus the observation: everything the agent did not choose."""
         return {**self.task_identity(), "state": self.state.identity("state")}
 
+    def protocol_identity(self) -> dict:
+        """The environment with the DESIGN removed - what a multi-design suite holds fixed.
+
+        Every axis except which netlist it was run on: grid, macro budget, canvas, placement
+        order, reward, observation, action mask, warm start, legalization, physical stack and
+        compute budget. Two runs on adaptec1 and bigblue1 can never share an `environment_hash` -
+        they are different designs, by construction - so without this a suite has no invariant to
+        assert at all, and "we ran the same experiment on five benchmarks" stays a claim rather
+        than a check.
+        """
+        identity = self.identity()
+        benchmark = dict(identity["benchmark"])
+        # The design's own identity is what varies across a suite; everything about HOW it is set
+        # up must not.
+        benchmark.pop("design", None)
+        benchmark.pop("netlist_digest", None)
+        return {**identity, "benchmark": benchmark}
+
     def to_dict(self) -> dict:
         return {
             "benchmark": self.benchmark.to_dict(),
@@ -233,6 +273,7 @@ class EnvironmentSpec:
             "state": self.state.to_dict(),
             "action_mask": self.action_mask.to_dict() if self.action_mask else None,
             "initial_placement": self.initial_placement.to_dict(),
+            "legalization": self.legalization.to_dict() if self.legalization else None,
             "physical": self.physical.to_dict(),
             "budget": self.budget.to_dict(),
         }
@@ -245,6 +286,7 @@ class EnvironmentSpec:
             state=Spec.from_dict(data["state"]),
             action_mask=Spec.from_dict(data.get("action_mask")),
             initial_placement=Spec.from_dict(data.get("initial_placement", "empty")),
+            legalization=Spec.from_dict(data.get("legalization")),
             physical=PhysicalSpec.from_dict(data.get("physical")),
             budget=Budget.from_dict(data["budget"]),
         )
@@ -300,8 +342,14 @@ def _hash(data: dict) -> str:
     return hashlib.sha256(_canonical_json(data).encode()).hexdigest()[:12]
 
 
-COMPARISON_LEVELS = ("benchmark", "task", "environment", "full")
-"""Increasingly strict definitions of "the same run setup" - see this module's docstring."""
+COMPARISON_LEVELS = ("benchmark", "task", "environment", "full", "protocol")
+"""Definitions of "the same run setup" - see this module's docstring.
+
+The first four are increasingly strict and all include the design. `protocol` is the odd one and
+deliberately so: it is the environment with the DESIGN REMOVED, which is what a suite of runs
+across several benchmarks shares. It is not stricter or looser than the others, it is orthogonal,
+and a multi-design study asserts both - `environment` within each design, `protocol` across them.
+"""
 
 
 def _unwrap_manifest(data: dict) -> dict:
@@ -348,6 +396,14 @@ class ExperimentConfig:
         """
         return _hash(self.environment.identity())
 
+    def protocol_hash(self) -> str:
+        """Identifies the experimental protocol, independent of which design it ran on.
+
+        The invariant a multi-design suite asserts across its designs, while still asserting
+        `environment_hash` among the agents within each one.
+        """
+        return _hash(self.environment.protocol_identity())
+
     def full_hash(self) -> str:
         """Identifies the exact run, agent and seed included."""
         return _hash({"environment": self.environment.identity(),
@@ -362,6 +418,7 @@ class ExperimentConfig:
         return {
             "benchmark": self.benchmark_hash, "task": self.task_hash,
             "environment": self.environment_hash, "full": self.full_hash,
+            "protocol": self.protocol_hash,
         }[level]()
 
     # ------------------------------------------------------------ serialization
@@ -379,6 +436,7 @@ class ExperimentConfig:
             # Derived, and written out so a results file carries them without anyone
             # needing to re-derive them or import this module to read it.
             "benchmark_hash": self.benchmark_hash(),
+            "protocol_hash": self.protocol_hash(),
             "task_hash": self.task_hash(),
             "environment_hash": self.environment_hash(),
             "full_hash": self.full_hash(),
@@ -423,6 +481,7 @@ _LEVEL_IDENTITY = {
     "environment": lambda config: config.environment.identity(),
     "full": lambda config: {"environment": config.environment.identity(),
                             "agent": config.agent.identity(), "seed": config.seed},
+    "protocol": lambda config: config.environment.protocol_identity(),
 }
 
 

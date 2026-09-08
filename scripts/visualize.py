@@ -14,7 +14,9 @@ from placax_viz.curves import plot_training_curves
 from placax_viz.masks import plot_observation_channels
 from placax_viz.placement import save_placement_image
 from placax_viz.rollout import collect_placement_history
-from scripts.presets import PRESETS
+from placax_agents.experiment.build import build
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS
+from scripts.presets import config_for
 
 import jax.numpy as jnp
 from jax import random
@@ -23,7 +25,13 @@ from jax import random
 def _parse_args(argv: list[str]):
     parser = argparse.ArgumentParser(description="Visualize a training run's progress and placements.")
     parser.add_argument("--benchmark_dir", type=pathlib.Path, default=pathlib.Path("benchmarks/adaptec1"))
-    parser.add_argument("--preset", choices=sorted(PRESETS), default="training")
+    parser.add_argument("--preset", choices=sorted(OUTPUT_SUBDIRS), default="training")
+    parser.add_argument(
+        "--config", type=pathlib.Path, default=None,
+        help="A run's manifest.json (or a bare ExperimentConfig JSON). STRONGLY PREFERRED over "
+             "--preset: it rebuilds the exact environment the checkpoint was trained in, warm "
+             "start included. --preset and --macro_budget are ignored when this is given.",
+    )
     parser.add_argument(
         "--macro_budget", type=str, default=None,
         help='--preset=maskplace only: macro budget it was trained with (default: that script\'s own '
@@ -39,18 +47,28 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--gif", action="store_true", help="Also render a placement-progress GIF (one extra rollout).")
     args = parser.parse_args(argv[1:])
 
-    default_subdir, setup_fn = PRESETS[args.preset]
-    run_dir = args.run_dir or args.benchmark_dir / default_subdir
-    output_dir = args.output_dir or run_dir
-    macro_budget = None if args.macro_budget is None or args.macro_budget.lower() == "all" else int(args.macro_budget)
-    return args.benchmark_dir, run_dir, output_dir, args.gif, setup_fn, macro_budget
+    run_dir = args.run_dir or args.benchmark_dir / OUTPUT_SUBDIRS[args.preset]
+    args.run_dir = run_dir
+    args.output_dir = args.output_dir or run_dir
+    args.macro_budget = (
+        None if args.macro_budget is None or args.macro_budget.lower() == "all"
+        else int(args.macro_budget)
+    )
+    return args
 
 
 def main() -> None:
     Log.configure()
-    benchmark_dir, run_dir, output_dir, want_gif, setup_fn, macro_budget = _parse_args(sys.argv)
+    args = _parse_args(sys.argv)
+    benchmark_dir, run_dir, output_dir, want_gif = (
+        args.benchmark_dir, args.run_dir, args.output_dir, args.gif
+    )
     checkpoint_path = run_dir / "checkpoint.bin"
     log_path = run_dir / "training_log.jsonl"
+    # A run writes its own manifest beside its checkpoint, so prefer that over a preset name
+    # without making the caller type it out.
+    config_path = args.config or (run_dir / "manifest.json" if (run_dir / "manifest.json").exists()
+                                  else None)
     if not checkpoint_path.exists() or not log_path.exists():
         Log.error(f"'{run_dir}' has no checkpoint.bin/training_log.jsonl - run the matching training script first.")
         sys.exit(1)
@@ -61,19 +79,23 @@ def main() -> None:
     plot_training_curves(log_path, save_path=curves_path)
     Log.info(f"wrote {curves_path}")
 
-    # 2. Everything else needs the trained policy: rebuild the matching setup (--preset), then load weights.
-    benchmark, policy, state_fn, extra_illegal_fn, optimizer = setup_fn(benchmark_dir, macro_budget)
-    obs0 = state_fn(reset(benchmark.params), benchmark.params, benchmark.sizes_array)
-    variables = policy.init(random.PRNGKey(0), obs0)
+    # 2. Everything else needs the trained policy: rebuild the environment the checkpoint was
+    #    trained in - from its own manifest where there is one - then load the weights into it.
+    config = config_for(config_path, args.preset, benchmark_dir, args.macro_budget)
+    built = build(config)
+    benchmark, policy, state_fn = built.benchmark, built.policy, built.state_fn
+    obs0 = state_fn(reset(benchmark.params, built.initial_positions), benchmark.params,
+                    benchmark.sizes_array)
+    variables = policy.init(random.PRNGKey(config.seed), obs0)
     variables, _opt_state, _running_stats, _key, iteration = open_train_state(
-        variables, random.PRNGKey(0), optimizer, checkpoint_path
+        variables, random.PRNGKey(config.seed), built.optimizer, checkpoint_path
     )
-    Log.info(f"loaded checkpoint at iteration {iteration}")
+    Log.info(f"loaded checkpoint at iteration {iteration} (run {built.config.full_hash()})")
 
     # 3. A greedy rollout, recording every intermediate step.
     history = collect_placement_history(
         variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
-        state_fn=state_fn, extra_illegal_fn=extra_illegal_fn,
+        state_fn=state_fn, extra_illegal_fn=built.extra_illegal_fn,
     )
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
 

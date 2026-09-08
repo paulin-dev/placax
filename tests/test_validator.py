@@ -103,3 +103,51 @@ def test_parse_openroad_output_no_match_returns_none_not_error() -> None:
     assert result.design_area is None
     assert result.utilization_pct is None
     assert result.timing_slack is None
+
+
+# ------------------------------------------------------------------ routing
+
+def test_routing_is_off_unless_asked_for() -> None:
+    # Detailed routing costs orders of magnitude more runtime than an area report, so it is never
+    # something a caller gets by accident.
+    script = build_openroad_script(pathlib.Path("a.def"), [pathlib.Path("t.lef")])
+    assert "global_route" not in script and "detailed_route" not in script
+
+
+def test_global_routing_stops_before_detailed() -> None:
+    script = build_openroad_script(pathlib.Path("a.def"), [pathlib.Path("t.lef")], route="global")
+    assert "global_route" in script
+    assert "detailed_route" not in script
+
+
+def test_detailed_routing_also_reports_violations() -> None:
+    # DRC is the whole point of going to detailed route: a placement with excellent wirelength
+    # that does not route cleanly has not been shown to work.
+    script = build_openroad_script(pathlib.Path("a.def"), [pathlib.Path("t.lef")], route="detailed")
+    assert "global_route" in script and "detailed_route" in script and "report_drc" in script
+
+
+def test_an_unknown_route_mode_is_refused() -> None:
+    with pytest.raises(ValueError, match="unknown route mode"):
+        build_openroad_script(pathlib.Path("a.def"), [pathlib.Path("t.lef")], route="sideways")
+
+
+def test_routing_metrics_are_parsed_when_present() -> None:
+    parsed = parse_openroad_output(
+        "Design area 1234.5 u^2 67.8% utilization\n"
+        "[INFO GRT-0018] Total wirelength: 98765 um\n"
+        "Total number of vias: 4242\n"
+        "[INFO DRT-0199] Number of violations: 0\n"
+    )
+    assert parsed.routed_wirelength == 98765.0
+    assert parsed.via_count == 4242
+    assert parsed.drc_violations == 0
+
+
+def test_routing_metrics_are_none_when_routing_did_not_run() -> None:
+    # The module's rule everywhere: a metric nobody computed comes back as None, never as a
+    # plausible-looking zero that a reader would mistake for a clean route.
+    parsed = parse_openroad_output("Design area 1234.5 u^2 67.8% utilization\n")
+    assert parsed.routed_wirelength is None
+    assert parsed.via_count is None
+    assert parsed.drc_violations is None

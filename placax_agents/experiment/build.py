@@ -18,12 +18,13 @@ from placax.log import Log  # must precede jax imports
 from placax.netlist.order import alphabetical_order
 from placax_agents.agents.base import Agent
 from placax_agents.agents.baselines import GreedyWiremaskAgent, RandomSearchAgent
+from placax_agents.agents.genetic import GeneticAgent
 from placax_agents.agents.ppo import PPOAgent
 from placax_agents.benchmark import Benchmark
 from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.registry import (
-    CELL_PLACERS, INITS, MASKS, OPTIMIZERS, ORDERS, POLICIES, REWARDS, STATES, VALIDATORS,
-    VALUE_LOSSES, resolve,
+    CELL_PLACERS, INITS, LEGALIZERS, MASKS, OPTIMIZERS, ORDERS, POLICIES, REWARDS, STATES,
+    VALIDATORS, VALUE_LOSSES, resolve,
 )
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.loops.buffered_train import buffered_train_step
@@ -168,6 +169,11 @@ class BuiltExperiment:
     optimizer: Any = None
     ppo_config: PPOConfig | None = None
     step_fn: StepFn | None = None
+    legalize_fn: Any = None
+    """The configured legalizer, or None. Applied by `experiment.export` when a placement is
+    written back into the design's own format - not during the episode, since it moves macros the
+    constructive kernel has already committed."""
+
     cell_placer: Any = None
     """Left None by build(): the physical tools are constructed by `experiment.physical`, which
     is where this machine's binary paths are known. Set it to inject a tool directly."""
@@ -219,6 +225,7 @@ def build_benchmark(config: ExperimentConfig) -> Benchmark:
     return Benchmark.load(
         spec.path, grid=spec.grid, make_reward_fn=make_reward_fn,
         order_fn=order_fn or alphabetical_order, macro_budget=spec.macro_budget,
+        canvas=spec.canvas,
     )
 
 
@@ -264,10 +271,17 @@ def _build_random_search_agent(config, benchmark, env):
     return agent, agent.population, {}
 
 
+def _build_genetic_agent(config, benchmark, env):
+    """A population that breeds - the first non-sequential algorithm family here."""
+    agent = GeneticAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
+    return agent, agent.population, {}
+
+
 AGENTS = {
     "ppo": _build_ppo_agent,
     "greedy_wiremask": _build_greedy_wiremask_agent,
     "random_search": _build_random_search_agent,
+    "genetic": _build_genetic_agent,
 }
 """algorithm name -> builder(config, benchmark, env) -> (agent, episodes_per_iteration, extra
 BuiltExperiment fields), where `env` is the ResolvedEnvironment every agent must run inside.
@@ -385,13 +399,18 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
         config, benchmark, jax.random.PRNGKey(config.seed)
     )
     env = ResolvedEnvironment(state_fn, extra_illegal_fn, initial_positions, n_placed)
+    legalize_fn = (
+        resolve(LEGALIZERS, config.environment.legalization, benchmark, what="legalizer")
+        if config.environment.legalization is not None else None
+    )
 
     algorithm = config.agent.algorithm
     if algorithm.name not in AGENTS:
         raise KeyError(
             f"unknown algorithm {algorithm.name!r}; registered: {', '.join(sorted(AGENTS))}. "
-            f"SHAC needs a differentiable action space the sequential integer-grid kernel does "
-            f"not provide - see docs/JAX_Placement_Environment_Spec.md \u00a712."
+            f"SHAC needs a continuous action space, a smoothed wirelength and a differentiable "
+            f"density term; the second of those now exists (the `smoothed` reward) and the other "
+            f"two do not - see docs/Action_Space_Decision.md."
         )
     agent, episodes, extras = AGENTS[algorithm.name](config, benchmark, env)
 
@@ -404,5 +423,6 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     return BuiltExperiment(
         config=config, benchmark=benchmark, state_fn=state_fn,
         extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=episodes,
-        initial_positions=initial_positions, n_placed=n_placed, agent=agent, **extras,
+        initial_positions=initial_positions, n_placed=n_placed, agent=agent,
+        legalize_fn=legalize_fn, **extras,
     )

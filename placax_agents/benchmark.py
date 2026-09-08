@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from placax.core import reset  # must precede jax imports
 from placax.netlist import load_die_size, load_netlist
+from placax.netlist.rows import PlacementRows, load_placement_rows
 from placax.netlist.budget import freeze_order, truncate_to_budget
 from placax.netlist.digest import netlist_digest
 from placax.netlist.order import alphabetical_order
@@ -20,6 +21,9 @@ import jax
 
 RewardFnFactory = Callable[[jax.Array, jax.Array, jax.Array, jax.Array, float], RewardFn]
 """Builds a RewardFn from padded pin/size arrays and cell size; result expects grid-unit centers."""
+
+CANVASES = ("die", "core")
+"""What the grid is scaled and anchored to - see Benchmark._canvas for why both exist."""
 
 
 @dataclass(frozen=True)
@@ -40,6 +44,21 @@ class Benchmark:
     """Content hash of the netlist as loaded, BEFORE any macro-budget truncation - so it
     identifies the design itself, with budget and order recorded separately as the independent
     axes they are. This is what BenchmarkSpec records instead of trusting a filesystem path."""
+
+    origin: tuple[float, float] = (0.0, 0.0)
+    """Real-unit position of grid cell (0, 0). Zero for the `die` canvas, the core area's lower-left
+    corner for the `core` one.
+
+    Deliberately NOT applied inside the environment: HPWL is translation-invariant, so adding a
+    constant to every macro cannot change a reward, a wiremask or a legality check, and threading
+    it through the jitted paths would buy nothing. It is applied where it actually matters - when a
+    placement is written back out to a real design file (`experiment.export`), which is the one
+    place a coordinate has to mean something to a tool other than this one."""
+
+    rows: PlacementRows | None = None
+    """The design's placement rows, when its format carries them. None for protobuf, and for a
+    Bookshelf directory with no .scl - in which case no legalizer can run and `canvas="core"`
+    cannot be honored."""
 
     @staticmethod
     def _load_and_truncate(
@@ -68,6 +87,7 @@ class Benchmark:
         make_reward_fn: RewardFnFactory = make_scaled_hpwl_reward,
         order_fn: OrderFn = alphabetical_order,
         macro_budget: int | None = None,
+        canvas: str = "die",
     ) -> "Benchmark":
         """Loads a netlist directory into a fully-built, ready-to-train Benchmark."""
         # 1. Load the netlist, optionally truncated to a macro budget, with its frozen ordering.
@@ -85,16 +105,54 @@ class Benchmark:
         # sizing the canvas from the placed macros' own area (which has no relation to the real die, and
         # can't account for anything this run isn't placing) when no real die size is available at all.
         params = EnvParams(grid=grid, n_macros=len(macro_sizes))
-        if die_size is not None:
-            cell_size = die_size / grid
-        else:
-            cell_size = compute_grid_scale(sizes_array, params.grid_x, params.effective_grid_y)
+        rows = load_placement_rows(benchmark_dir)
+        cell_size, origin = cls._canvas(canvas, grid, params, sizes_array, die_size, rows,
+                                        benchmark_dir)
         # 4. Build the reward function for this specific netlist's wiring.
         reward_fn = make_reward_fn(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size)
         return cls(
             macro_sizes, nets, params, sizes_array, cell_size, reward_fn,
-            padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx, digest,
+            padded_pin_idx, padded_pin_offset, valid_mask, name_to_idx, digest, origin, rows,
         )
+
+    @staticmethod
+    def _canvas(canvas, grid, params, sizes_array, die_size, rows, benchmark_dir):
+        """(cell_size, origin) for the named canvas - what one grid cell is worth, and where the
+        grid's (0, 0) sits in the real design.
+
+        Two options, because the honest one and the reproducible one are not the same thing:
+
+        `die` (default) is the historical behaviour and MaskPlace's own: the canvas is the die
+        extent, anchored at the origin. It is what every result in this project so far was
+        produced under, and changing it silently would invalidate them without saying so.
+
+        `core` is the correct one, and measurably so. On adaptec1 the die canvas spans 0..11589
+        while the placeable rows only span 459..11151 - so 17 of 224 grid columns and 17 of 224
+        rows land outside the core entirely, and the action space is free to choose them. That is
+        15% of the canvas on which a macro cannot legally sit. `core` scales the grid to the row
+        region and anchors it there, so every cell the agent can pick is inside the placeable
+        area.
+
+        The choice is a hashed field on BenchmarkSpec rather than a fix applied silently, because
+        it changes cell_size and therefore every reward, every HPWL and every hash.
+        """
+        if canvas not in CANVASES:
+            raise ValueError(
+                f"unknown canvas {canvas!r}; choose one of {', '.join(sorted(CANVASES))}"
+            )
+        if canvas == "core":
+            if rows is None:
+                raise ValueError(
+                    f"canvas='core' needs the design's placement rows, and {benchmark_dir} "
+                    f"carries none (a protobuf netlist, or a Bookshelf directory with no .scl). "
+                    f"Use canvas='die'."
+                )
+            return rows.span / grid, (rows.x0, rows.y0)
+        if die_size is not None:
+            return die_size / grid, (0.0, 0.0)
+        # No physical dimensions at all: fall back to sizing the canvas from macro area, which has
+        # no relation to a real die and therefore no meaningful origin either.
+        return compute_grid_scale(sizes_array, params.grid_x, params.effective_grid_y), (0.0, 0.0)
 
     @property
     def state_fn(self) -> StateFn:

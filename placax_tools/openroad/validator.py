@@ -1,9 +1,27 @@
-"""OpenROAD-specific Validator: area/utilization always computed, timing only if liberty + clock are given."""
+"""OpenROAD-specific Validator: area/utilization always; timing and routing only when asked for.
+
+**Routing is why this matters.** Every number this project reports is a half-perimeter proxy, and
+ChiPBench's finding is that proxy rankings do not survive a real flow - two placements can swap
+order once they are actually routed. `route="global"` reports the routed wirelength HPWL is a
+proxy for; `route="detailed"` additionally reports DRC violations, which is where a placement with
+excellent wirelength turns out to be unroutable.
+
+**The output regexes below are unverified against a real OpenROAD run**, for the same reason the
+rest of the physical path is: no DEF/LEF design ships here and OpenROAD is not a dependency. They
+degrade the way this module already degrades everywhere else - a pattern that does not match
+yields None, never a plausible-looking substitute for a number nobody measured. Someone with a
+real design should check them against their tool's actual report text before trusting a value.
+"""
 import pathlib
 import re
 import subprocess
 
 from placax_tools.validator import PPAResult, Validator
+
+
+ROUTE_MODES = (None, "global", "detailed")
+"""How far to route before measuring. `global` gives routed wirelength; `detailed` additionally
+gives DRC violations, at substantially more runtime."""
 
 
 def build_openroad_script(
@@ -13,8 +31,14 @@ def build_openroad_script(
     clock_period_ns: float | None = None,
     wire_rc_layer: str = "metal3",
     clock_name: str = "core_clock",
+    route: str | None = None,
 ) -> str:
-    """Builds OpenROAD TCL for area reports, plus timing if both liberty_path and clock_period_ns are given."""
+    """Builds OpenROAD TCL: area always, timing if liberty+clock are given, routing if asked."""
+    if route not in ROUTE_MODES:
+        raise ValueError(
+            f"unknown route mode {route!r}; choose one of "
+            f"{', '.join(repr(mode) for mode in ROUTE_MODES)}"
+        )
     # 1. Load the physical design: tech/cell LEFs, then the placed DEF.
     lines = [f"read_lef {p}" for p in lef_paths]
     lines.append(f"read_def {def_path}")
@@ -28,23 +52,43 @@ def build_openroad_script(
         lines.append("estimate_parasitics -placement")
         lines.append("report_checks -path_delay max")
 
+    # 3. Route, if asked. Global route is enough for a routed-wirelength number; detailed route is
+    #    what produces real DRC violations, and costs far more time.
+    if route is not None:
+        lines.append("global_route")
+        if route == "detailed":
+            lines.append("detailed_route")
+            lines.append("report_drc")
+
     return "\n".join(lines) + "\n"
 
 
 _AREA_RE = re.compile(r"Design area\s+([\d.]+)\s+u\^2\s+([\d.]+)%\s+utilization")
 _SLACK_RE = re.compile(r"slack\s+\(?(?:MET|VIOLATED)?\)?\s*(-?[\d.]+)", re.IGNORECASE)
+_WIRELENGTH_RE = re.compile(r"Total wire ?length:?\s*([\d.]+)", re.IGNORECASE)
+_VIAS_RE = re.compile(r"Total number of vias:?\s*(\d+)", re.IGNORECASE)
+_DRC_RE = re.compile(r"(?:total\s+)?violations?(?:\s+found)?:?\s*(\d+)", re.IGNORECASE)
 
 
 def parse_openroad_output(raw_output: str) -> PPAResult:
-    """Extracts what's actually there in raw_output: area/utilization always, timing slack only if it ran."""
-    # Search rather than require a match, since timing lines may simply be absent.
+    """Extracts what is actually present: area always, timing and routing only if they ran.
+
+    Every field is a `search`, not a `match`, and every miss becomes None - a validator that
+    reports a number nobody computed is worse than one that reports nothing.
+    """
     area_match = _AREA_RE.search(raw_output)
     slack_match = _SLACK_RE.search(raw_output)
+    wirelength_match = _WIRELENGTH_RE.search(raw_output)
+    vias_match = _VIAS_RE.search(raw_output)
+    drc_match = _DRC_RE.search(raw_output)
     return PPAResult(
         design_area=float(area_match.group(1)) if area_match else None,
         utilization_pct=float(area_match.group(2)) if area_match else None,
         timing_slack=float(slack_match.group(1)) if slack_match else None,
         raw_output=raw_output,
+        routed_wirelength=float(wirelength_match.group(1)) if wirelength_match else None,
+        via_count=int(vias_match.group(1)) if vias_match else None,
+        drc_violations=int(drc_match.group(1)) if drc_match else None,
     )
 
 
@@ -58,12 +102,16 @@ class OpenROADValidator(Validator):
         wire_rc_layer: str = "metal3",
         clock_name: str = "core_clock",
         openroad_binary: str = "openroad",
+        route: str | None = None,
     ):
         self.liberty_path = liberty_path
         self.clock_period_ns = clock_period_ns
         self.wire_rc_layer = wire_rc_layer
         self.clock_name = clock_name
         self.openroad_binary = openroad_binary
+        # Part of the experiment, not of this machine: routing changes the result, so it belongs
+        # in the validator Spec's kwargs and therefore in the environment hash.
+        self.route = route
 
     def _write_script(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
@@ -73,7 +121,7 @@ class OpenROADValidator(Validator):
         script_path.write_text(
             build_openroad_script(
                 def_path, lef_paths, self.liberty_path, self.clock_period_ns,
-                self.wire_rc_layer, self.clock_name,
+                self.wire_rc_layer, self.clock_name, self.route,
             )
         )
         return script_path

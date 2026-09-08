@@ -152,6 +152,10 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
         budget.py                    truncate_to_budget() — keep only the first N macros by order_fn
         digest.py                    netlist_digest() — content hash of a parsed netlist, so a run
                                       records WHICH design it used rather than where it was mounted
+        rows.py                      PlacementRows — the design's placement rows and core area,
+                                      from Bookshelf .scl or DEF ROW. Defines what "legal" means
+                                      physically (Section 5.3b), and what the `core` canvas is
+                                      scaled and anchored to
     extras/
         rewards.py                   hpwl(), wiremask() (macro_idx=), lookahead_wiremasks(),
                                       make_hpwl_reward(...), smoothed_wirelength()/
@@ -173,8 +177,12 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
                                      contracts (Section 5.1)
     agents/
         base.py                       the Agent protocol: init/update/best_positions/converged
+        environment_bound.py          the environment half every agent must honor - observation,
+                                       action mask, warm start, configured reward - in one place
         ppo.py                        PPOAgent — a policy, an optimizer and a loop behind that seam
         baselines.py                  GreedyWiremaskAgent, RandomSearchAgent — no parameters at all
+        genetic.py                    GeneticAgent — a population method, and the first agent here
+                                       from a non-sequential family (Section 12's GA arm)
     experiment/                     the reproducibility layer (Section 4.3)
         config.py                     ExperimentConfig, EnvironmentSpec/AgentSpec/PhysicalSpec,
                                        the four hash levels, assert_comparable
@@ -198,6 +206,9 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
         scale.py                      grid-cell <-> real-unit conversion
         architectures/
             cnn.py                      CNNActorCritic
+            mlp.py                      MLPActorCritic — reads raw coordinates instead of the
+                                         canvas image; the non-CNN arm of Section 12's
+                                         state-representation comparison
             wiremask_cnn.py             WiremaskCNNActorCritic (pairs with make_wiremask_observation)
             resnet_cnn.py               ResNetCoarseFineActorCritic — injected (optionally ImageNet-
                                          pretrained) ResNet coarse branch + fine branch (Section 8)
@@ -336,6 +347,40 @@ Two honest limits on the new pair. RUDY is a pre-routing proxy that knows nothin
 
 **Not yet implemented:** an `init_fn(netlist, key) -> initial_positions` layer with actual heuristics behind it — a fast classical method (simulated annealing, spectral/quadratic placement), output from an existing analytical placer (coarse DREAMPlace pass treating macros as large cells), or a learned model trained to predict good starting positions. Tests whether a free, open-source warm start can recover the benefit Circuit Training gets from a commercial one — flagged but never rigorously answered in earlier scoping, and still open.
 
+### 5.3b Placement rows, the canvas, and legalization — added after the audit
+
+**Measured first, because the size of the problem decided the shape of the fix.** Nothing here
+read a placement row until this section existed: `.scl` was carried around as a filename, DEF's
+`ROW` statements were never parsed, and macro positions were exported at whatever real coordinate
+`grid_index * cell_size` produced. On adaptec1:
+
+| canvas | legalizer | macros not on a legal row | max displacement to fix |
+|---|---|---|---|
+| `die` | none | **543 / 543** | — |
+| `die` | `row_snap` | 543 → 0 | 649.12 units (3.6 grid cells) |
+| `core` | `row_snap` | 542 → 0 | **6.02 units** (0.036 grid cells) |
+
+Two distinct problems, and they are coupled:
+
+**The canvas anchor** (`BenchmarkSpec.canvas`, hashed). The die extent runs 0..11589 while the
+placeable rows only span 459..11151, so 17 of 224 grid columns and 17 of 224 rows — about 15% of
+the canvas — lie outside the core entirely, and the action space could choose them freely. `die`
+is the historical behaviour and MaskPlace's own, and stays the default so existing results keep
+meaning what they meant; `core` scales and anchors the grid to the row region. It is an axis
+rather than a silent correction because it moves `cell_size` and therefore every reward and every
+hash.
+
+**Legalization** (`EnvironmentSpec.legalization`, hashed, default `None`). Masking makes a
+placement legal on the GRID; nothing reconciled it with rows and sites. `LEGALIZERS["row_snap"]`
+does, and `experiment.export` reports how far it had to move things — the displacement column
+above is what makes "this is a rounding error" or "this is a different placement" a number rather
+than a belief. It runs at export, not inside the episode, because it moves already-placed macros,
+which the constructive kernel has no action for; that makes it a fourth consumer of the
+`ActionSpace` generalization in `docs/Action_Space_Decision.md`.
+
+`None` is a real, recorded value: every run before this legalized nothing, and the config now says
+so rather than being silent about it.
+
 ### 5.4 The cell placer
 
 `(macro_positions, netlist) -> full_placement`, called after the agent finishes placing macros. Wrapper: `placax_tools/dreamplace/cell_placer.py`. **Default: DREAMPlace** — free, open-source, GPU-accelerated, field standard. Any tool implementing the same interface substitutes: RePlAce, AutoDMP, a commercial placer.
@@ -343,6 +388,14 @@ Two honest limits on the new pair. RUDY is a pre-routing proxy that knows nothin
 ### 5.5 The validator
 
 `full_placement -> true_PPA_metrics`, called occasionally (not every training step). Wrapper: `placax_tools/openroad/validator.py`. **Default: OpenROAD-flow-scripts** — the only broadly-accessible full RTL-to-GDSII flow for labs without commercial signoff licenses.
+
+**Routing is part of this box, not a separate one.** `OpenROADValidator(route="global")` reports
+routed wirelength — the number every HPWL here is a proxy FOR — and `route="detailed"` adds DRC
+violations, which is where a placement with excellent wirelength turns out to be unroutable. That
+is exactly ChiPBench's finding, and a validator unable to report it leaves this project open to
+the criticism it exists to make. `route` is part of the validator's Spec kwargs and therefore
+hashed. The output regexes are **unverified against a real OpenROAD run** and degrade to None
+rather than to a plausible-looking number.
 
 **PPA-truth-checking** (does the fast proxy still predict real PPA) is in scope. **Functional/logical verification** (does the chip work — simulation, formal methods, 60–70%+ of a real project's time) is a separate process, not touched at all.
 
@@ -633,11 +686,12 @@ Exact matches aren't the goal — training randomness means results differ — b
 
 - **Core experiment:** PPO vs. SHAC, matched compute, multiple seeds — is analytic policy-gradient training viable for placement, or does gradient "stiffness" near overlap dominate?
 - **Reward comparisons:** HPWL vs. HPWL+congestion vs. a learned predictor, agent held fixed.
-- **Algorithm-family comparisons:** PPO/SHAC vs. ACO vs. GA, reward and benchmark held fixed — does BBOPlace-Bench's finding (evolutionary/BBO beats RL on several benchmarks) extend to ACO/GA specifically?
-- **State-representation comparisons:** raw coordinates vs. image (CNN) vs. graph (GNN), algorithm held fixed — isolates what most papers change simultaneously with the algorithm, per Section 1's framing.
+- **Algorithm-family comparisons:** PPO/SHAC vs. ACO vs. GA, reward and benchmark held fixed — does BBOPlace-Bench's finding (evolutionary/BBO beats RL on several benchmarks) extend to ACO/GA specifically? **The GA arm is shipped** (`agents/genetic.py`, `AGENTS["genetic"]`): a population over placement preferences decoded through the run's own legality mask, so the search cannot express an illegal placement. ACO and SHAC remain unbuilt.
+- **State-representation comparisons:** raw coordinates vs. image (CNN) vs. graph (GNN), algorithm held fixed — isolates what most papers change simultaneously with the algorithm, per Section 1's framing. **The coordinate arm is shipped** (`policy/architectures/mlp.py`, `POLICIES["mlp"]`). Note this comparison runs on the POLICY axis rather than on `state`: `observation()` returns both an image and the coordinates, and each architecture consumes the subset it wants — so two arms share an environment exactly and the study holds at `environment_hash`, which is stronger than the `task_hash` this document originally anticipated. A GNN arm is still missing.
 - **Regime comparisons:** online from-scratch vs. offline-pretrained-then-fine-tuned, algorithm and reward held fixed — tests whether ChiPFormer's offline advantage holds once it's not confounded with everything else ChiPFormer also changes.
 - **Initial-placement comparisons:** does a free warm start recover Circuit Training's commercial-tool advantage?
 - **Seed-variance/legality auditing:** with this environment's speed, a proper 20+-seed, compute-matched variance study — currently missing from the field for any placement method.
+- **Multi-design suites:** `scripts/compare_agents.py --benchmark_dirs=a,b,c` runs one protocol across several designs, asserting `environment` within each design and the new `protocol` level (the environment with the design removed) across them, then aggregates by mean rank. Ranking rather than averaging is the point: HPWL is not comparable between designs, so a mean of it is decided by whichever design is largest.
 
 ---
 
