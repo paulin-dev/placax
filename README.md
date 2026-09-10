@@ -33,6 +33,8 @@ GitHub desc: A shared, fast JAX environment for chip macro placement
 pip install placax
 ```
 
+`docs/Reference.md` is the compact map — directories, the registries and their keys, the classes you touch when running research, and what a run writes. `docs/JAX_Placement_Environment_Spec.md` is the long-form design.
+
 ## Experiments
 
 Every run is described by one `ExperimentConfig` and executed by one shared loop, so two runs can

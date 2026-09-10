@@ -235,3 +235,8 @@ benchmarks/*/output*/
 # external repo (with its own git history and submodules) and compiled build output, never ours
 # to track. Not tied to the "DREAMPlace" name specifically since --dreamplace_root is configurable.
 placax_tools/dreamplace/DREAMPlace/
+
+# Experiment output: manifests, logs, checkpoints and results.json, written by
+# scripts/run_*.py and scripts/compare_agents.py. Reproducible from the configs they record,
+# and checkpoints run to hundreds of MB - so the record is the config, not the artifact.
+runs/

@@ -4,10 +4,18 @@ An ExperimentConfig has to survive a round trip through a results file, which me
 registry keys and JSON scalars but not live Python objects. This module is the lookup that turns
 `Spec("wiremask_quality", {"margin": 1.0})` back into the actual function.
 
-Adding a component means adding one entry here. Nothing else in the experiment machinery needs to
-know it exists, and every script that consumes configs gains it at once - which is the whole
-point of routing both training scripts through one registry instead of letting each hardcode its
-own choices.
+Adding a component means adding one entry. Nothing else in the experiment machinery needs to know
+it exists, and every script that consumes configs gains it at once - which is the whole point of
+routing both training scripts through one registry instead of letting each hardcode its own
+choices.
+
+**These registries are OPEN, and the tables below are defaults rather than a closed set.** The
+project's rule is that anything a different team might do differently is a parameter, not a
+hard-coded call - so a reward, a state representation, a policy, an agent or an action space of
+your own is an ordinary Python function you `register()` from your own code. Nothing in this file
+needs editing. See `register` at the bottom, and `docs/Reference.md` for the two routes: register
+a name (so a config can select it and round trip through JSON), or hand a live object straight to
+`build()`/`run_experiment()` for a one-off that never needs to be written down.
 """
 from placax.extras.masks import regularity_cost, regularity_max  # noqa: F401  must precede jax imports
 from placax.log import Log
@@ -499,12 +507,79 @@ VALIDATORS = {"openroad": _validator_openroad}
 VALUE_LOSSES = {"mse": mse_value_loss, "huber": huber_value_loss}
 
 
+SLOTS = {
+    "order": "ORDERS", "reward": "REWARDS", "state": "STATES", "action_mask": "MASKS",
+    "initial_placement": "INITS", "action_space": "ACTION_SPACES", "legalization": "LEGALIZERS",
+    "cell_placer": "CELL_PLACERS", "validator": "VALIDATORS", "policy": "POLICIES",
+    "optimizer": "OPTIMIZERS", "value_loss": "VALUE_LOSSES",
+    # These two live in build.py, next to the machinery they construct.
+    "algorithm": "AGENTS", "loop": "LOOPS",
+}
+"""Config field -> the registry that field's names are looked up in. What `register` dispatches on."""
+
+
+def _registry_for(slot: str) -> dict:
+    if slot not in SLOTS:
+        raise KeyError(f"unknown slot {slot!r}; choose one of {', '.join(sorted(SLOTS))}")
+    name = SLOTS[slot]
+    if name in ("AGENTS", "LOOPS"):
+        # By module path, not `from ... import build`: the package's __init__ re-exports `build`
+        # the FUNCTION, which would shadow the module and make this an AttributeError.
+        import importlib
+
+        return getattr(importlib.import_module("placax_agents.experiment.build"), name)
+    return globals()[name]
+
+
+def register(slot: str, name: str, builder) -> None:
+    """Add a component of your own, from your own code, without editing this file.
+
+    The registries are open, and this is the supported way in. A research script defines its
+    reward (or state, policy, agent, action space...) as an ordinary function and registers it
+    under a name; from then on a config can select it exactly like a shipped one, and it round
+    trips through JSON like a shipped one, because a config holds names and not objects.
+
+        from placax_agents.experiment.registry import register
+
+        def my_reward(grid, weight: float = 2.0):
+            return functools.partial(make_scaled_hpwl_reward, dense=True, reward_scale=weight)
+
+        register("reward", "my_reward", my_reward)
+        config = presets.training(..., )  # then Spec("my_reward", {"weight": 3.0})
+
+    Use this rather than mutating the dict directly: `defaults_for` memoizes what it finds, so a
+    name that was hashed before it existed would keep hashing against an empty default set. This
+    clears that cache; a bare `REWARDS[name] = fn` does not.
+
+    **The reproducibility caveat, stated plainly.** A config records the NAME. Two runs whose
+    configs both say `my_reward` compare as comparable, and whether they really used the same
+    function depends on the code that registered it - which the run's manifest pins only as far
+    as `fingerprint()["git_revision"]` reaches, and a script outside this repository is not in
+    that. Shipped components do not have this problem. If a custom component matters to a result,
+    version it with the same care as the result.
+    """
+    registry = _registry_for(slot)
+    if not callable(builder):
+        raise TypeError(f"a {slot} builder must be callable, got {type(builder).__name__}")
+    registry[name] = builder
+    # Defaults are memoized per (slot, name); a stale empty entry would silently change the hash.
+    from placax_agents.experiment.defaults import defaults_for
+
+    defaults_for.cache_clear()
+
+
+def registered(slot: str) -> list[str]:
+    """Every name currently available for `slot`, shipped and registered alike."""
+    return sorted(_registry_for(slot))
+
+
 def resolve(registry: dict, spec, *args, what: str = "component"):
     """Looks up spec.name in registry and calls it with spec.kwargs, with a readable error."""
     if spec.name not in registry:
         raise KeyError(
             f"unknown {what} {spec.name!r}; registered: {', '.join(sorted(registry))}. "
-            f"Add it to placax_agents/experiment/registry.py to make it available to every "
-            f"script that consumes experiment configs."
+            f"Register your own from your own code with "
+            f"placax_agents.experiment.registry.register('<slot>', {spec.name!r}, builder) - "
+            f"the registries are open, and nothing here needs editing to add one."
         )
     return registry[spec.name](*args, **spec.kwargs)
