@@ -19,12 +19,13 @@ from placax.netlist.order import alphabetical_order
 from placax_agents.agents.base import Agent
 from placax_agents.agents.baselines import GreedyWiremaskAgent, RandomSearchAgent
 from placax_agents.agents.genetic import GeneticAgent
+from placax_agents.agents.local_search import LocalSearchAgent
 from placax_agents.agents.ppo import PPOAgent
 from placax_agents.benchmark import Benchmark
 from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.registry import (
-    CELL_PLACERS, INITS, LEGALIZERS, MASKS, OPTIMIZERS, ORDERS, POLICIES, REWARDS, STATES,
-    VALIDATORS, VALUE_LOSSES, resolve,
+    ACTION_SPACES, CELL_PLACERS, INITS, LEGALIZERS, MASKS, OPTIMIZERS, ORDERS, POLICIES,
+    REWARDS, STATES, VALIDATORS, VALUE_LOSSES, resolve,
 )
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.loops.buffered_train import buffered_train_step
@@ -135,6 +136,7 @@ class ResolvedEnvironment:
     extra_illegal_fn: Any
     initial_positions: Any
     n_placed: int
+    action_space: Any = None
 
     def as_kwargs(self) -> dict:
         return {
@@ -142,6 +144,7 @@ class ResolvedEnvironment:
             "extra_illegal_fn": self.extra_illegal_fn,
             "initial_positions": self.initial_positions,
             "n_placed": self.n_placed,
+            "action_space": self.action_space,
         }
 
 
@@ -169,6 +172,10 @@ class BuiltExperiment:
     optimizer: Any = None
     ppo_config: PPOConfig | None = None
     step_fn: StepFn | None = None
+    action_space: Any = None
+    """What an action is and what it does - `DiscreteGridPlacement` unless the config says
+    otherwise. Part of the environment, so every agent in a comparison gets the same one."""
+
     legalize_fn: Any = None
     """The configured legalizer, or None. Applied by `experiment.export` when a placement is
     written back into the design's own format - not during the episode, since it moves macros the
@@ -192,6 +199,8 @@ class BuiltExperiment:
         30 of 543 macros buys proportionally more episodes for the same env_step budget rather
         than being billed for placements nobody made.
         """
+        if self.action_space is not None:
+            return self.action_space.episode_length(self.benchmark.params, self.n_placed)
         return self.n_macros - self.n_placed
 
     @property
@@ -229,8 +238,34 @@ def build_benchmark(config: ExperimentConfig) -> Benchmark:
     )
 
 
+CELL_ONLY = ("discrete_grid",)
+"""Spaces whose action is exactly a grid cell - what a `(grid_x, grid_y)` logits map can express."""
+
+CONSTRUCTIVE = ("discrete_grid", "oriented_grid")
+"""Spaces that place macros one at a time, in order. The GA decodes to a cell plus an optional
+turn, so it drives both; the policy-based and cell-sampling agents drive only the first."""
+
+
+def _require_space(name: str, env, allowed: tuple[str, ...]) -> None:
+    """Refuse a space whose action this agent's own output cannot express.
+
+    A policy emitting `(grid_x, grid_y)` logits has no way to name a macro to move or a turn to
+    apply. Feeding its 2-vector to a space expecting three would place macros at coordinates read
+    off a macro index - wrong, and silently so.
+    """
+    space = getattr(env.action_space, "name", "discrete_grid")
+    if space not in allowed:
+        raise ValueError(
+            f"agent {name!r} produces an action this action space cannot use: it drives "
+            f"{' or '.join(repr(one) for one in allowed)}, and this config asks for {space!r}. "
+            f"Use an agent built for that space (e.g. 'local_search' for 'perturbation'), or "
+            f"change EnvironmentSpec.action_space. See placax/action_space.py."
+        )
+
+
 def _build_ppo_agent(config, benchmark, env):
     """PPO's own pieces - policy, optimizer, loop - assembled behind the Agent seam."""
+    _require_space("ppo", env, CELL_ONLY)
     policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
     ppo_config = build_ppo_config(config.agent.algorithm)
 
@@ -261,24 +296,41 @@ def _build_ppo_agent(config, benchmark, env):
 
 def _build_greedy_wiremask_agent(config, benchmark, env):
     """One deterministic pass, so one episode per iteration and nothing to carry."""
+    _require_space("greedy_wiremask", env, CELL_ONLY)
     agent = GreedyWiremaskAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
     return agent, 1, {}
 
 
 def _build_random_search_agent(config, benchmark, env):
     """A population of random legal placements per iteration; keeps the best seen."""
+    _require_space("random_search", env, CELL_ONLY)
     agent = RandomSearchAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
     return agent, agent.population, {}
 
 
 def _build_genetic_agent(config, benchmark, env):
     """A population that breeds - the first non-sequential algorithm family here."""
+    _require_space("genetic", env, CONSTRUCTIVE)
     agent = GeneticAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
     return agent, agent.population, {}
 
 
+def _build_local_search_agent(config, benchmark, env):
+    """One annealing episode per iteration, over the perturbation space it requires."""
+    space = getattr(env.action_space, "name", "discrete_grid")
+    if space != "perturbation":
+        raise ValueError(
+            f"agent 'local_search' moves macros that are already placed, which only the "
+            f"'perturbation' action space can express - this config asks for {space!r}. Set "
+            f"EnvironmentSpec.action_space to Spec('perturbation')."
+        )
+    agent = LocalSearchAgent(benchmark, **env.as_kwargs(), **config.agent.algorithm.kwargs)
+    return agent, 1, {}
+
+
 AGENTS = {
     "ppo": _build_ppo_agent,
+    "local_search": _build_local_search_agent,
     "greedy_wiremask": _build_greedy_wiremask_agent,
     "random_search": _build_random_search_agent,
     "genetic": _build_genetic_agent,
@@ -294,7 +346,8 @@ against, while `assert_comparable` still reports the two environments as identic
 negative in exactly the check this machinery exists to provide."""
 
 
-def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, key):
+def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, key,
+                              action_space=None):
     """The run's warm start, resolved once: (initial_positions, how many macros it placed).
 
     Once, not per episode, for two reasons. The number of macros left to place has to be a
@@ -308,10 +361,19 @@ def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, ke
     if initial_positions is None:
         return None, 0
     n_placed = int((initial_positions[:, 0] >= 0).sum())
-    if n_placed >= benchmark.params.n_macros:
+    # "Everything is already placed" is only a mistake for a CONSTRUCTIVE space, where it leaves
+    # the agent nothing to append. A perturbation space requires exactly that - there is nothing
+    # to move otherwise - so the question to ask is whether the episode has any actions left in
+    # it, which is the action space's own answer.
+    remaining = (
+        action_space.episode_length(benchmark.params, n_placed) if action_space is not None
+        else benchmark.params.n_macros - n_placed
+    )
+    if remaining <= 0:
         raise ValueError(
             f"initial placement {config.environment.initial_placement.name!r} pre-placed every "
-            f"one of the {benchmark.params.n_macros} macros, leaving the agent nothing to do"
+            f"one of the {benchmark.params.n_macros} macros, leaving the agent nothing to do "
+            f"under the {getattr(action_space, 'name', 'discrete_grid')!r} action space"
         )
     return initial_positions, n_placed
 
@@ -394,11 +456,15 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
         resolve(MASKS, config.environment.action_mask, benchmark, what="action mask")
         if config.environment.action_mask is not None else None
     )
-    # Derived from the run's seed, so a stochastic warm start is reproducible with the run.
-    initial_positions, n_placed = resolve_initial_placement(
-        config, benchmark, jax.random.PRNGKey(config.seed)
+    action_space = resolve(
+        ACTION_SPACES, config.environment.action_space, benchmark, what="action space"
     )
-    env = ResolvedEnvironment(state_fn, extra_illegal_fn, initial_positions, n_placed)
+    # Derived from the run's seed, so a stochastic warm start is reproducible with the run, and
+    # validated against the action space, which decides what "nothing left to do" means.
+    initial_positions, n_placed = resolve_initial_placement(
+        config, benchmark, jax.random.PRNGKey(config.seed), action_space
+    )
+    env = ResolvedEnvironment(state_fn, extra_illegal_fn, initial_positions, n_placed, action_space)
     legalize_fn = (
         resolve(LEGALIZERS, config.environment.legalization, benchmark, what="legalizer")
         if config.environment.legalization is not None else None
@@ -424,5 +490,5 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
         config=config, benchmark=benchmark, state_fn=state_fn,
         extra_illegal_fn=extra_illegal_fn, episodes_per_iteration=episodes,
         initial_positions=initial_positions, n_placed=n_placed, agent=agent,
-        legalize_fn=legalize_fn, **extras,
+        action_space=action_space, legalize_fn=legalize_fn, **extras,
     )

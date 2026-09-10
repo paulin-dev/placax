@@ -145,6 +145,7 @@ def evaluate_placement(
     output_dir: pathlib.Path,
     skip_cell_placement: bool = False,
     machine: dict | None = None,
+    orientations=None,
 ) -> PhysicalResult:
     """Measures a run's OWN placement: export it to the design's format, then run the flow on it.
 
@@ -154,7 +155,7 @@ def evaluate_placement(
     placement could reach it. `positions` here is the array the agent handed the runner and
     `score()` measured, so the design that gets validated is the placement that was reported.
     """
-    exported = write_placement(built, positions, output_dir / "placement")
+    exported = write_placement(built, positions, output_dir / "placement", orientations)
     if exported.format is not NetlistFormat.DEF:  # noqa: SIM102  - the message needs `exported`
         raise NotImplementedError(
             f"this run's design is {exported.format.value}, and the validator reads DEF/LEF only. "

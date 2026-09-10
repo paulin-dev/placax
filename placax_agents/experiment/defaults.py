@@ -34,6 +34,7 @@ any other type (a function, a class, an array) belongs to the machinery, not the
 
 _MACHINERY_PARAMS = frozenset({
     "state_fn", "extra_illegal_fn", "initial_positions", "n_placed", "benchmark", "params",
+    "action_space",
 })
 """Parameters `build()` supplies from the ResolvedEnvironment. They carry defaults so a component
 can be constructed bare in a test, but a config never states them and a hash must not contain
@@ -76,6 +77,8 @@ def _slot_registries() -> dict:
         "state": registry.STATES,
         "action_mask": registry.MASKS,
         "initial_placement": registry.INITS,
+        "action_space": registry.ACTION_SPACES,
+        "legalization": registry.LEGALIZERS,
         "policy": registry.POLICIES,
         "optimizer": registry.OPTIMIZERS,
         "loop": LOOPS,
@@ -105,11 +108,13 @@ def _algorithm_defaults(name: str) -> dict:
 
     from placax_agents.agents import baselines
     from placax_agents.agents.genetic import GeneticAgent
+    from placax_agents.agents.local_search import LocalSearchAgent
 
     agent_class = {
         "greedy_wiremask": baselines.GreedyWiremaskAgent,
         "random_search": baselines.RandomSearchAgent,
         "genetic": GeneticAgent,
+        "local_search": LocalSearchAgent,
     }.get(name)
     return _defaults_from_signature(agent_class.__init__) if agent_class is not None else {}
 

@@ -43,8 +43,9 @@ class GreedyWiremaskAgent(_EnvironmentBound):
     name = "greedy_wiremask"
 
     def __init__(self, benchmark, state_fn=None, extra_illegal_fn=None,
-                 initial_positions=None, n_placed: int = 0):
-        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed)
+                 initial_positions=None, n_placed: int = 0, action_space=None):
+        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed,
+                         action_space)
         # The reverse index of which nets touch each macro, built once - the same precomputation
         # the wiremask observation does.
         self._macro_nets = build_macro_net_index(
@@ -98,10 +99,11 @@ def _greedy_wiremask_placement(agent: GreedyWiremaskAgent) -> jax.Array:
 
         flat_idx = jnp.argmin(scored.ravel())
         action = jnp.array([flat_idx // scored.shape[1], flat_idx % scored.shape[1]])
-        return _take_action(state, action, params), None
+        return _take_action(state, action, params, agent.action_space), None
 
     final_state, _ = jax.lax.scan(
-        scan_step, reset(params, agent.initial_positions), jnp.arange(agent._episode_length)
+        scan_step, reset(params, agent.initial_positions, agent.action_space),
+        jnp.arange(agent._episode_length),
     )
     return final_state.positions
 
@@ -117,8 +119,9 @@ class RandomSearchAgent(_EnvironmentBound):
     name = "random_search"
 
     def __init__(self, benchmark, population: int = 16, state_fn=None, extra_illegal_fn=None,
-                 initial_positions=None, n_placed: int = 0):
-        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed)
+                 initial_positions=None, n_placed: int = 0, action_space=None):
+        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed,
+                         action_space)
         self.population = population
 
     def init(self, key: jax.Array):
@@ -158,10 +161,10 @@ def _random_placement(key: jax.Array, agent: RandomSearchAgent) -> jax.Array:
         logits = jnp.where(illegal, -jnp.inf, 0.0)
         flat_idx = jax.random.categorical(step_key, logits.ravel())
         action = jnp.array([flat_idx // illegal.shape[1], flat_idx % illegal.shape[1]])
-        return _take_action(state, action, params), None
+        return _take_action(state, action, params, agent.action_space), None
 
     final_state, _ = jax.lax.scan(
-        scan_step, reset(params, agent.initial_positions),
+        scan_step, reset(params, agent.initial_positions, agent.action_space),
         jax.random.split(key, agent._episode_length),
     )
     return final_state.positions

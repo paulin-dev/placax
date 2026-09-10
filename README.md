@@ -144,7 +144,7 @@ which also makes the action mask's relaxation valve visible — it drops the qua
 legality itself, rather than leaving an episode with no legal move, and until now did so
 silently.
 
-Four agents ship, across two genuinely different families. `ppo` is the learner; `genetic` is a
+Five agents ship, across three genuinely different families. `ppo` is the learner; `genetic` is a
 population method; the other two are baselines the project previously had none of, which is why
 "better than X" could not be stated even against a trivial reference:
 
@@ -155,8 +155,13 @@ population method; the other two are baselines the project previously had none o
   strong baseline, and the one that says how much of a learned policy's score comes from learning
   rather than from the wiremask observation it was handed. Deterministic, so it reports itself
   converged after one iteration instead of spending the rest of the budget on the same answer.
+- **`local_search`** - hill climbing, or simulated annealing at `temperature > 0`, over macro
+  moves. The first non-constructive agent here: it starts from a complete placement and improves
+  it, which is what simulated annealing and FlowPlace's legalizer do and what the constructive
+  kernel could not express at all.
 - **`genetic`** - a population of placement *preferences*, decoded through the run's own legality
-  mask and bred under its configured reward. The first agent here from a non-sequential family,
+  mask and bred under its configured reward. On `oriented_grid` the genome grows a third gene per
+  macro and the search optimizes orientation too. The first agent here from a non-sequential family,
   which is what makes the spec's "PPO vs. GA, reward and benchmark held fixed" comparison
   runnable. The encoding is preferences rather than coordinates on purpose: a GA given a
   wirelength objective and no legality constraint does not merely risk overlap, it converges to
@@ -183,6 +188,38 @@ grid, order, canvas, reward, observation, mask, warm start, legalization, physic
 budget must all still match. Results are aggregated by **mean rank within each design**, never by
 averaging HPWL across them: adaptec1 and bigblue1 differ by orders of magnitude, so a mean would
 be decided by whichever design is largest rather than by which method is better.
+
+### The action space, and macro orientation
+
+The kernel's last hard-coded decision. `step()` used to hold it in one line — one macro per step,
+in array order, at an integer grid cell — which made the sequential-constructive paradigm look
+like the only paradigm in a project built to compare several.
+
+| action space | action | episode ends | drivers |
+|---|---|---|---|
+| `discrete_grid` | `(x, y)` | every macro placed | every agent; the default, unchanged |
+| `oriented_grid` | `(x, y, turn)` | every macro placed | `genetic` |
+| `perturbation` | `(macro, x, y)` | move budget spent | `local_search` |
+
+The crux was not the transition but that `state.step` meant two things at once: *how many actions
+have been taken* and *which macro is next*. Those coincide constructively and come apart the
+moment an action can name a macro, so an `ActionSpace` owns both answers — and is allowed to say
+that the second one is undefined.
+
+An agent whose output cannot express a space's action is refused rather than left to misbehave: a
+policy emitting `(grid_x, grid_y)` logits has nowhere to put a macro index.
+
+**Orientation** is the other half of the placement representation. A placement was a position and
+nothing else, so a tall SRAM could never be laid on its side. It enters as a transform on the
+geometry inputs — `effective_sizes` swaps width and height under a quarter turn, `rotate_offsets`
+turns pins about their macro's center — so wirelength, the canvas, legality and the written
+`.pl`/DEF all become orientation-aware without a new argument, and both transforms are the
+identity when nothing is oriented. Rotations only, not mirrors.
+
+`local_search` is the agent that proves the seam: hill climbing / simulated annealing over macro
+*moves*, which the constructive kernel had no action for. It needs a **dense** reward — under a
+perturbation space the per-step reward is the improvement — and reports `acceptance_rate` so a
+sparse-reward misconfiguration shows up in the log instead of as a bad result.
 
 ### Rows, the canvas, and legalization
 

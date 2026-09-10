@@ -303,6 +303,45 @@ def _legalizer_row_snap(benchmark, clamp_to_core: bool = True):
 LEGALIZERS = {"row_snap": _legalizer_row_snap}
 
 # ---------------------------------------------------------------------------
+# Action space.  (benchmark, **kwargs) -> ActionSpace
+# ---------------------------------------------------------------------------
+#
+# The last thing in the kernel that was not swappable. `discrete_grid` is the historical
+# behaviour and stays the default, so a config that does not mention it runs exactly as before.
+
+
+def _action_space_discrete_grid(_benchmark):
+    """One macro per step, in array order, at an integer grid cell."""
+    from placax.action_space import DiscreteGridPlacement
+
+    return DiscreteGridPlacement()
+
+
+def _action_space_perturbation(_benchmark, n_moves: int = 64):
+    """Move an already-placed macro: the action is (macro, x, y).
+
+    Needs a complete initial placement, since there is nothing to move otherwise - pair it with an
+    `initial_placement` that fills the canvas.
+    """
+    from placax.action_space import Perturbation
+
+    return Perturbation(n_moves=n_moves)
+
+
+def _action_space_oriented_grid(_benchmark):
+    """Constructive, but the action is (x, y, orientation) - the agent chooses the turn too."""
+    from placax.action_space import OrientedGridPlacement
+
+    return OrientedGridPlacement()
+
+
+ACTION_SPACES = {
+    "discrete_grid": _action_space_discrete_grid,
+    "oriented_grid": _action_space_oriented_grid,
+    "perturbation": _action_space_perturbation,
+}
+
+# ---------------------------------------------------------------------------
 # Policy architecture.  (benchmark, **kwargs) -> nn.Module
 # ---------------------------------------------------------------------------
 

@@ -110,7 +110,7 @@ def test_every_evolved_placement_obeys_the_environments_mask(built) -> None:
     """
     key = jax.random.PRNGKey(0)
     genome = jax.random.uniform(key, (built.agent._episode_length, 2))
-    positions = _decode(genome, built.agent)
+    positions, _orientations = _decode(genome, built.agent)
 
     grid_sizes = to_grid_units(built.benchmark.sizes_array, built.benchmark.cell_size)
     state = reset(built.benchmark.params, built.initial_positions)
@@ -130,14 +130,14 @@ def test_a_genome_decodes_towards_its_preference(built) -> None:
     # The encoding has to actually mean something, or crossover and mutation are noise: a genome
     # preferring the far corner should land further from the origin than one preferring it.
     length = built.agent._episode_length
-    near = _decode(jnp.zeros((length, 2)), built.agent)
-    far = _decode(jnp.full((length, 2), 0.99), built.agent)
+    near, _ = _decode(jnp.zeros((length, 2)), built.agent)
+    far, _ = _decode(jnp.full((length, 2), 0.99), built.agent)
     assert float(far.sum()) > float(near.sum())
 
 
 def test_decoding_is_deterministic(built) -> None:
     genome = jax.random.uniform(jax.random.PRNGKey(3), (built.agent._episode_length, 2))
-    assert jnp.array_equal(_decode(genome, built.agent), _decode(genome, built.agent))
+    assert jnp.array_equal(_decode(genome, built.agent)[0], _decode(genome, built.agent)[0])
 
 
 # ------------------------------------------------------------------ evolution
@@ -169,7 +169,7 @@ def test_elites_are_carried_into_the_next_generation_unchanged(built) -> None:
     from placax_agents.agents.genetic import _decode_population
 
     state = built.agent.init(key)
-    _positions, returns = _decode_population(state["genomes"], built.agent)
+    _positions, _orientations, returns = _decode_population(state["genomes"], built.agent)
     best = state["genomes"][int(jnp.argmax(returns))]
     new_state, _result = built.agent.update(jax.random.fold_in(key, 1), state)
     # The single best genome must appear verbatim among the survivors.

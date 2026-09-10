@@ -89,16 +89,25 @@ def parse_pl_die_size(pl_path: pathlib.Path, macro_sizes: SizeMap) -> float | No
     return max_extent if found else None
 
 
-def write_pl(original_pl_text: str, positions: dict[str, tuple[int, int]]) -> str:
-    """Rewrites x/y and marks '/FIXED' for every name in positions; every other line (standard cells,
-    comments, header) passes through unchanged. positions: {name: (x, y)} lower-left corner, integer
-    real/database units - the mechanism DREAMPlace uses to keep RL-placed macros put while it places cells."""
+def write_pl(original_pl_text: str, positions: dict[str, tuple]) -> str:
+    """Rewrites x/y (and orientation, if given) and marks '/FIXED' for every name in positions.
+
+    Every other line - standard cells, comments, header - passes through unchanged.
+    `positions` maps a name to `(x, y)` or `(x, y, orientation)`, lower-left corner in integer
+    real/database units. The three-element form is how a run that CHOSE an orientation writes it
+    out; with the two-element form the source file's own orientation is preserved, which is what
+    every run did before the axis existed. `/FIXED` is the mechanism DREAMPlace uses to keep
+    RL-placed macros put while it places cells around them.
+    """
     def replace_line(match: re.Match) -> str:
         name, _x, _y, orient = match.groups()
         if name not in positions:
             return match.group(0)
-        new_x, new_y = positions[name]
-        return f"{name}\t{int(new_x)}\t{int(new_y)}\t: {orient} /FIXED"
+        placement = positions[name]
+        new_x, new_y = placement[0], placement[1]
+        # Only override the source's orientation when the caller actually chose one.
+        new_orient = placement[2] if len(placement) > 2 else orient
+        return f"{name}\t{int(new_x)}\t{int(new_y)}\t: {new_orient} /FIXED"
 
     return _PL_LINE_RE.sub(replace_line, original_pl_text)
 

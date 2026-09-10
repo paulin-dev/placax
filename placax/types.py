@@ -13,6 +13,13 @@ class EnvState:
 
     positions: jax.Array
     step: int
+    orientations: jax.Array | None = None
+    """Per-macro quarter turns, or None for "every macro north" - see extras/orientation.py.
+
+    None rather than a zeros array so the un-oriented path allocates nothing and stays exactly
+    what it was: a placement that never mentions orientation is bit-identical to one from before
+    the axis existed. `orientation.resolve()` turns the absence back into an array where one is
+    needed."""
 
 
 @struct.dataclass

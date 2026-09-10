@@ -96,6 +96,7 @@ def main() -> None:
     history = collect_placement_history(
         variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
         state_fn=state_fn, extra_illegal_fn=built.extra_illegal_fn,
+        initial_positions=built.initial_positions, n_placed=built.n_placed,
     )
     grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
 

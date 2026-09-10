@@ -27,6 +27,7 @@ import time
 from placax.log import Log  # must precede jax imports
 from placax.core import replay
 from placax.extras.legality import jitted_legality
+from placax.extras.orientation import effective_sizes, oriented_pin_offsets
 from placax.extras.rewards import hpwl
 from placax.reproducibility import describe_determinism, fingerprint
 from placax_agents.agents.ppo import is_ppo_state
@@ -162,14 +163,34 @@ def _read_best_real_hpwl(variables_template, path: pathlib.Path | None) -> float
     return float(load_checkpoint(template, path)["real_hpwl"])
 
 
-def score_placement(benchmark, positions) -> float:
-    """Real HPWL of a placement, computed by the runner so every agent is measured identically."""
-    centers = to_real_centers(positions, benchmark.sizes_array, benchmark.cell_size)
-    return float(hpwl(centers, benchmark.padded_pin_idx, benchmark.padded_pin_offset,
-                      benchmark.valid_mask))
+def score_placement(benchmark, positions, orientations=None) -> float:
+    """Real HPWL of a placement, computed by the runner so every agent is measured identically.
+
+    Orientation enters as a transform on the geometry rather than as a new argument to `hpwl`: a
+    turned macro occupies its height by its width, and its pins rotate about its center with it.
+    Both are the identity when nothing is oriented, so an un-oriented placement scores exactly
+    what it always did. See placax/extras/orientation.py.
+    """
+    sizes = effective_sizes(benchmark.sizes_array, orientations)
+    centers = to_real_centers(positions, sizes, benchmark.cell_size)
+    offsets = oriented_pin_offsets(
+        benchmark.padded_pin_offset, benchmark.padded_pin_idx, orientations
+    )
+    return float(hpwl(centers, benchmark.padded_pin_idx, offsets, benchmark.valid_mask))
 
 
-def score(benchmark, positions, n_placed: int = 0) -> dict:
+def best_orientations(agent, state):
+    """The agent's chosen orientations, or None for one that does not choose them.
+
+    Read through `getattr` rather than added to the Agent protocol: an agent driving a space
+    without orientation has nothing to say here, and requiring every agent to declare that would
+    be ceremony. See placax/extras/orientation.py.
+    """
+    getter = getattr(agent, "best_orientations", None)
+    return getter(state) if getter is not None else None
+
+
+def score(benchmark, positions, n_placed: int = 0, orientations=None) -> dict:
     """Everything the runner measures about one placement, computed identically for every agent.
 
     Three things rather than one, because a wirelength number alone can hide two different
@@ -179,10 +200,12 @@ def score(benchmark, positions, n_placed: int = 0) -> dict:
     placement is physically realizable at all: overlap makes wires shorter, so an illegal
     placement looks like a better result unless legality is reported beside the score.
     """
-    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    grid_sizes = to_grid_units(
+        effective_sizes(benchmark.sizes_array, orientations), benchmark.cell_size
+    )
     measured = jitted_legality(positions, grid_sizes, benchmark.params).to_dict()
     return {
-        "real_hpwl": score_placement(benchmark, positions),
+        "real_hpwl": score_placement(benchmark, positions, orientations),
         "reward_return": float(
             replay(positions, benchmark.reward_fn, benchmark.params, n_placed)
         ),
@@ -294,8 +317,9 @@ def run_experiment(
         measured = None
         if eval_every > 0 and use.iterations % eval_every == 0:
             positions = agent.best_positions(agent_state)
+            orientations = best_orientations(agent, agent_state)
             use = tracker.record_evaluation(built.steps_per_episode)
-            measured = score(benchmark, positions, built.n_placed)
+            measured = score(benchmark, positions, built.n_placed, orientations)
             real_hpwl = measured["real_hpwl"]
             if not measured["is_legal"]:
                 Log.warning(
@@ -309,8 +333,10 @@ def run_experiment(
 
                 placement_images_dir.mkdir(parents=True, exist_ok=True)
                 save_placement_image(
-                    positions, grid_sizes, benchmark.params.grid_x,
-                    benchmark.params.effective_grid_y,
+                    positions,
+                    to_grid_units(effective_sizes(benchmark.sizes_array, orientations),
+                                  benchmark.cell_size),
+                    benchmark.params.grid_x, benchmark.params.effective_grid_y,
                     placement_images_dir / f"{use.iterations}.png",
                 )
             if real_hpwl < best_real_hpwl:

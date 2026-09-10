@@ -29,6 +29,7 @@ from placax.log import Log  # must precede jax imports
 from placax.netlist import NetlistFormat, detect_format
 from placax.netlist.bookshelf import write_aux, write_pl
 from placax.netlist.def_writer import write_placed_def
+from placax.extras import orientation as orientation_module
 from placax_agents.policy.scale import to_real_lower_left
 
 import numpy as np
@@ -106,8 +107,9 @@ def _export_def(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
     # what it is: a text rewriter that takes the numbers it is given.
     units_match = _DEF_UNITS_RE.search(def_text)
     db_units = int(units_match.group(1)) if units_match else 1
-    scaled = {name: (int(round(x * db_units)), int(round(y * db_units)))
-              for name, (x, y) in named.items()}
+    scaled = {name: (int(round(placement[0] * db_units)), int(round(placement[1] * db_units)),
+                     *placement[2:])
+              for name, placement in named.items()}
 
     def_path = output_dir / source.name
     def_path.write_text(write_placed_def(def_text, scaled))
@@ -141,7 +143,25 @@ def _off_rows(placement: dict, macro_sizes: dict, rows) -> int:
     )
 
 
-def write_placement(built, positions, output_dir: pathlib.Path) -> ExportedPlacement:
+def _oriented_macro_sizes(built, orientations) -> dict:
+    """{name: (w, h)} AS PLACED, so the legalizer and the row check see the real footprint.
+
+    A macro on its side is its height by its width; snapping it against the core with its
+    unrotated size would push it to the wrong place and call an illegal placement legal.
+    """
+    import numpy as np
+
+    sizes = np.asarray(
+        orientation_module.effective_sizes(built.benchmark.sizes_array, orientations)
+    )
+    return {
+        name: (float(sizes[idx, 0]), float(sizes[idx, 1]))
+        for name, idx in built.benchmark.name_to_idx.items()
+    }
+
+
+def write_placement(built, positions, output_dir: pathlib.Path,
+                    orientations=None) -> ExportedPlacement:
     """Writes `positions` back into the design's own format, and says where it landed.
 
     `positions` are the grid cells an agent handed the runner - the same array `score()` measures,
@@ -154,7 +174,11 @@ def write_placement(built, positions, output_dir: pathlib.Path) -> ExportedPlace
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark = built.benchmark
     placement = _real_placement(built, positions)
-    macro_sizes = benchmark.macro_sizes
+    # Footprints as placed: with no orientation this is `benchmark.macro_sizes` unchanged.
+    macro_sizes = (
+        benchmark.macro_sizes if orientations is None
+        else _oriented_macro_sizes(built, orientations)
+    )
     rows = benchmark.rows
 
     off_before = _off_rows(placement, macro_sizes, rows)
@@ -172,8 +196,17 @@ def write_placement(built, positions, output_dir: pathlib.Path) -> ExportedPlace
     off_after = _off_rows(placement, macro_sizes, rows)
 
     # Rounded last: both Bookshelf .pl and DEF PLACED take integers, and rounding before
-    # legalizing would snap to a row and then step off it again.
-    named = {name: (int(round(x)), int(round(y))) for name, (x, y) in placement.items()}
+    # legalizing would snap to a row and then step off it again. The orientation letter rides
+    # along so a turned macro reaches the file turned, rather than losing the axis on the way out.
+    letters = (
+        orientation_module.names(orientations, benchmark.params.n_macros)
+        if orientations is not None else None
+    )
+    named = {
+        name: ((int(round(x)), int(round(y))) if letters is None
+               else (int(round(x)), int(round(y)), letters[benchmark.name_to_idx[name]]))
+        for name, (x, y) in placement.items()
+    }
 
     benchmark_dir = built.config.environment.benchmark.path
     design_format = detect_format(benchmark_dir)

@@ -24,6 +24,7 @@ a genome's decode.
 from placax_agents.agents.base import UpdateResult  # must precede jax imports
 from placax_agents.agents.environment_bound import _EnvironmentBound, _take_action
 from placax.core import reset
+from placax.extras.orientation import N_ORIENTATIONS
 
 import jax
 import jax.numpy as jnp
@@ -36,35 +37,48 @@ class GeneticAgent(_EnvironmentBound):
 
     def __init__(self, benchmark, population: int = 32, elite_fraction: float = 0.25,
                  mutation_rate: float = 0.1, mutation_scale: float = 0.15,
-                 state_fn=None, extra_illegal_fn=None, initial_positions=None, n_placed: int = 0):
-        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed)
+                 state_fn=None, extra_illegal_fn=None, initial_positions=None, n_placed: int = 0,
+                 action_space=None):
+        super().__init__(benchmark, state_fn, extra_illegal_fn, initial_positions, n_placed,
+                         action_space)
         if population < 2:
             raise ValueError(f"a population needs at least 2 genomes, got {population}")
         self.population = population
         self.n_elite = max(1, int(round(population * elite_fraction)))
         self.mutation_rate = mutation_rate
         self.mutation_scale = mutation_scale
+        # Three genes per macro instead of two when the space lets an agent turn a macro: the
+        # orientation is part of the placement being searched, so it belongs in the genome rather
+        # than being fixed at north behind the search's back.
+        self.chooses_orientation = getattr(self.action_space, "name", "") == "oriented_grid"
+        self.gene_width = 3 if self.chooses_orientation else 2
 
     # ------------------------------------------------------------------ Agent
 
     def init(self, key: jax.Array) -> dict:
         """A uniformly random population, and no incumbent yet."""
-        genomes = jax.random.uniform(key, (self.population, self._episode_length, 2))
+        genomes = jax.random.uniform(
+            key, (self.population, self._episode_length, self.gene_width)
+        )
         return {
             "genomes": genomes,
             "best_positions": jnp.full((self.benchmark.params.n_macros, 2), -1, dtype=jnp.int32),
+            "best_orientations": jnp.zeros((self.benchmark.params.n_macros,), dtype=jnp.int32),
             "best_return": jnp.array(-jnp.inf),
         }
 
     def update(self, key: jax.Array, state: dict) -> tuple[dict, UpdateResult]:
         """One generation: decode and score every genome, keep the elites, breed the rest."""
-        positions, returns = _decode_population(state["genomes"], self)
+        positions, orientations, returns = _decode_population(state["genomes"], self)
 
         # 1. Track the best placement ever seen, not merely the best in this generation - a GA
         #    can lose its incumbent to mutation, and the runner asks for the agent's best answer.
         champion = jnp.argmax(returns)
         improved = returns[champion] > state["best_return"]
         best_positions = jnp.where(improved, positions[champion], state["best_positions"])
+        best_orientations = jnp.where(
+            improved, orientations[champion], state["best_orientations"]
+        )
         best_return = jnp.where(improved, returns[champion], state["best_return"])
 
         # 2. Elites survive untouched; everything else is bred from them.
@@ -76,7 +90,7 @@ class GeneticAgent(_EnvironmentBound):
         genomes = jnp.concatenate([elites, children], axis=0)
 
         new_state = {"genomes": genomes, "best_positions": best_positions,
-                     "best_return": best_return}
+                     "best_orientations": best_orientations, "best_return": best_return}
         return new_state, UpdateResult(
             episodes=self.population,
             loss=None,
@@ -95,6 +109,14 @@ class GeneticAgent(_EnvironmentBound):
     def best_positions(self, state: dict) -> jax.Array:
         return state["best_positions"]
 
+    def best_orientations(self, state: dict):
+        """The turns that came with the best placement, or None when the space has no such axis.
+
+        None rather than an all-north array so that a run without orientation scores through the
+        exact same code path it always did - see `experiment.run.best_orientations`.
+        """
+        return state["best_orientations"] if self.chooses_orientation else None
+
 
 def _decode(genome: jax.Array, agent: GeneticAgent) -> jax.Array:
     """One genome into one placement: each macro at the LEGAL cell nearest its preference.
@@ -106,7 +128,17 @@ def _decode(genome: jax.Array, agent: GeneticAgent) -> jax.Array:
     params = agent.benchmark.params
 
     def scan_step(state, preference):
-        illegal, _macro_size = agent._illegal(state)
+        # The third gene, where there is one, is the quarter turn - and it has to be decided
+        # BEFORE legality, since a turned macro has a different footprint and therefore a
+        # different set of cells it fits in.
+        if agent.chooses_orientation:
+            preferred = jnp.clip(
+                (preference[2] * N_ORIENTATIONS).astype(jnp.int32), 0, N_ORIENTATIONS - 1
+            )
+            turn, illegal = _turn_that_fits(state, preferred, agent)
+        else:
+            turn = None
+            illegal, _macro_size = agent._illegal(state, turn)
         grid_x, grid_y = illegal.shape
         target_x = preference[0] * grid_x
         target_y = preference[1] * grid_y
@@ -115,20 +147,50 @@ def _decode(genome: jax.Array, agent: GeneticAgent) -> jax.Array:
         distance = (xs - target_x) ** 2 + (ys - target_y) ** 2
         scored = jnp.where(illegal, jnp.inf, distance)
         flat_idx = jnp.argmin(scored.ravel())
-        action = jnp.array([flat_idx // grid_y, flat_idx % grid_y])
-        return _take_action(state, action, params), None
+        cell = jnp.array([flat_idx // grid_y, flat_idx % grid_y])
+        action = cell if turn is None else jnp.concatenate([cell, turn[None]])
+        return _take_action(state, action, params, agent.action_space), None
 
-    final_state, _ = jax.lax.scan(scan_step, reset(params, agent.initial_positions), genome)
-    return final_state.positions
+    final_state, _ = jax.lax.scan(
+        scan_step, reset(params, agent.initial_positions, agent.action_space), genome
+    )
+    return final_state.positions, final_state.orientations
+
+
+def _turn_that_fits(state, preferred: jax.Array, agent: GeneticAgent):
+    """The genome's preferred turn if the macro fits anywhere in it, else the first turn it does.
+
+    Rotation makes a placement reachable that the search would otherwise have to back out of: a
+    macro turned onto its long side can leave the next one with nowhere legal to go. Without this
+    the mask's own relaxation valve fires instead - it drops legality rather than deadlock - and
+    the GA quietly discovers that overlapping macros have shorter wires. The fallback keeps the
+    search where the constructive decode always was: inside the legal set.
+
+    All four turns are evaluated rather than searched, because four maps under `vmap` is cheaper
+    than a data-dependent loop inside a jitted scan, and the shape stays static.
+    """
+    turns = jnp.arange(N_ORIENTATIONS)
+    illegal_per_turn = jax.vmap(lambda turn: agent._illegal(state, turn)[0])(turns)
+    # A turn is usable when it leaves at least one legal cell.
+    usable = ~illegal_per_turn.reshape(N_ORIENTATIONS, -1).all(axis=1)
+    # The preferred turn wins when it is usable; otherwise the lowest-numbered turn that is. If
+    # none is, argmax returns 0 and the mask's valve handles it exactly as it does elsewhere.
+    fallback = jnp.argmax(usable)
+    turn = jnp.where(usable[preferred], preferred, fallback)
+    return turn, illegal_per_turn[turn]
 
 
 def _decode_population(genomes: jax.Array, agent: GeneticAgent):
     """Every genome decoded and scored at once - the population method `replay` was built for."""
-    positions = jax.vmap(lambda genome: _decode(genome, agent))(genomes)
+    positions, orientations = jax.vmap(lambda genome: _decode(genome, agent))(genomes)
     # Scored by the run's CONFIGURED reward, replayed through the same step() a policy drives, so
     # swapping the reward moves what the GA optimizes exactly as it moves what PPO optimizes.
     returns = jax.vmap(agent.score)(positions)
-    return positions, returns
+    if orientations is None:
+        orientations = jnp.zeros(
+            (genomes.shape[0], agent.benchmark.params.n_macros), dtype=jnp.int32
+        )
+    return positions, orientations, returns
 
 
 def _breed(key: jax.Array, elites: jax.Array, n_children: int) -> jax.Array:

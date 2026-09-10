@@ -210,6 +210,15 @@ class EnvironmentSpec:
     state: Spec
     budget: Budget
     action_mask: Spec | None = None
+    action_space: Spec = field(default_factory=lambda: Spec("discrete_grid"))
+    """What an action IS, what it changes, and when the episode ends - see placax/action_space.py.
+
+    Named explicitly rather than left implicit, for the same reason `initial_placement="empty"` is:
+    every run before this one was `discrete_grid`, and a config that does not say so cannot be
+    compared against one that chose otherwise. It sits in the ENVIRONMENT half because it is not
+    the agent's to pick - two agents compared on one task must be moving macros under the same
+    rules, or the comparison is measuring the rules."""
+
     initial_placement: Spec = field(default_factory=lambda: Spec("empty"))
     legalization: Spec | None = None
     """How a finished placement is made physically realizable before it reaches a real tool.
@@ -234,6 +243,7 @@ class EnvironmentSpec:
             "reward": self.reward.identity("reward"),
             "initial_placement": self.initial_placement.identity("initial_placement"),
             "action_mask": self.action_mask.identity("action_mask") if self.action_mask else None,
+            "action_space": self.action_space.identity("action_space"),
             "legalization": self.legalization.identity("legalization") if self.legalization else None,
             # The physical stack is deliberately NOT completed with its builders' defaults: those
             # signatures mix experiment settings (target_density, liberty) with this machine's
@@ -272,6 +282,7 @@ class EnvironmentSpec:
             "reward": self.reward.to_dict(),
             "state": self.state.to_dict(),
             "action_mask": self.action_mask.to_dict() if self.action_mask else None,
+            "action_space": self.action_space.to_dict(),
             "initial_placement": self.initial_placement.to_dict(),
             "legalization": self.legalization.to_dict() if self.legalization else None,
             "physical": self.physical.to_dict(),
@@ -285,6 +296,7 @@ class EnvironmentSpec:
             reward=Spec.from_dict(data["reward"]),
             state=Spec.from_dict(data["state"]),
             action_mask=Spec.from_dict(data.get("action_mask")),
+            action_space=Spec.from_dict(data.get("action_space", "discrete_grid")),
             initial_placement=Spec.from_dict(data.get("initial_placement", "empty")),
             legalization=Spec.from_dict(data.get("legalization")),
             physical=PhysicalSpec.from_dict(data.get("physical")),

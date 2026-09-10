@@ -140,6 +140,9 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
     core.py                        reset() / step() — the kernel (Section 4.1); replay() drives it
                                     from a pre-committed action sequence (population methods)
     types.py                       EnvState, EnvParams, RewardFn, OrderFn, SizeMap, Nets, PinOffsets
+    action_space.py                ActionSpace — what an action IS, what it changes, and when the
+                                    episode ends. DiscreteGridPlacement (the default, unchanged)
+                                    and Perturbation (move an already-placed macro). Section 5.1d
     _device.py                     GPU/CPU fallback (Section 6.3) — imported before jax, everywhere
     log.py                         the project's logger, imported before jax for the same reason
     reproducibility.py             fingerprint() and the determinism contract (Section 6.3)
@@ -164,6 +167,9 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
                                       lookahead_illegal_masks
         legality.py                  legality() — overlap/out-of-bounds/completeness of a finished
                                       placement, measured on every evaluation (Section 5.2)
+        orientation.py               effective_sizes()/rotate_offsets() — macro orientation as a
+                                      TRANSFORM on the geometry inputs, so hpwl/render/legality
+                                      become orientation-aware without a new argument (5.1d)
         congestion.py                rudy_density()/congestion_overflow() — the routing-congestion
                                       proxy the reward comparison needs (Section 5.2)
         render.py                    render() — boolean canvas from placed macro footprints
@@ -183,6 +189,9 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
         baselines.py                  GreedyWiremaskAgent, RandomSearchAgent — no parameters at all
         genetic.py                    GeneticAgent — a population method, and the first agent here
                                        from a non-sequential family (Section 12's GA arm)
+        local_search.py               LocalSearchAgent — hill climbing / simulated annealing over
+                                       macro MOVES; the first non-constructive agent, and what
+                                       makes the Perturbation action space more than an interface
     experiment/                     the reproducibility layer (Section 4.3)
         config.py                     ExperimentConfig, EnvironmentSpec/AgentSpec/PhysicalSpec,
                                        the four hash levels, assert_comparable
@@ -313,6 +322,51 @@ Every training loop so far took one `optax.GradientTransformation` applied to th
 This only reproduces MaskPlace's actual independence for an architecture whose groups genuinely share no parameters — `policy.architectures.resnet_cnn.ResNetCoarseFineActorCritic(critic_style="step_embedding")`'s critic (`nn.Embed`/`nn.Dense` layers named with a `"critic_"` prefix, reading only `obs["step"]`) qualifies; `critic_style="canvas"` (the default) does not, since its value head reads a trunk shared with the actor. `training/algorithm/config.py`'s `maskplace_optimizer()` is the ready-made preset: `Adam(MASKPLACE_LEARNING_RATE)` + `clip_by_global_norm(MASKPLACE_MAX_GRAD_NORM)` for each group.
 
 The mechanism itself has nothing MaskPlace-specific baked in — `label_params_by_name_prefix`/`make_grouped_optimizer` work for any naming convention and any pair of transforms, e.g. fine-tuning a pretrained backbone at a lower learning rate than a freshly-initialized head is the same mechanism with a different prefix.
+
+### 5.1d The action space and the placement representation — added after the audit
+
+The kernel's last hard-coded decision, and the one `docs/Action_Space_Decision.md` was written
+about. `step()` held it in a single line:
+
+```python
+positions = state.positions.at[state.step].set(action)
+```
+
+which fixes four things at once: one macro per step, in a pre-computed order, with the action an
+integer grid cell, ending after `n_macros` of them.
+
+**What the generalization actually turned on.** Not the transition — that is three lines. The
+problem is that `state.step` does double duty: *how many actions have been taken* (termination,
+budgeting) and *which macro is next* (`sizes_array[state.step]`, the lookahead, the wiremask's
+baseline). For a constructive space those coincide; for a perturbation space they do not, because
+every macro is already placed and the action names the one being moved. So `ActionSpace` owns
+`target()` — "what is this step about" — and a perturbation space is allowed to answer *nothing*,
+returning a sentinel rather than a plausible index that would feed a constructive observation the
+wrong macro's size.
+
+| `ACTION_SPACES` key | action | episode ends | drivers |
+|---|---|---|---|
+| `discrete_grid` | `(x, y)` | every macro placed | every shipped agent; the default, unchanged |
+| `oriented_grid` | `(x, y, turn)` | every macro placed | `genetic` |
+| `perturbation` | `(macro, x, y)` | move budget spent | `local_search` |
+
+An agent whose output cannot express a space's action is **refused** rather than left to
+misbehave: a policy emitting `(grid_x, grid_y)` logits has nowhere to put a macro index, and
+feeding its 2-vector to a three-wide space would place macros at coordinates read off a macro
+index — wrong, and silently so.
+
+**Orientation** (`extras/orientation.py`) is the other half. A placement was `(n_macros, 2)` and
+nothing else, while every real flow emits an orientation per instance; this project's writers
+preserved whatever the source file said, so the axis looked fixed at north when it was absent.
+The design that keeps it from touching everything is that orientation is not a new argument on
+`hpwl`, `render` and `legality` — it is a transform on their *inputs*: `effective_sizes` swaps
+width and height under a quarter turn, `rotate_offsets` turns pins about their macro's center,
+and both are the identity on `None`, so code that never mentions orientation cannot be broken by
+it. Only the four rotations are modelled, not the four mirrors.
+
+**Still not built: a continuous space for SHAC.** It needs a differentiable density term to
+express legality, which does not exist — legality is masked, and masks have no gradient. The
+protocol is shaped so that adding it is an implementation rather than another kernel change.
 
 ### 5.2 The reward / cost function, and its density
 

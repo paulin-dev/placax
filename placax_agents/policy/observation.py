@@ -1,5 +1,6 @@
 """Turns EnvState into the dict a policy consumes."""
-from placax.extras.render import render  # must precede jax imports
+from placax.extras.orientation import effective_sizes  # must precede jax imports
+from placax.extras.render import render
 from placax.extras.rewards import lookahead_wiremasks
 from placax.types import EnvParams, EnvState
 from placax_agents.policy.scale import to_grid_units, to_real_centers
@@ -24,15 +25,23 @@ def observation(
 ) -> dict:
     """Builds the base observation dict (canvas, current/lookahead macro sizes, positions, step) any policy can read; excludes sizes_array since it's constant across an episode."""
     # Render already-placed macros onto the grid; this is what the policy "sees" as the board state.
-    grid_sizes = to_grid_units(sizes_array, cell_size)
+    # Footprints are taken AS PLACED: a macro turned a quarter turn occupies its height by its
+    # width, and a canvas drawn from unrotated sizes would show a different design from the one
+    # being scored. `effective_sizes` is the identity when nothing is oriented, so this costs the
+    # un-oriented path nothing. See placax/extras/orientation.py.
+    placed_sizes = effective_sizes(sizes_array, state.orientations)
+    grid_sizes = to_grid_units(placed_sizes, cell_size)
     canvas = render(state.positions, grid_sizes, params.grid_x, params.effective_grid_y)
     return {
         "canvas": canvas,
+        # The macro about to be placed, in its UNROTATED size: its orientation is part of the
+        # action still to be chosen, not of the state being observed.
         "current_macro_size": sizes_array[state.step],
         "lookahead_sizes": lookahead_sizes(state, params, sizes_array, lookahead),
         "positions": state.positions,
         "placed_mask": state.positions[:, 0] >= 0,
         "step": state.step,
+        "orientations": state.orientations,
     }
 
 
