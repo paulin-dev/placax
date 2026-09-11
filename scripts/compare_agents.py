@@ -27,6 +27,7 @@ placax.reproducibility), so --seeds runs each agent several times and reports th
         --env_steps=500000 --agents=greedy_wiremask,random_search,ppo --seeds=3
 """
 import argparse
+import dataclasses
 import json
 import pathlib
 import statistics
@@ -78,6 +79,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "a nondeterministic backend.")
     parser.add_argument("--population", type=int, default=16,
                         help="Random-search population per iteration (default: %(default)s).")
+    parser.add_argument("--grid", type=int, default=None,
+                        help="Override the preset's canvas resolution. Worth knowing WHY this "
+                             "matters: adaptec1's 543 macros occupy 77.6%% of a 64-grid canvas "
+                             "and 57%% of a 224-grid one, and no sampling agent places legally at "
+                             "the former - every row comes back overlapping and the table then "
+                             "reports a property of the canvas rather than of the agents.")
+    parser.add_argument("--macro_budget", type=int, default=None,
+                        help="Override the preset's macro budget - place only the first N macros "
+                             "by the configured order (MaskPlace's --pnm).")
+    parser.add_argument("--canvas", default=None, choices=("die", "core"),
+                        help="Override the preset's canvas anchor. 'core' scales and anchors the "
+                             "grid to the design's placement rows; 'die' (the preset default) is "
+                             "the die extent, which puts ~15%% of cells outside the placeable area.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where each run's manifest, log and checkpoints go; one subdirectory "
                              "per agent and seed. Default: <benchmark_dir>/comparison.")
@@ -98,6 +112,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         if parsed.benchmark_dirs else [parsed.benchmark_dir]
     )
     return parsed
+
+
+def _with_overrides(config: ExperimentConfig, args: argparse.Namespace) -> ExperimentConfig:
+    """The preset, with whichever benchmark axes the CLI overrode.
+
+    Applied to the REFERENCE config, so every agent inherits the same override - an override that
+    reached only some of them would be the exact incomparability this script exists to refuse.
+    """
+    benchmark = config.environment.benchmark
+    overrides = {name: getattr(args, name) for name in ("grid", "macro_budget", "canvas")
+                 if getattr(args, name) is not None}
+    if not overrides:
+        return config
+    return dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment, benchmark=dataclasses.replace(benchmark, **overrides)
+    ))
 
 
 def _budget(args: argparse.Namespace) -> Budget:
@@ -247,9 +277,16 @@ def _write_results(path: pathlib.Path, by_design: dict[str, dict[str, list[dict]
     return path
 
 
-def _run_design(benchmark_dir, args, budget, agents) -> tuple[ExperimentConfig, dict, pathlib.Path]:
-    """Every agent x seed on ONE design, sharing one loaded netlist and one asserted environment."""
-    reference = build_preset(args.preset, benchmark_dir, budget=budget)
+def _run_design(benchmark_dir, args, budget, agents, on_result=None
+                ) -> tuple[ExperimentConfig, dict, pathlib.Path]:
+    """Every agent x seed on ONE design, sharing one loaded netlist and one asserted environment.
+
+    `on_result` is called after each run finishes, so the results file is written incrementally.
+    Learned the hard way: a comparison that only writes at the end throws away every completed
+    agent when a later one dies - eight finished runs lost to the ninth exhausting GPU memory.
+    A run that cost real compute should survive whatever happens to the next one.
+    """
+    reference = _with_overrides(build_preset(args.preset, benchmark_dir, budget=budget), args)
     configs = build_comparison(reference, agents, args.seeds, args.population, args.level)
     output_root = (args.output_dir or (benchmark_dir / "comparison"))
     if len(args.benchmark_dirs) > 1 and args.output_dir is not None:
@@ -290,6 +327,8 @@ def _run_design(benchmark_dir, args, budget, agents) -> tuple[ExperimentConfig, 
         Log.info(f"  {config.name}: real_hpwl={measured['real_hpwl']:,.0f} "
                  f"return={measured['reward_return']:,.3f} "
                  f"spent={final.get('env_steps', 0):,} env steps{flag}")
+        if on_result is not None:
+            on_result(benchmark_dir.name, built.config, results)
     return built.config, results, output_root
 
 
@@ -310,7 +349,8 @@ def main() -> None:
     # asserts the protocol instead: same grid, order, budget, reward, observation, mask, warm
     # start, legalization and physical stack, on every design. Without it "we ran the same
     # experiment on five benchmarks" is a claim rather than a check.
-    references = {d.name: build_preset(args.preset, d, budget=budget) for d in args.benchmark_dirs}
+    references = {d.name: _with_overrides(build_preset(args.preset, d, budget=budget), args)
+                  for d in args.benchmark_dirs}
     if len(references) > 1:
         assert_comparable(*references.values(), level="protocol")
         Log.info(f"suite of {len(references)} designs, shared protocol: "
@@ -320,8 +360,17 @@ def main() -> None:
     by_design: dict[str, dict[str, list[dict]]] = {}
     resolved: dict[str, ExperimentConfig] = {}
     roots = []
+    results_root = args.output_dir or (args.benchmark_dirs[0] / "comparison")
+
+    def checkpoint_results(design: str, config: ExperimentConfig, results: dict) -> None:
+        """Write the results file after every finished run, not only after the last one."""
+        by_design[design] = results
+        resolved[design] = config
+        _write_results(results_root / RESULTS_NAME, by_design, resolved, budget, args.level,
+                       config.protocol_hash())
+
     for benchmark_dir in args.benchmark_dirs:
-        config, results, root = _run_design(benchmark_dir, args, budget, agents)
+        config, results, root = _run_design(benchmark_dir, args, budget, agents, checkpoint_results)
         by_design[benchmark_dir.name] = results
         resolved[benchmark_dir.name] = config
         roots.append(root)
@@ -336,7 +385,6 @@ def main() -> None:
         print(_rank_summary(by_design))
         print()
 
-    results_root = args.output_dir or roots[0]
     results_path = _write_results(
         results_root / RESULTS_NAME, by_design, resolved, budget, args.level,
         next(iter(resolved.values())).protocol_hash(),
