@@ -11,8 +11,11 @@ import pathlib
 import pytest
 
 from placax_agents.experiment.budget import Budget  # noqa: F401  must precede jax imports
-from placax_agents.experiment.presets import training
-from scripts.compare_agents import _format_table, _write_results, build_comparison
+from placax_agents.experiment.config import Spec
+from placax_agents.experiment.presets import build_preset, training
+from scripts.compare_agents import (
+    _agent_spec, _format_table, _parse_args, _with_overrides, _write_results, build_comparison,
+)
 
 
 def _run(hpwl: float, env_steps: int, *, seed: int = 0, gradient_steps: int = 0,
@@ -165,3 +168,67 @@ def test_a_comparison_refuses_to_be_built_across_two_environments() -> None:
     ))
     with pytest.raises(ValueError, match="not comparable"):
         assert_comparable(tampered, configs[1])
+
+
+# ------------------------------------- the environment axes an agent may REQUIRE, from the CLI
+
+
+def test_the_action_space_and_warm_start_are_settable_from_the_command_line() -> None:
+    """Two of five shipped agents could not be reached by this script at all.
+
+    `local_search` requires a perturbation space and a full warm start, and neither was a flag -
+    so it was refused at build() whatever the command line said, and the GA's orientation arm was
+    equally unreachable. They are environment axes, so they are applied to the REFERENCE and every
+    row inherits them.
+    """
+    args = _parse_args([
+        "compare_agents", "--env_steps=400", "--agents=local_search",
+        "--action_space=perturbation:n_moves=128",
+        "--initial_placement=greedy_wiremask_prefix:n_macros=null",
+    ])
+    reference = _with_overrides(build_preset("training", "b", budget=Budget(env_steps=400)), args)
+    assert reference.environment.action_space == Spec("perturbation", {"n_moves": 128})
+    assert reference.environment.initial_placement == Spec(
+        "greedy_wiremask_prefix", {"n_macros": None}
+    )
+    # ...and every agent in the comparison gets the same one, which is the point of the split.
+    configs = build_comparison(reference, ["local_search"], seeds=1, population=2)
+    assert all(c.environment.action_space.name == "perturbation" for c in configs)
+
+
+def test_a_component_is_parsed_from_its_command_line_spelling() -> None:
+    assert Spec.parse("oriented_grid") == Spec("oriented_grid")
+    assert Spec.parse("perturbation:n_moves=64") == Spec("perturbation", {"n_moves": 64})
+    # JSON values, so null is None and a bare word stays a string.
+    assert Spec.parse("x:a=null,b=1.5,c=corner") == Spec("x", {"a": None, "b": 1.5, "c": "corner"})
+    with pytest.raises(ValueError, match="key=value"):
+        Spec.parse("perturbation:n_moves")
+
+
+def test_per_agent_kwargs_reach_only_that_agent() -> None:
+    # The agent is the thing under test, so its own hyperparameters differ per row by design -
+    # while everything the environment owns stays shared.
+    reference = build_preset("training", "b", budget=Budget(env_steps=400))
+    kwargs = {"genetic": {"population": 64}}
+    genetic = _agent_spec("genetic", reference, population=16, agent_kwargs=kwargs)
+    random_search = _agent_spec("random_search", reference, population=16, agent_kwargs=kwargs)
+    assert genetic.algorithm.kwargs == {"population": 64}
+    assert random_search.algorithm.kwargs == {"population": 16}
+
+
+def test_the_table_scores_a_placement_the_way_the_runner_does() -> None:
+    """One scoring path, or the table and the per-run logs beside it disagree.
+
+    `_run_design` used to call `score()` without the agent's orientations, its action space or its
+    warm start - so an oriented GA row would have been ranked on an all-north reading of a
+    placement whose legality was decided under rotation.
+    """
+    import inspect
+
+    from scripts import compare_agents
+
+    source = inspect.getsource(compare_agents._run_design)
+    scoring = [line.strip() for line in source.splitlines() if "score(" in line]
+    assert scoring, "the comparison must score the placements itself"
+    assert "best_orientations" in source
+    assert "built.action_space" in source and "built.initial_positions" in source

@@ -12,7 +12,7 @@ import sys
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.log import Log
 from placax_agents.experiment.budget import Budget
-from placax_agents.experiment.presets import OUTPUT_SUBDIRS, training
+from placax_agents.experiment.presets import default_output_dir, training
 from placax_agents.experiment.run import run_experiment
 from scripts.presets import build_setup
 
@@ -93,7 +93,10 @@ def main() -> None:
         output_dir = None
         placement_images_dir = args.placement_images_dir
     else:
-        output_dir = args.output_dir or (args.benchmark_dir / OUTPUT_SUBDIRS["training"])
+        # Per RUN, not per preset - see presets.default_output_dir.
+        output_dir = args.output_dir or default_output_dir(
+            "training", args.benchmark_dir, config.seed
+        )
         placement_images_dir = args.placement_images_dir or (
             output_dir / "placements" if args.placement_images else None
         )

@@ -92,6 +92,31 @@ class Spec:
             return cls(name=data)
         return cls(name=data["name"], kwargs=dict(data.get("kwargs", {})))
 
+    @classmethod
+    def parse(cls, text: str) -> "Spec":
+        """`"name"` or `"name:key=value,key=value"` - a component named on a command line.
+
+        Values are read as JSON, so `n_moves=128` is an int, `n_macros=null` is None and
+        `mode=corner` falls back to the bare string. This exists because an environment axis that
+        can only be set by editing Python is not selectable in the sense the rest of this
+        machinery means: `scripts/compare_agents.py` could name any of five agents and none of
+        three action spaces, so two of those agents could never actually be compared.
+        """
+        name, _, arguments = text.partition(":")
+        kwargs: dict[str, Any] = {}
+        for pair in (part for part in arguments.split(",") if part.strip()):
+            key, separator, raw = pair.partition("=")
+            if not separator:
+                raise ValueError(
+                    f"{pair!r} in {text!r} is not a key=value pair; a component is written "
+                    f"'name' or 'name:key=value,key=value'"
+                )
+            try:
+                kwargs[key.strip()] = json.loads(raw)
+            except json.JSONDecodeError:
+                kwargs[key.strip()] = raw  # a bare word, e.g. mode=corner
+        return cls(name=name.strip(), kwargs=kwargs)
+
 
 @dataclass(frozen=True)
 class BenchmarkSpec:
@@ -192,6 +217,21 @@ class PhysicalSpec:
             "validator": self.validator.to_dict() if self.validator else None,
         }
 
+    def identity(self) -> dict:
+        """The physical stack as a HASH sees it, each Spec completed with its own defaults.
+
+        Completed like every other slot, which it deliberately was not: the exclusion existed to
+        keep this machine's install paths out of the environment hash, and it worked by skipping
+        the whole slot - so `Spec("dreamplace")` and `Spec("dreamplace", {"target_density": 1.0})`
+        were one setup with two hashes, and two labs writing the same PPA experiment two ways
+        compared as incomparable. The install paths are excluded by NAME now
+        (`defaults.MACHINE_PARAMS`), which is the precise version of the same rule.
+        """
+        return {
+            "cell_placer": self.cell_placer.identity("cell_placer") if self.cell_placer else None,
+            "validator": self.validator.identity("validator") if self.validator else None,
+        }
+
     @classmethod
     def from_dict(cls, data: dict | None) -> "PhysicalSpec":
         data = data or {}
@@ -245,12 +285,10 @@ class EnvironmentSpec:
             "action_mask": self.action_mask.identity("action_mask") if self.action_mask else None,
             "action_space": self.action_space.identity("action_space"),
             "legalization": self.legalization.identity("legalization") if self.legalization else None,
-            # The physical stack is deliberately NOT completed with its builders' defaults: those
-            # signatures mix experiment settings (target_density, liberty) with this machine's
-            # install paths (dreamplace_root, openroad_binary), and completing them would fold a
-            # machine-specific value into the environment hash - the one thing build_physical's
-            # config/machine split exists to prevent. See defaults.py.
-            "physical": self.physical.to_dict(),
+            # Completed like every other slot, with this machine's install paths excluded by name
+            # rather than by skipping the slot - see PhysicalSpec.identity and
+            # defaults.MACHINE_PARAMS.
+            "physical": self.physical.identity(),
             "budget": self.budget.to_dict(),
         }
 
@@ -420,6 +458,24 @@ class ExperimentConfig:
         """Identifies the exact run, agent and seed included."""
         return _hash({"environment": self.environment.identity(),
                       "agent": self.agent.identity(), "seed": self.seed})
+
+    def resume_hash(self) -> str:
+        """Identifies a run for the purpose of CONTINUING it: `full_hash` without the budget.
+
+        Not a comparison level - two runs given different budgets are not comparable and
+        `full_hash` is right to say so. This answers a different question: whether an output
+        directory's checkpoint, log and budget spend belong to the run now being started.
+
+        The budget is the one axis a resumed invocation is expected to change. "Train for 100
+        iterations" and then "actually, 300" is one run continued, and the budget is a TOTAL
+        rather than an increment precisely so that it can be raised - so keying directory
+        ownership on `full_hash` would refuse the flow the budget was designed around, while a
+        changed seed, reward, agent or design is a different run and still refused.
+        """
+        environment = self.environment.identity()
+        environment.pop("budget", None)
+        return _hash({"environment": environment, "agent": self.agent.identity(),
+                      "seed": self.seed})
 
     def hash_at(self, level: str) -> str:
         """The hash for a named comparison level, so callers can parameterize over strictness."""

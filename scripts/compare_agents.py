@@ -38,9 +38,13 @@ from placax.log import Log
 from placax.reproducibility import describe_determinism, fingerprint
 from placax_agents.experiment.budget import Budget
 from placax_agents.experiment.build import build, build_benchmark
-from placax_agents.experiment.config import AgentSpec, ExperimentConfig, Spec, assert_comparable
+from placax_agents.experiment.config import (
+    AgentSpec, ExperimentConfig, Spec, assert_comparable,
+)
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
-from placax_agents.experiment.run import METRICS, run_experiment, score
+from placax_agents.experiment.run import (
+    METRICS, best_orientations, run_experiment, score,
+)
 
 DEFAULT_AGENTS = ("greedy_wiremask", "random_search", "ppo")
 
@@ -88,6 +92,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--macro_budget", type=int, default=None,
                         help="Override the preset's macro budget - place only the first N macros "
                              "by the configured order (MaskPlace's --pnm).")
+    parser.add_argument("--action_space", default=None,
+                        help="Override the preset's action space, as 'name' or "
+                             "'name:key=value,...' - e.g. 'perturbation:n_moves=128' or "
+                             "'oriented_grid'. Part of the ENVIRONMENT, so it is applied to the "
+                             "reference and every agent runs under it. Some agents require a "
+                             "particular space: local_search needs 'perturbation', which also "
+                             "needs an --initial_placement that fills the canvas.")
+    parser.add_argument("--initial_placement", default=None,
+                        help="Override the preset's warm start, same 'name:key=value' form - e.g. "
+                             "'greedy_wiremask_prefix:n_macros=null' to pre-place every macro, "
+                             "which is what a perturbation space has to start from.")
+    parser.add_argument("--agent_kwargs", default=None,
+                        help='JSON mapping an agent name to its own kwargs, e.g. '
+                             '\'{"genetic": {"population": 64}, "local_search": '
+                             '{"temperature": 0.5}}\'. The agent is the thing under test, so '
+                             "these differ per row by design; everything else is shared.")
     parser.add_argument("--canvas", default=None, choices=("die", "core"),
                         help="Override the preset's canvas anchor. 'core' scales and anchors the "
                              "grid to the design's placement rows; 'die' (the preset default) is "
@@ -107,6 +127,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "everything the agent did not choose). Drop to 'task' only for a "
                              "study that varies the observation on purpose.")
     parsed = parser.parse_args(argv[1:])
+    parsed.agent_kwargs = json.loads(parsed.agent_kwargs) if parsed.agent_kwargs else {}
     parsed.benchmark_dirs = (
         [pathlib.Path(part.strip()) for part in parsed.benchmark_dirs.split(",") if part.strip()]
         if parsed.benchmark_dirs else [parsed.benchmark_dir]
@@ -123,10 +144,16 @@ def _with_overrides(config: ExperimentConfig, args: argparse.Namespace) -> Exper
     benchmark = config.environment.benchmark
     overrides = {name: getattr(args, name) for name in ("grid", "macro_budget", "canvas")
                  if getattr(args, name) is not None}
-    if not overrides:
+    # The two environment axes an agent can REQUIRE. They sit beside grid and canvas rather than
+    # beside the agent for the reason the whole config is split in two: what an action is, and
+    # what the run starts from, are the task's to fix, not one competitor's.
+    environment = {name: Spec.parse(getattr(args, name))
+                   for name in ("action_space", "initial_placement")
+                   if getattr(args, name) is not None}
+    if not overrides and not environment:
         return config
     return dataclasses.replace(config, environment=dataclasses.replace(
-        config.environment, benchmark=dataclasses.replace(benchmark, **overrides)
+        config.environment, benchmark=dataclasses.replace(benchmark, **overrides), **environment
     ))
 
 
@@ -136,18 +163,27 @@ def _budget(args: argparse.Namespace) -> Budget:
     return Budget(env_steps=args.env_steps, iterations=args.n_iterations)
 
 
-def _agent_spec(name: str, reference: ExperimentConfig, population: int) -> AgentSpec:
+def _agent_spec(name: str, reference: ExperimentConfig, population: int,
+                agent_kwargs: dict | None = None) -> AgentSpec:
     """The agent half of a config; everything else is inherited from the reference unchanged."""
+    kwargs = dict((agent_kwargs or {}).get(name, {}))
     if name == "ppo":
-        return reference.agent
+        # PPO's whole agent half - policy, optimizer, loop - comes from the preset; --agent_kwargs
+        # tunes its algorithm hyperparameters only.
+        if not kwargs:
+            return reference.agent
+        algorithm = reference.agent.algorithm
+        return dataclasses.replace(reference.agent, algorithm=dataclasses.replace(
+            algorithm, kwargs={**algorithm.kwargs, **kwargs}
+        ))
     if name == "random_search":
-        return AgentSpec(algorithm=Spec("random_search", {"population": population}))
-    return AgentSpec(algorithm=Spec(name))
+        kwargs = {"population": population, **kwargs}
+    return AgentSpec(algorithm=Spec(name, kwargs))
 
 
 def build_comparison(
     reference: ExperimentConfig, agents: list[str], seeds: int, population: int,
-    level: str = "environment",
+    level: str = "environment", agent_kwargs: dict | None = None,
 ) -> list[ExperimentConfig]:
     """One config per (agent, seed), all sharing the reference's environment exactly."""
     configs = []
@@ -157,7 +193,7 @@ def build_comparison(
                 name=f"{name}-seed{seed}",
                 seed=seed,
                 environment=reference.environment,
-                agent=_agent_spec(name, reference, population),
+                agent=_agent_spec(name, reference, population, agent_kwargs),
             ))
     # The whole point. If a future edit lets an agent perturb the environment, this stops the run
     # rather than letting an incomparable table reach a paper.
@@ -287,7 +323,8 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
     A run that cost real compute should survive whatever happens to the next one.
     """
     reference = _with_overrides(build_preset(args.preset, benchmark_dir, budget=budget), args)
-    configs = build_comparison(reference, agents, args.seeds, args.population, args.level)
+    configs = build_comparison(reference, agents, args.seeds, args.population, args.level,
+                               args.agent_kwargs)
     output_root = (args.output_dir or (benchmark_dir / "comparison"))
     if len(args.benchmark_dirs) > 1 and args.output_dir is not None:
         output_root = output_root / benchmark_dir.name
@@ -307,7 +344,13 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
             config, output_root / config.name, built=built,
             eval_every=args.eval_every, log_every=max(1, args.eval_every or 1),
         )
-        measured = score(benchmark, built.agent.best_positions(state), built.n_placed)
+        # Scored exactly as run_experiment scores it: the agent's orientations, its action space
+        # and its warm start all change what a placement IS worth, and a table that dropped them
+        # would disagree with the per-run logs beside it.
+        measured = score(
+            benchmark, built.agent.best_positions(state), built.n_placed,
+            best_orientations(built.agent, state), built.action_space, built.initial_positions,
+        )
         # What this run actually spent, from its own last log line - not what the budget offered.
         # An agent that reports convergence stops early, and a table that prints the budget over
         # such a row claims a compute match the run itself declined.

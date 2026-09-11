@@ -1,5 +1,6 @@
 """PPO behind the Agent seam - the same three loop shapes, now one agent among several."""
-from placax_agents.agents.base import UpdateResult  # must precede jax imports
+from placax.action_space import DISCRETE_GRID  # must precede jax imports
+from placax_agents.agents.base import UpdateResult
 from placax_agents.ops.evaluate import _jitted_evaluate
 from placax_agents.training.algorithm.running_stats import init_running_stats
 
@@ -18,7 +19,7 @@ class PPOAgent:
 
     def __init__(self, benchmark, policy, optimizer, step_fn, episodes_per_iteration: int,
                  state_fn, extra_illegal_fn=None, initial_positions=None, n_placed: int = 0,
-                 gradient_steps_per_iteration: int = 1):
+                 gradient_steps_per_iteration: int = 1, action_space=None):
         self.benchmark = benchmark
         self.policy = policy
         self.optimizer = optimizer
@@ -28,6 +29,10 @@ class PPOAgent:
         # and how many, so the evaluation rollout places only what is left.
         self.initial_positions = initial_positions
         self.n_placed = n_placed
+        # The environment's action space, carried so the greedy evaluation rollout runs under the
+        # same rules the training episodes did. Defaulted rather than required, so a test that
+        # constructs this agent directly still gets the historical constructive space.
+        self.action_space = action_space if action_space is not None else DISCRETE_GRID
         self._step_fn = step_fn
         self._episodes = episodes_per_iteration
         self._gradient_steps = gradient_steps_per_iteration
@@ -36,8 +41,10 @@ class PPOAgent:
         from placax.core import reset
 
         # Shapes come from the state the episode actually starts in, warm start included.
-        obs0 = self.state_fn(reset(self.benchmark.params, self.initial_positions),
-                             self.benchmark.params, self.benchmark.sizes_array)
+        obs0 = self.state_fn(
+            reset(self.benchmark.params, self.initial_positions, self.action_space),
+            self.benchmark.params, self.benchmark.sizes_array,
+        )
         variables = self.policy.init(key, obs0)
         return {
             "variables": variables,
@@ -68,7 +75,7 @@ class PPOAgent:
             state["variables"], self.policy.apply, self.benchmark.params,
             self.benchmark.sizes_array, self.benchmark.cell_size, self.benchmark.padded_pin_idx,
             self.benchmark.padded_pin_offset, self.benchmark.valid_mask, self.state_fn,
-            self.extra_illegal_fn, self.initial_positions, self.n_placed,
+            self.extra_illegal_fn, self.initial_positions, self.n_placed, self.action_space,
         )
         return positions
 

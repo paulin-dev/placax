@@ -69,15 +69,51 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "measured. Strongly preferred over the bare flags.")
     parser.add_argument("--output_run_dir", type=pathlib.Path, default=None,
                         help="Where to write ppa.json with --config (default: --output_dir).")
-    return parser.parse_args(argv[1:])
+    parsed = parser.parse_args(argv[1:])
+    # Kept so the --config path can tell "left at its default" from "asked for", which is the
+    # difference between a flag that is irrelevant there and one that is quietly ignored.
+    parsed.parser_defaults = {
+        action.dest: action.default for action in parser._actions  # noqa: SLF001
+    }
+    return parsed
 
 
-def _run_from_config(args, output_dir: pathlib.Path) -> None:
+CONFIG_OWNED_FLAGS = ("target_density", "liberty", "clock_period_ns")
+"""Flags that describe the EXPERIMENT, not this machine, and so belong in the config.
+
+With --config these used to be read and then ignored, silently: someone following this script's
+own documented timing recipe (`--config=... --liberty=... --clock_period_ns=...`) got area and
+utilization back with timing reported as a dash, and nothing said why. They are refused now, with
+the Spec to write instead - the alternative, letting a flag override the config, would put a
+number in ppa.json under a full_hash whose config says something else."""
+
+
+def _reject_config_owned_flags(args, parser_defaults: dict) -> None:
+    """Refuses flags that would change the result while the config claims otherwise."""
+    given = [name for name in CONFIG_OWNED_FLAGS
+             if getattr(args, name) != parser_defaults.get(name)]
+    if not given:
+        return
+    settings = ", ".join(f"{name}={getattr(args, name)!r}" for name in given)
+    raise SystemExit(
+        f"--{' and --'.join(given)} describe the EXPERIMENT, not this machine, so with --config "
+        f"they belong in the config rather than on the command line - otherwise ppa.json would "
+        f"carry a run's full_hash beside a number its config cannot account for. Put them in "
+        f"EnvironmentSpec.physical, e.g. Spec('openroad', {{'liberty': ..., "
+        f"'clock_period_ns': ...}}) and Spec('dreamplace', {{'target_density': ...}}), and re-run "
+        f"without {settings}. --dreamplace_root, --use_docker, --gpu and --openroad_binary stay "
+        f"here: where a tool is installed is this machine's business and is deliberately not "
+        f"hashed."
+    )
+
+
+def _run_from_config(args, output_dir: pathlib.Path, parser_defaults: dict) -> None:
     """The attributable path: tools named by the config, result written back beside its manifest."""
     from placax_agents.experiment.build import build
     from placax_agents.experiment.config import ExperimentConfig
     from placax_agents.experiment.physical import evaluate_physical, write_ppa
 
+    _reject_config_owned_flags(args, parser_defaults)
     config = ExperimentConfig.read(args.config)
     built = build(config)
     # Where the binaries live on this host - deliberately not part of the config or its hash.
@@ -120,7 +156,7 @@ def main() -> None:
 
     output_dir = args.output_dir or (args.def_path.parent / "validate")
     if args.config is not None:
-        _run_from_config(args, output_dir)
+        _run_from_config(args, output_dir, args.parser_defaults)
         return
 
     Log.warning(

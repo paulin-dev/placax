@@ -113,13 +113,20 @@ Plus two non-registry environment fields: `benchmark.canvas` (`die` or `core`) a
 **Which agent drives which action space.** `local_search` requires `perturbation`; `genetic`
 drives `discrete_grid` or `oriented_grid`; everything else is `discrete_grid` only. A mismatch is
 refused at `build()` — a policy emitting `(grid_x, grid_y)` logits has nowhere to put a macro
-index.
+index. PPO's answer comes from its POLICY, which declares an `action_spaces` attribute (default
+`("discrete_grid",)`), so an architecture with a turn axis is an addition rather than an edit to
+`build.py` — it must also supply per-turn legality, which `legal_action_logits` insists on rather
+than stretching a position-only mask over an axis it never checked.
+
+`build()` refuses two more pairings for the same reason, rather than letting them produce a
+plausible number: a reward that cannot see the orientations its space chooses, and an action mask
+that needs a current macro under a space whose `target()` answers `UNPLACED`.
 
 ## Classes
 
 | Class | Where | Use it to |
 |---|---|---|
-| `ExperimentConfig` | `experiment/config.py` | describe a whole run; `.write()`/`.read()` it |
+| `ExperimentConfig` | `experiment/config.py` | describe a whole run; `.write()`/`.read()` it. `.resume_hash()` is `full_hash` minus the budget — what decides whether an output directory belongs to this run |
 | `EnvironmentSpec` / `AgentSpec` / `Spec` | same | the two halves, and one named component |
 | `BenchmarkSpec` | same | design, grid, macro budget, canvas, order |
 | `Budget` | `experiment/budget.py` | cap `env_steps` / `iterations` / `wall_clock_s` |
@@ -143,7 +150,7 @@ orthogonal — the environment with the *design removed*, which is what a multi-
 |---|---|
 | `benchmark` | same design, grid, order, budget |
 | `task` | + reward, warm start, constraints, physical stack, compute budget |
-| `environment` | + the observation. **The default**, and the right level for comparing agents |
+| `environment` | + the observation. **The default**, and the right level for comparing agents. Note the action space is in here: two agents driving different spaces are not solving one task and will not share a table |
 | `full` | + the agent and the seed — one exact run |
 | `protocol` | everything except which netlist. For `--benchmark_dirs` suites |
 
@@ -187,10 +194,10 @@ every script that consumes configs gains it at once. What a builder must be:
 
 | Slot | Builder signature | Returns |
 |---|---|---|
-| `reward` | `(grid, **kwargs)` | `(pin_idx, pin_offset, valid_mask, sizes, cell_size) -> RewardFn` |
+| `reward` | `(grid, **kwargs)` | `(pin_idx, pin_offset, valid_mask, sizes, cell_size) -> RewardFn`, where a RewardFn takes `(old_positions, new_positions, old_placed, new_placed[, orientations])` |
 | `state` | `(benchmark, **kwargs)` | `(state, params, sizes_array) -> obs dict` with `canvas` and `current_macro_size` |
 | `action_mask` | `(benchmark, **kwargs)` | `obs -> (grid_x, grid_y) bool` |
-| `action_space` | `(benchmark, **kwargs)` | an object with the `ActionSpace` methods |
+| `action_space` | `(benchmark, **kwargs)` | an object with the `ActionSpace` methods, plus `constructive` and `encode` |
 | `initial_placement` | `(benchmark, **kwargs)` | `key -> (n_macros, 2) positions or None` |
 | `legalization` | `(benchmark, **kwargs)` | `(placement, macro_sizes) -> placement` |
 | `policy` | `(benchmark, **kwargs)` | a Flax module whose `.apply` returns `(logits, value)` |
@@ -213,6 +220,11 @@ experiment while its config claims otherwise.
   macros off the design's real rows. `canvas="core"` + `legalization="row_snap"` is the
   physically realizable pair.
 - **`local_search` needs a dense reward** — a terminal-only reward gives it no per-step signal.
-  Watch `acceptance_rate` in the log.
+  Watch `acceptance_rate` in the log. Its `reward_return` is what the episode improved over the
+  placement it started from, not a replayed episode sum: a perturbation placement is not a
+  sequence of actions, and `replay()` refuses it rather than returning a zero.
+- **One output directory holds one run.** Resume is keyed on the directory, so a second config
+  pointed at an existing one is refused. Raising a budget continues the same run; a different
+  seed, reward, agent or design does not. Defaults are per run: `<benchmark_dir>/output/seed0`.
 - **`env_steps` is sample-matched, not compute-matched.** `gradient_steps` is reported separately.
 - `JAX_ENABLE_X64=1` is set deliberately (`placax/_device.py`) and roughly doubles memory.

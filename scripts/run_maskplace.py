@@ -19,7 +19,7 @@ from placax_agents.experiment.presets import (
     MASKPLACE_MACRO_BUDGET,
     MASKPLACE_N_EPISODES,
     WIREMASK_MARGIN,
-    OUTPUT_SUBDIRS,
+    default_output_dir,
     maskplace,
 )
 from placax_agents.experiment.registry import (
@@ -223,7 +223,11 @@ def main() -> None:
         output_dir = None
         placement_images_dir = args.placement_images_dir
     else:
-        output_dir = args.output_dir or (args.benchmark_dir / OUTPUT_SUBDIRS["maskplace"])
+        # Per RUN, not per preset: the seed is part of the path, so two seeds are two
+        # directories rather than one run resuming the other. See presets.default_output_dir.
+        output_dir = args.output_dir or default_output_dir(
+            "maskplace", args.benchmark_dir, config.seed
+        )
         placement_images_dir = args.placement_images_dir or (
             output_dir / "placements" if args.placement_images else None
         )

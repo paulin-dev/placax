@@ -33,6 +33,7 @@ from placax_agents.training.loops.parallel_train import _jitted_parallel_train_s
 from placax_agents.training.loops.train import _jitted_train_step
 
 import jax
+import jax.numpy as jnp
 
 StepFn = Callable[..., tuple[Any, Any, Any, Any]]
 """(key, variables, opt_state, running_stats) -> (variables, opt_state, running_stats, loss).
@@ -80,6 +81,7 @@ def _loop_buffered(built, n_episodes: int = 10, ppo_epochs: int = 10, batch_size
             state_fn=built.state_fn, ppo_config=built.ppo_config,
             extra_illegal_fn=built.extra_illegal_fn,
             initial_positions=built.initial_positions, n_placed=built.n_placed,
+            action_space=built.action_space,
         )
 
     # Every epoch runs one gradient step per whole minibatch; the short remainder is dropped.
@@ -94,7 +96,7 @@ def _loop_sequential(built):
             key, variables, opt_state, running_stats, built.optimizer, built.policy.apply,
             built.benchmark.params, built.benchmark.reward_fn, built.benchmark.sizes_array,
             built.benchmark.cell_size, built.state_fn, built.ppo_config, built.extra_illegal_fn,
-            built.initial_positions, built.n_placed,
+            built.initial_positions, built.n_placed, built.action_space,
         )
         return variables, opt_state, running_stats, loss
 
@@ -110,7 +112,7 @@ def _loop_parallel(built, n_envs: int = 8):
             keys, variables, opt_state, running_stats, built.optimizer, built.policy.apply,
             built.benchmark.params, built.benchmark.reward_fn, built.benchmark.sizes_array,
             built.benchmark.cell_size, built.state_fn, built.ppo_config, built.extra_illegal_fn,
-            built.initial_positions, built.n_placed,
+            built.initial_positions, built.n_placed, built.action_space,
         )
         return variables, opt_state, running_stats, loss
 
@@ -246,6 +248,118 @@ CONSTRUCTIVE = ("discrete_grid", "oriented_grid")
 turn, so it drives both; the policy-based and cell-sampling agents drive only the first."""
 
 
+def _probe_state(action_space, params):
+    """A starting state from this space, for asking it what it is like.
+
+    A perturbation space refuses to reset from an empty canvas - it has nothing to move - so it is
+    handed a full one. Nothing about the answers below depends on which placement that is; they
+    are properties of the space.
+    """
+    return action_space.reset(
+        params,
+        None if action_space.constructive else jnp.zeros((params.n_macros, 2), dtype=jnp.int32),
+    )
+
+
+def _names_a_macro(action_space, benchmark) -> bool:
+    """Whether this space's steps are ABOUT a particular macro - `target()`'s own answer.
+
+    The question `ActionSpace.target()` was introduced to answer, finally asked by something other
+    than a test. A constructive space answers `state.step`; a perturbation space answers UNPLACED,
+    because the macro is part of an action nobody has chosen yet.
+    """
+    from placax.action_space import UNPLACED
+
+    start = _probe_state(action_space, benchmark.params)
+    return int(action_space.target(start, benchmark.params)) != UNPLACED
+
+
+def _require_answerable_constraints(config, benchmark, extra_illegal_fn, action_space) -> None:
+    """Refuses an action mask that asks which macro is being placed, under a space with no answer.
+
+    `wiremask_quality` reads `current_macro_size` and a wiremask whose baseline is "the first
+    `state.step` macros are down". Under a perturbation space `state.step` is a move counter, so
+    both describe an arbitrary macro - and JAX clamps the out-of-range index rather than raising,
+    so the mask came back looking perfectly well-formed. That is a legality rule quietly computed
+    for the wrong macro, which is worse than no rule.
+
+    Only the mask is checked, not the whole observation: the canvas, positions and placed mask are
+    true whatever the space is, and `local_search` reads exactly those. A mask or state that works
+    without a current macro says so with `needs_current_macro = False`; absent, it is assumed to
+    need one, because everything written before this check did.
+    """
+    if extra_illegal_fn is None or _names_a_macro(action_space, benchmark):
+        return
+    if not getattr(extra_illegal_fn, "needs_current_macro", True):
+        return
+    raise ValueError(
+        f"action mask {config.environment.action_mask.name!r} is about the macro being placed "
+        f"next, and the {config.environment.action_space.name!r} action space has no such macro: "
+        f"every macro is already down and the action names the one to move, so `target()` answers "
+        f"UNPLACED and the mask would be computed for whichever macro `state.step` happened to "
+        f"land on. Drop the action mask for this space, or use one that reads the whole placement "
+        f"and marks itself `needs_current_macro = False`."
+    )
+
+
+def _accepts_orientations(reward_fn) -> bool:
+    """Whether `reward_fn` takes the fifth argument `step()` passes under an oriented space.
+
+    Read from the signature rather than discovered by a TypeError halfway through a traced scan,
+    where the error names a lambda in a loop and not the reward a config chose. An unintrospectable
+    callable (a builtin, a C extension) is given the benefit of the doubt.
+    """
+    import inspect
+
+    try:
+        signature = inspect.signature(reward_fn)
+    except (TypeError, ValueError):
+        return True
+    kinds = [parameter.kind for parameter in signature.parameters.values()]
+    if inspect.Parameter.VAR_POSITIONAL in kinds:
+        return True
+    positional = sum(
+        kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for kind in kinds
+    )
+    return positional >= 5
+
+
+def _require_orientation_aware_reward(config, benchmark, action_space) -> None:
+    """Refuses a reward that cannot see the orientations its action space will choose.
+
+    The GA on `oriented_grid` evolves a turn per macro. If the reward ignores it, the search
+    selects on a number that cannot move with the gene - measured before this check existed: one
+    placement scored -22.361 both all-north and all-quarter-turned, while its real HPWL moved from
+    21.907 to 23.907 and its overlap changed. Better to refuse at build() than to produce a
+    plausible number from a placement nobody made.
+    """
+    starts_oriented = _probe_state(action_space, benchmark.params).orientations is not None
+    if not starts_oriented or _accepts_orientations(benchmark.reward_fn):
+        return
+    raise ValueError(
+        f"action space {config.environment.action_space.name!r} chooses a macro ORIENTATION, and "
+        f"reward {config.environment.reward.name!r} cannot see one: a turned macro's center and "
+        f"pins move, so its reward would describe a placement that was never made. A RewardFn "
+        f"used here takes (old_positions, new_positions, old_placed, new_placed, "
+        f"orientations=None) - every shipped reward does; see placax/types.py and "
+        f"placax/extras/orientation.py for the two transforms that make one orientation-aware."
+    )
+
+
+def policy_action_spaces(policy) -> tuple[str, ...]:
+    """Which action spaces this policy's OUTPUT can express, as the policy itself declares.
+
+    A Flax module says so with an `action_spaces` class attribute. Absent, it is assumed to emit
+    the `(grid_x, grid_y)` logits map every shipped architecture emits, which is exactly one grid
+    cell and therefore `discrete_grid` alone. Read from the policy rather than hard-coded against
+    the name "ppo", so a policy with a fourth logits axis for the quarter turn is an architecture
+    someone adds - plus a per-turn legality map, which `legal_action_logits` insists on - and not
+    an edit to this file.
+    """
+    return tuple(getattr(policy, "action_spaces", CELL_ONLY))
+
+
 def _require_space(name: str, env, allowed: tuple[str, ...]) -> None:
     """Refuse a space whose action this agent's own output cannot express.
 
@@ -265,8 +379,9 @@ def _require_space(name: str, env, allowed: tuple[str, ...]) -> None:
 
 def _build_ppo_agent(config, benchmark, env):
     """PPO's own pieces - policy, optimizer, loop - assembled behind the Agent seam."""
-    _require_space("ppo", env, CELL_ONLY)
     policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
+    # What PPO can drive is what its POLICY can emit, so the policy is resolved first and asked.
+    _require_space(f"ppo/{config.agent.policy.name}", env, policy_action_spaces(policy))
     ppo_config = build_ppo_config(config.agent.algorithm)
 
     # The split optimizer's value_coef is derived from the algorithm's, but that happens in
@@ -281,6 +396,9 @@ def _build_ppo_agent(config, benchmark, env):
         extra_illegal_fn=env.extra_illegal_fn, episodes_per_iteration=0,
         initial_positions=env.initial_positions, n_placed=env.n_placed,
         policy=policy, optimizer=optimizer, ppo_config=ppo_config,
+        # The loops read the space from here, so it has to be set before they are built - an
+        # episode's length and its transition both come from it.
+        action_space=env.action_space,
     )
     if config.agent.loop.name not in LOOPS:
         raise KeyError(f"unknown loop {config.agent.loop.name!r}; registered: {sorted(LOOPS)}")
@@ -289,7 +407,8 @@ def _build_ppo_agent(config, benchmark, env):
     )
 
     agent = PPOAgent(benchmark, policy, optimizer, step_fn, episodes, env.state_fn,
-                     env.extra_illegal_fn, env.initial_positions, env.n_placed, gradient_steps)
+                     env.extra_illegal_fn, env.initial_positions, env.n_placed, gradient_steps,
+                     env.action_space)
     return agent, episodes, {"policy": policy, "optimizer": optimizer,
                              "ppo_config": ppo_config, "step_fn": step_fn}
 
@@ -459,6 +578,11 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     action_space = resolve(
         ACTION_SPACES, config.environment.action_space, benchmark, what="action space"
     )
+    # The two things a swapped action space can ask of the rest of the environment, checked here
+    # rather than discovered as a wrong number later: can the reward see the orientations this
+    # space chooses, and can the legality rules answer "which macro is this step about".
+    _require_orientation_aware_reward(config, benchmark, action_space)
+    _require_answerable_constraints(config, benchmark, extra_illegal_fn, action_space)
     # Derived from the run's seed, so a stochastic warm start is reproducible with the run, and
     # validated against the action space, which decides what "nothing left to do" means.
     initial_positions, n_placed = resolve_initial_placement(
@@ -481,10 +605,13 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     agent, episodes, extras = AGENTS[algorithm.name](config, benchmark, env)
 
     warm_start = f", warm start {n_placed} macros" if n_placed else ""
+    # The space's own episode length, not an assumed macro count: a perturbation episode is a move
+    # budget, so this line used to report a number the budget never charged.
+    steps_per_episode = action_space.episode_length(benchmark.params, n_placed)
     Log.info(
         f"  {len(benchmark.macro_sizes)} macros, {len(benchmark.nets)} nets, "
         f"cell_size={benchmark.cell_size:.2f}, agent={agent.name}, {episodes} episodes/iteration "
-        f"({episodes * (benchmark.params.n_macros - n_placed):,} env steps/iteration){warm_start}"
+        f"({episodes * steps_per_episode:,} env steps/iteration){warm_start}"
     )
     return BuiltExperiment(
         config=config, benchmark=benchmark, state_fn=state_fn,

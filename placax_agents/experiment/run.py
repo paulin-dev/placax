@@ -25,11 +25,13 @@ import pathlib
 import time
 
 from placax.log import Log  # must precede jax imports
+from placax.action_space import DISCRETE_GRID
 from placax.core import replay
 from placax.extras.legality import jitted_legality
 from placax.extras.orientation import effective_sizes, oriented_pin_offsets
 from placax.extras.rewards import hpwl
 from placax.reproducibility import describe_determinism, fingerprint
+from placax.types import EnvParams
 from placax_agents.agents.ppo import is_ppo_state
 from placax_agents.experiment.budget import BudgetTracker, BudgetUse
 from placax_agents.experiment.build import BuiltExperiment, build
@@ -47,10 +49,13 @@ METRICS = {
                  "two macros, so this is not full-netlist HPWL and is not directly comparable to "
                  "a paper that reports one. Computed by the runner from the placement the agent "
                  "handed over, identically for every agent.",
-    "reward_return": "Sum of the run's CONFIGURED reward over the episode, obtained by replaying "
-                     "the final placement through placax.core.step. This is what the agent was "
-                     "actually asked to optimize; real_hpwl is fixed across configs so a table "
-                     "stays readable when the reward changes.",
+    "reward_return": "The run's CONFIGURED reward for the final placement - what the agent was "
+                     "actually asked to optimize, where real_hpwl is fixed across configs so a "
+                     "table stays readable when the reward changes. Under a constructive action "
+                     "space it is the episode sum, obtained by replaying the placement through "
+                     "placax.core.step; under a perturbation space a placement is not a sequence "
+                     "of actions, so it is the reward of the final placement against the one the "
+                     "episode started from, which for a dense reward is the same total.",
     "overlap_ratio": "Fraction of total macro area covered by more than one macro. Should be 0; "
                      "anything else means the action mask's relaxation valve fired and the "
                      "placement is not physically realizable.",
@@ -123,6 +128,67 @@ def _load_bundle(template: dict, path: pathlib.Path) -> dict:
         )
 
 
+def recorded_run(output_dir: pathlib.Path) -> ExperimentConfig | None:
+    """The config of the run this directory already holds, or None if it holds no readable one.
+
+    Read from the manifest, which every run writes before its first iteration - so a run that
+    crashed immediately is still identifiable. A directory with no manifest, or one whose config
+    this version cannot parse, returns None and is treated as free.
+    """
+    manifest_path = output_dir / MANIFEST_NAME
+    if not manifest_path.exists():
+        return None
+    try:
+        recorded = json.loads(manifest_path.read_text()).get("config")
+        return ExperimentConfig.from_dict(recorded) if recorded else None
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+def assert_output_dir_belongs_to(output_dir: pathlib.Path, config: ExperimentConfig) -> None:
+    """Refuses to write a run into a directory that already holds a DIFFERENT run.
+
+    Resume is keyed on the directory, so without this check a second configuration pointed at the
+    same output directory silently inherits the first one's budget spend and its checkpoint, while
+    `write_manifest` replaces the record of what produced them. The result is a directory whose
+    manifest describes one experiment, whose log lines carry another's `full_hash`, and whose
+    weights belong to neither in any way a reader could reconstruct.
+
+    That is trivially easy to hit: the default output directory of each training script was per
+    PRESET, while this project's own advice is to vary `--seed` and report across seeds. Two seeds
+    are two runs, and the second one used to resume the first.
+
+    Ownership is keyed on `resume_hash` rather than `full_hash`, so raising a budget and carrying
+    on - the flow a TOTAL budget exists for - is the same run, while a different seed, reward,
+    agent or design is not.
+    """
+    recorded = recorded_run(output_dir)
+    if recorded is None or recorded.resume_hash() == config.resume_hash():
+        return
+    raise ValueError(
+        f"{output_dir} already holds run {recorded.full_hash()} ({recorded.name!r}, seed "
+        f"{recorded.seed}), and this is run {config.full_hash()} ({config.name!r}, seed "
+        f"{config.seed}). Resuming would continue the other run's budget from its checkpoint and "
+        f"overwrite its manifest, leaving a directory attributable to neither. Point --output_dir "
+        f"at a fresh directory (one per run is the intended layout - see how "
+        f"scripts/compare_agents.py names its subdirectories), or delete this one to start it "
+        f"over. Differences:\n  " + "\n  ".join(_describe_run_differences(recorded, config))
+    )
+
+
+def _describe_run_differences(recorded: ExperimentConfig, config: ExperimentConfig) -> list[str]:
+    """Why two runs are not the same run, in the same shape assert_comparable reports it."""
+    from placax_agents.experiment.config import _describe_differences
+
+    differences = _describe_differences(
+        {"environment": recorded.environment.identity(), "agent": recorded.agent.identity(),
+         "seed": recorded.seed},
+        {"environment": config.environment.identity(), "agent": config.agent.identity(),
+         "seed": config.seed},
+    )
+    return [line for line in differences if not line.startswith("environment.budget")]
+
+
 def _read_budget_use(output_dir: pathlib.Path | None, fallback_iterations: int) -> BudgetUse:
     """Budget spent by earlier invocations of this run.
 
@@ -145,6 +211,9 @@ def _write_budget_use(output_dir: pathlib.Path | None, config: ExperimentConfig,
         "budget_use": use.to_dict(),
         "environment_hash": config.environment_hash(),
         "full_hash": config.full_hash(),
+        # What decides whether a later invocation may continue THIS directory - full_hash without
+        # the budget, since raising a budget continues a run rather than starting another.
+        "resume_hash": config.resume_hash(),
     }, indent=2, sort_keys=True) + "\n")
 
 
@@ -190,7 +259,57 @@ def best_orientations(agent, state):
     return getter(state) if getter is not None else None
 
 
-def score(benchmark, positions, n_placed: int = 0, orientations=None) -> dict:
+def episode_return(benchmark, positions, n_placed: int = 0, orientations=None,
+                   action_space=None, initial_positions=None) -> float:
+    """What this placement is worth under the run's CONFIGURED reward, however its space works.
+
+    Two different questions, and the action space decides which one applies:
+
+    **Constructive space** - the placement IS the sequence of actions that built it, so the return
+    is that episode replayed through the same `step()` a policy drove. Sparse and dense rewards
+    both come out right, since the episode sum is what they agree on.
+
+    **Perturbation space** - the placement is where an episode of MOVES ended up, and there is no
+    sequence to replay. What the episode was worth is what it improved: `reward_fn(start, end)`,
+    which for a dense reward is exactly the sum of the per-move deltas that got there (they
+    telescope) and for a sparse one is the terminal value. Replaying it as appends instead - which
+    is what this did - handed `replay` a warm start covering every macro, so the scan had nothing
+    to iterate and the run reported a return of exactly 0.0 for every iteration of every
+    perturbation run, under a metric the manifest defines as "what the agent was actually asked to
+    optimize".
+    """
+    action_space = action_space if action_space is not None else DISCRETE_GRID
+    if orientations is not None and action_space.reset(
+        # A space that cannot produce orientations cannot be handed a placement that has them:
+        # `real_hpwl` would measure the turns while the reward could not see them, so one call
+        # would report two different placements. Refused rather than quietly scored half-rotated.
+        EnvParams(grid=1, n_macros=1), jnp.zeros((1, 2), dtype=jnp.int32)
+    ).orientations is None:
+        raise ValueError(
+            f"this placement carries orientations and the {action_space.name!r} action space does "
+            f"not produce any, so its reward cannot see them while its HPWL can. Score it under "
+            f"the space it was made in (e.g. 'oriented_grid'), or drop the orientations."
+        )
+    if action_space.constructive:
+        return float(replay(positions, benchmark.reward_fn, benchmark.params, n_placed,
+                            action_space, orientations))
+    if initial_positions is None:
+        raise ValueError(
+            f"scoring a {action_space.name!r} placement means comparing it with the placement its "
+            f"episode started from, and none was given. Pass the run's `initial_positions` - that "
+            f"space cannot run without one anyway."
+        )
+    placed = positions[:, 0] >= 0
+    started_placed = initial_positions[:, 0] >= 0
+    if orientations is None:
+        return float(benchmark.reward_fn(initial_positions, positions, started_placed, placed))
+    return float(
+        benchmark.reward_fn(initial_positions, positions, started_placed, placed, orientations)
+    )
+
+
+def score(benchmark, positions, n_placed: int = 0, orientations=None, action_space=None,
+          initial_positions=None) -> dict:
     """Everything the runner measures about one placement, computed identically for every agent.
 
     Three things rather than one, because a wirelength number alone can hide two different
@@ -206,8 +325,8 @@ def score(benchmark, positions, n_placed: int = 0, orientations=None) -> dict:
     measured = jitted_legality(positions, grid_sizes, benchmark.params).to_dict()
     return {
         "real_hpwl": score_placement(benchmark, positions, orientations),
-        "reward_return": float(
-            replay(positions, benchmark.reward_fn, benchmark.params, n_placed)
+        "reward_return": episode_return(
+            benchmark, positions, n_placed, orientations, action_space, initial_positions
         ),
         **measured,
     }
@@ -237,6 +356,10 @@ def run_experiment(
 
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
+        # Before anything is written: this directory must belong to this run, or to no run at all.
+        # Checked whatever `resume` says - a fresh start into someone else's directory still
+        # overwrites their manifest and leaves their log lines behind it.
+        assert_output_dir_belongs_to(output_dir, config)
         manifest_path = write_manifest(output_dir, config)
         checkpoint_path = output_dir / CHECKPOINT_NAME
         best_checkpoint_path = output_dir / BEST_CHECKPOINT_NAME
@@ -284,12 +407,25 @@ def run_experiment(
     # improvement preceded it, so patience counts only evals in this invocation.
     evals_without_improvement = 0
 
-    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    def evaluates_next(spent: BudgetUse) -> bool:
+        """Whether the iteration about to run will be followed by an evaluation rollout.
+
+        Asked before the iteration so its eval can be budgeted with it - see
+        BudgetTracker.can_afford.
+        """
+        return eval_every > 0 and (spent.iterations + 1) % eval_every == 0
+
+    def affordable() -> bool:
+        eval_steps = built.steps_per_episode if evaluates_next(tracker.use) else 0
+        return tracker.can_afford(
+            built.episodes_per_iteration, built.steps_per_episode, eval_steps
+        )
+
     log: list[dict] = []
     stop_reason = tracker.exhausted()
     if stop_reason is not None:
         Log.info(f"  budget already exhausted ({stop_reason}); nothing to do")
-    elif not tracker.can_afford(built.episodes_per_iteration, built.steps_per_episode):
+    elif not affordable():
         # A budget that cannot pay for a single iteration is a configuration mistake, not a
         # finished run, so say so rather than exiting successfully having trained nothing.
         raise ValueError(
@@ -300,9 +436,7 @@ def run_experiment(
             f"iteration."
         )
 
-    while stop_reason is None and tracker.can_afford(
-        built.episodes_per_iteration, built.steps_per_episode
-    ):
+    while stop_reason is None and affordable():
         # 3. One agent update, whatever that means for this agent.
         key, step_key = random.split(key)
         agent_state, result = agent.update(step_key, agent_state)
@@ -319,7 +453,13 @@ def run_experiment(
             positions = agent.best_positions(agent_state)
             orientations = best_orientations(agent, agent_state)
             use = tracker.record_evaluation(built.steps_per_episode)
-            measured = score(benchmark, positions, built.n_placed, orientations)
+            measured = score(
+                benchmark, positions, built.n_placed, orientations,
+                # The run's own space and warm start: what a placement's return MEANS depends on
+                # how its actions worked, and a perturbation placement is scored against where it
+                # started rather than replayed as a sequence of appends.
+                built.action_space, built.initial_positions,
+            )
             real_hpwl = measured["real_hpwl"]
             if not measured["is_legal"]:
                 Log.warning(

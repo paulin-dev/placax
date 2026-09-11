@@ -17,10 +17,18 @@ Two deliberate exclusions, both because the parameter is not the config's to sta
   * **machinery parameters** (`state_fn`, `initial_positions`, ...) are handed to a component by
     `build()` from the resolved environment. They appear in builder signatures but are never
     written in a config, and they are not JSON at all.
-  * **the physical slots, entirely.** Their builders' parameters are split between the experiment
-    (`target_density`, the liberty file) and THIS MACHINE (`dreamplace_root`, `openroad_binary`,
-    `use_docker`). Completing them would fold an install-specific value into the environment
-    hash, which is precisely what `build_physical`'s machine/config split exists to prevent.
+  * **machine parameters** (`dreamplace_root`, `openroad_binary`, `use_docker`, ...). These sit in
+    the same builder signatures as real experiment settings, because a tool wrapper needs both to
+    be constructed - but where a binary lives differs between two labs running one experiment, and
+    folding it into an environment hash would stop those two runs ever comparing as comparable.
+    That is what `build_physical`'s machine/config split exists to prevent, and marking the
+    parameters is how this file keeps it.
+
+    They used to be avoided by skipping the physical slots WHOLESALE, which cost the slot the
+    property every other one has: `Spec("dreamplace")` and `Spec("dreamplace", {"target_density":
+    1.0})` are one tool with one setting and hashed differently, so two identical PPA setups
+    compared as incomparable - on the one axis where an unattributable number is the whole
+    problem.
 
 Everything here is imported lazily. `config.py` must stay importable - and a written config
 readable - without pulling in jax, flax, optax and the whole registry behind them.
@@ -40,6 +48,22 @@ _MACHINERY_PARAMS = frozenset({
 can be constructed bare in a test, but a config never states them and a hash must not contain
 them."""
 
+MACHINE_PARAMS = frozenset({
+    "dreamplace_root", "openroad_binary", "python_executable", "use_docker", "gpu",
+    "extra_mounts", "extra_config",
+})
+"""Where a tool lives and how this host runs it - never part of an experiment's identity.
+
+Two labs running the same experiment on the same design must compare as comparable, so an install
+path, a Docker flag or a GPU switch cannot reach a hash. `build_physical` already passes these in
+separately as `machine` kwargs; listing them here is what lets everything ELSE in the same
+signature - `target_density`, `liberty_path`, `clock_period_ns`, `route` - be completed like any
+other component's defaults.
+
+`extra_config` is here for a different reason than the rest: it is a dict, so it is not a JSON
+scalar and could never have been completed anyway; naming it keeps the list readable as "the
+arguments that are not the experiment"."""
+
 
 def _defaults_from_signature(builder) -> dict:
     """Every JSON-scalar keyword default `builder` declares, i.e. what a config may leave unsaid.
@@ -58,7 +82,7 @@ def _defaults_from_signature(builder) -> dict:
             continue
         if parameter.default is parameter.empty:
             continue
-        if name.startswith("_") or name in _MACHINERY_PARAMS:
+        if name.startswith("_") or name in _MACHINERY_PARAMS or name in MACHINE_PARAMS:
             continue
         if not isinstance(parameter.default, _JSON_SCALARS):
             continue
@@ -82,6 +106,10 @@ def _slot_registries() -> dict:
         "policy": registry.POLICIES,
         "optimizer": registry.OPTIMIZERS,
         "loop": LOOPS,
+        # The physical slots complete like every other one now; MACHINE_PARAMS above is what
+        # keeps this host's install paths out of the result.
+        "cell_placer": registry.CELL_PLACERS,
+        "validator": registry.VALIDATORS,
     }
 
 

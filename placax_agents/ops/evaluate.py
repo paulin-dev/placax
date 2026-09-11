@@ -1,5 +1,6 @@
 """Evaluates a policy's placement quality via a greedy (argmax) rollout, reporting real HPWL."""
-from placax.core import reset, step  # must precede jax imports
+from placax.action_space import DISCRETE_GRID  # must precede jax imports
+from placax.core import reset, step
 from placax.extras.rewards import hpwl
 from placax.types import EnvParams
 from placax_agents.policy.action import legal_action_logits
@@ -11,7 +12,8 @@ import jax
 import jax.numpy as jnp
 
 
-def _no_reward(_old_positions, _new_positions, _old_placed, _new_placed) -> jax.Array:
+def _no_reward(_old_positions, _new_positions, _old_placed, _new_placed,
+               _orientations=None) -> jax.Array:
     """The evaluation rollout scores its own final placement, so per-step reward is unused.
 
     Passed explicitly rather than letting evaluate() reimplement the state transition inline:
@@ -34,9 +36,14 @@ def evaluate(
     extra_illegal_fn: ExtraIllegalFn | None = None,
     initial_positions: jax.Array | None = None,
     n_placed: int = 0,
+    action_space=DISCRETE_GRID,
 ):
-    """Places every remaining macro greedily (argmax over legal cells) and returns (final_positions, real_hpwl)."""
-    state = reset(params, initial_positions)
+    """Places every remaining macro greedily (argmax over legal cells) and returns (final_positions, real_hpwl).
+
+    Drives the run's own action space, like the training rollout it is measuring - an eval under
+    different rules from the episodes that produced the policy would not be measuring that policy.
+    """
+    state = reset(params, initial_positions, action_space)
 
     def scan_step(state, _macro_idx):
         # 1. Ask the policy for action scores at this state (we don't need the value estimate here).
@@ -55,17 +62,20 @@ def evaluate(
         masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
 
         # 3. Greedily take the single best legal cell (no sampling, unlike training rollouts).
+        #    Unravelled against the logits' own shape, so an action carrying a further axis comes
+        #    out whole rather than as two numbers read off a flat index.
         flat_idx = jnp.argmax(masked_logits.ravel())
-        grid_y = masked_logits.shape[1]
-        action = jnp.array([flat_idx // grid_y, flat_idx % grid_y])
+        action = jnp.stack(jnp.unravel_index(flat_idx, masked_logits.shape))
 
         # 4. Hand the action to the kernel - the same step() a training rollout drives.
-        new_state, _reward, _done = step(state, action, _no_reward, params)
+        new_state, _reward, _done = step(state, action, _no_reward, params, action_space)
         return new_state, None
 
-    # One scan step per macro still to place: a warm start shortens the episode rather than
-    # scanning past the end of the position array.
-    final_state, _ = jax.lax.scan(scan_step, state, jnp.arange(params.n_macros - n_placed))
+    # One scan step per action this space's episode takes: a warm start shortens a constructive
+    # episode rather than scanning past the end of the position array.
+    final_state, _ = jax.lax.scan(
+        scan_step, state, jnp.arange(action_space.episode_length(params, n_placed))
+    )
 
     # Convert grid positions to real-unit centers to score the final layout with true HPWL.
     real_centers = to_real_centers(final_state.positions, sizes_array, cell_size)
@@ -74,5 +84,7 @@ def evaluate(
 
 # Built once at import to avoid retracing/recompiling on every call (same fix as buffered_train.py's jitted fns).
 _jitted_evaluate = jax.jit(
-    evaluate, static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn", "n_placed")
+    evaluate,
+    static_argnames=("policy_apply_fn", "state_fn", "extra_illegal_fn", "n_placed",
+                     "action_space"),
 )

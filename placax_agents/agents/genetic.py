@@ -184,8 +184,13 @@ def _decode_population(genomes: jax.Array, agent: GeneticAgent):
     """Every genome decoded and scored at once - the population method `replay` was built for."""
     positions, orientations = jax.vmap(lambda genome: _decode(genome, agent))(genomes)
     # Scored by the run's CONFIGURED reward, replayed through the same step() a policy drives, so
-    # swapping the reward moves what the GA optimizes exactly as it moves what PPO optimizes.
-    returns = jax.vmap(agent.score)(positions)
+    # swapping the reward moves what the GA optimizes exactly as it moves what PPO optimizes -
+    # WITH the turns each genome chose, or selection would run on a fitness that cannot see the
+    # third gene at all and orientation would drift on legality alone.
+    returns = (
+        jax.vmap(agent.score)(positions, orientations) if orientations is not None
+        else jax.vmap(agent.score)(positions)
+    )
     if orientations is None:
         orientations = jnp.zeros(
             (genomes.shape[0], agent.benchmark.params.n_macros), dtype=jnp.int32

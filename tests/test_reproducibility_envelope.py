@@ -319,6 +319,60 @@ def test_the_manifest_records_the_resolved_design_not_just_its_path(tmp_path) ->
     assert manifest["config"]["full_hash"] == built.config.full_hash()
 
 
+# ------------------------------------------------- one directory holds exactly one run
+
+
+def test_a_second_run_is_refused_the_first_runs_output_directory(tmp_path) -> None:
+    """The worst outcome this machinery can produce: a directory attributable to neither run.
+
+    Resume is keyed on the directory, so a different config pointed at an existing one used to
+    inherit its budget spend (often finishing instantly, having "already" spent it) and its
+    checkpoint, while the manifest was overwritten with the newcomer's hashes. The log lines then
+    carried one run's `full_hash` under another run's manifest, beside a third thing's weights.
+    """
+    directory = _bookshelf(tmp_path / "bench")
+    output_dir = tmp_path / "run"
+    first = _small(training(directory, seed=0, budget=Budget(iterations=2)))
+    run_experiment(first, output_dir, built=build(first), eval_every=0, log_every=10 ** 9)
+    recorded = json.loads((output_dir / MANIFEST_NAME).read_text())["config"]["full_hash"]
+
+    # A different seed is a different run, and so is a different reward.
+    for other in (
+        _small(training(directory, seed=7, budget=Budget(iterations=2))),
+        _small(training(directory, seed=0, budget=Budget(iterations=2)),
+               reward=Spec("hpwl", {"dense": True})),
+    ):
+        with pytest.raises(ValueError, match="already holds run"):
+            run_experiment(other, output_dir, built=build(other), eval_every=0)
+
+    # And the refusal left the first run's record exactly as it was.
+    assert json.loads((output_dir / MANIFEST_NAME).read_text())["config"]["full_hash"] == recorded
+    logged = [json.loads(line) for line in (output_dir / LOG_NAME).read_text().splitlines()]
+    assert {line["full_hash"] for line in logged} == {recorded}
+
+
+def test_the_same_run_still_resumes_its_own_directory(tmp_path: pathlib.Path) -> None:
+    # The guard must not cost a run its own resume, which is the whole point of the directory.
+    directory = _bookshelf(tmp_path / "bench")
+    output_dir = tmp_path / "run"
+    config = _small(training(directory, budget=Budget(iterations=4)))
+    run_experiment(config, output_dir, built=build(config), eval_every=0, log_every=10 ** 9)
+    _state, log = run_experiment(
+        config, output_dir, built=build(config), eval_every=0, log_every=10 ** 9
+    )
+    # Budget already spent, so the resumed invocation runs nothing further - and does not raise.
+    assert log == []
+
+
+def test_the_default_output_directory_is_per_run_not_per_preset(tmp_path) -> None:
+    # The collision above was easy to hit because the default directory was per PRESET while the
+    # documented workflow is to vary the seed. Two seeds must name two directories.
+    from placax_agents.experiment.presets import default_output_dir
+
+    assert default_output_dir("maskplace", tmp_path, 0) != default_output_dir("maskplace", tmp_path, 1)
+    assert default_output_dir("maskplace", tmp_path, 42).name == "seed42"
+
+
 # --------------------------------------------------------------------- the physical stack
 
 
@@ -535,23 +589,61 @@ def test_completing_defaults_leaves_the_written_config_as_the_author_wrote_it(tm
     assert ExperimentConfig.from_json(config.to_json()) == config
 
 
-def test_the_physical_stack_is_not_completed_with_its_builders_defaults() -> None:
-    """Machine paths must never reach the environment hash, which completing them would do.
-
-    `_cell_placer_dreamplace` and `OpenROADValidator` both carry defaults for things that belong
-    to a host, not an experiment - `dreamplace_root`, `openroad_binary`. Completing those would
-    fold an install path into the hash and stop two labs running one experiment from comparing.
-    """
+def _physical_identity(physical: PhysicalSpec) -> dict:
     from placax_agents.experiment.config import EnvironmentSpec
 
-    physical = PhysicalSpec(cell_placer=Spec("dreamplace"), validator=Spec("openroad"))
-    identity = EnvironmentSpec(
+    return EnvironmentSpec(
         benchmark=training("b").environment.benchmark, reward=Spec("hpwl"), state=Spec("canvas"),
         budget=Budget(iterations=1), physical=physical,
-    ).task_identity()
-    written = json.dumps(identity["physical"])
-    assert "dreamplace_root" not in written and "openroad_binary" not in written
-    assert identity["physical"] == physical.to_dict()
+    ).task_identity()["physical"]
+
+
+def test_machine_paths_never_reach_the_environment_hash() -> None:
+    """Where a tool is INSTALLED cannot be part of an experiment's identity.
+
+    `_cell_placer_dreamplace` and `_validator_openroad` both take host-specific arguments -
+    `dreamplace_root`, `openroad_binary`, `use_docker`, `gpu` - alongside real experiment
+    settings. Folding one into the hash would stop two labs running the same experiment on the
+    same design from ever comparing as comparable.
+    """
+    written = json.dumps(_physical_identity(
+        PhysicalSpec(cell_placer=Spec("dreamplace"), validator=Spec("openroad"))
+    ))
+    for machine_parameter in ("dreamplace_root", "openroad_binary", "use_docker", "gpu",
+                              "python_executable"):
+        assert machine_parameter not in written
+
+
+def test_two_spellings_of_one_physical_stack_hash_alike() -> None:
+    """The property every other slot has, and this one did not.
+
+    The old rule excluded the physical slots WHOLESALE to keep install paths out, which meant a
+    Spec's experiment settings were never completed either: `Spec("dreamplace")` and
+    `Spec("dreamplace", {"target_density": 1.0})` are one tool at one density and used to hash
+    differently - so two identical PPA setups written by two people compared as incomparable, on
+    the one axis where an unattributable number is the whole problem.
+    """
+    bare = _physical_identity(
+        PhysicalSpec(cell_placer=Spec("dreamplace"), validator=Spec("openroad"))
+    )
+    spelled_out = _physical_identity(PhysicalSpec(
+        cell_placer=Spec("dreamplace", {"target_density": 1.0}),
+        validator=Spec("openroad", {"liberty_path": None, "clock_period_ns": None,
+                                    "wire_rc_layer": "metal3", "clock_name": "core_clock",
+                                    "route": None}),
+    ))
+    assert bare == spelled_out
+
+
+def test_a_physical_setting_that_changes_the_measurement_changes_the_hash() -> None:
+    # Routing depth decides whether routed wirelength and DRC are measured at all, and a density
+    # target changes the placement - neither is a property of this host.
+    baseline = _physical_identity(PhysicalSpec(validator=Spec("openroad")))
+    routed = _physical_identity(PhysicalSpec(validator=Spec("openroad", {"route": "detailed"})))
+    denser = _physical_identity(PhysicalSpec(cell_placer=Spec("dreamplace",
+                                                              {"target_density": 0.7})))
+    assert baseline != routed
+    assert baseline != denser
 
 
 def test_a_derived_kwarg_is_recorded_at_the_value_the_run_uses(tmp_path: pathlib.Path) -> None:

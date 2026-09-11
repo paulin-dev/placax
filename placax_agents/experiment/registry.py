@@ -191,7 +191,11 @@ REWARDS = {
 
 def _state_canvas(benchmark, lookahead: int = 1):
     """The bare canvas observation, bound to this benchmark's real cell_size."""
-    return functools.partial(observation, cell_size=benchmark.cell_size, lookahead=lookahead)
+    state_fn = functools.partial(observation, cell_size=benchmark.cell_size, lookahead=lookahead)
+    # Carried through the partial: what an observation NEEDS from the action space is a property
+    # of the observation, and build() checks it. See placax/action_space.py's target().
+    state_fn.needs_current_macro = getattr(observation, "needs_current_macro", True)
+    return state_fn
 
 
 def _state_wiremask(benchmark, lookahead: int = 2):
@@ -242,13 +246,18 @@ def _init_empty(_benchmark):
     return lambda _key: None
 
 
-def _init_greedy_wiremask_prefix(benchmark, n_macros: int = 8):
+def _init_greedy_wiremask_prefix(benchmark, n_macros: int | None = 8):
     """Pre-place the first `n_macros` macros with the greedy-wiremask heuristic.
 
     A free, open-source warm start built entirely from shipped pieces, which is exactly the
     question docs §5.3 leaves open: can one recover the benefit Circuit Training gets from a
     commercial initial placement? The agent then starts from a partly-populated canvas and
     places only what is left.
+
+    `n_macros=None` places EVERY macro, which is not a prefix at all but a complete starting
+    placement - what a perturbation space has to begin from, since it moves macros rather than
+    appending them. Spelled as None rather than as a number someone has to keep in step with the
+    design's macro count (543 here, 128 under MaskPlace's budget, different on every benchmark).
     """
     from placax_agents.agents.baselines import GreedyWiremaskAgent
 
@@ -256,11 +265,15 @@ def _init_greedy_wiremask_prefix(benchmark, n_macros: int = 8):
         # The heuristic is deterministic, so the key is unused and the warm start is a pure
         # function of the netlist and the placement order.
         placement = GreedyWiremaskAgent(benchmark).best_positions({})
+        if n_macros is None:
+            return placement
         # Keep only the prefix; everything after it returns to the unplaced sentinel.
         return placement.at[n_macros:].set(-1)
 
-    if n_macros <= 0:
-        raise ValueError(f"greedy_wiremask_prefix needs n_macros > 0, got {n_macros}")
+    if n_macros is not None and n_macros <= 0:
+        raise ValueError(
+            f"greedy_wiremask_prefix needs n_macros > 0, or None for every macro, got {n_macros}"
+        )
     return init_fn
 
 
@@ -478,7 +491,16 @@ OPTIMIZERS = {"adam": _optimizer_adam, "maskplace_split": _optimizer_maskplace_s
 # and are recorded in the run's fingerprint rather than its config.
 
 
-def _cell_placer_dreamplace(dreamplace_root=None, **kwargs):
+def _cell_placer_dreamplace(dreamplace_root=None, target_density: float = 1.0, **kwargs):
+    """DREAMPlace, with the one setting that changes the result named in the signature.
+
+    `target_density` is spelled out rather than left to **kwargs so that `defaults.py` can see it:
+    a Spec's unstated kwargs are completed from its builder's own signature before hashing, which
+    is how `Spec("dreamplace")` and `Spec("dreamplace", {"target_density": 1.0})` come out as the
+    one setup they are. Everything still arriving through **kwargs is this machine's - where
+    DREAMPlace is installed, whether to run it in Docker or on the GPU - and is deliberately
+    absent from the hash. See defaults.MACHINE_PARAMS.
+    """
     from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 
     if dreamplace_root is None:
@@ -488,13 +510,32 @@ def _cell_placer_dreamplace(dreamplace_root=None, **kwargs):
             "build_physical()/evaluate_physical(), e.g. from scripts/validate_design.py's "
             "--dreamplace_root or --use_docker."
         )
-    return DREAMPlaceCellPlacer(dreamplace_root=dreamplace_root, **kwargs)
+    return DREAMPlaceCellPlacer(
+        dreamplace_root=dreamplace_root, target_density=target_density, **kwargs
+    )
 
 
-def _validator_openroad(**kwargs):
+def _validator_openroad(
+    liberty_path: str | None = None,
+    clock_period_ns: float | None = None,
+    wire_rc_layer: str = "metal3",
+    clock_name: str = "core_clock",
+    route: str | None = None,
+    **kwargs,
+):
+    """OpenROAD, with everything that changes the measurement named here and therefore hashed.
+
+    Timing needs `liberty_path` and `clock_period_ns`; `route` decides whether routed wirelength
+    and DRC are measured at all. All four are properties of the EXPERIMENT - two PPA numbers taken
+    at different routing depths are not the same measurement - so they belong in the Spec and in
+    the hash, while `openroad_binary` arrives through **kwargs as a property of this host.
+    """
     from placax_tools.openroad.validator import OpenROADValidator
 
-    return OpenROADValidator(**kwargs)
+    return OpenROADValidator(
+        liberty_path=liberty_path, clock_period_ns=clock_period_ns,
+        wire_rc_layer=wire_rc_layer, clock_name=clock_name, route=route, **kwargs
+    )
 
 
 CELL_PLACERS = {"dreamplace": _cell_placer_dreamplace}

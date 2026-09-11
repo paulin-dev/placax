@@ -71,14 +71,18 @@ class _EnvironmentBound:
             obs["canvas"], self.benchmark.params, self._grid_sizes[macro_idx], extra
         )
 
-    def score(self, positions: jax.Array) -> jax.Array:
+    def score(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
         """This placement's episode return under the run's configured reward.
 
         Not HPWL: swapping the reward has to move what every agent optimizes, or the reward axis
         is only swappable for the one agent that happens to read it.
+
+        `orientations` are the turns this placement was built with, for a space that has them. The
+        space encodes the pair back into the actions that produced it, so a search over turns is
+        scored on the placement it actually made rather than on an all-north reading of it.
         """
         return replay(positions, self.benchmark.reward_fn, self.benchmark.params, self.n_placed,
-                      self.action_space)
+                      self.action_space, orientations)
 
     def converged(self, _state) -> bool:
         return False
@@ -95,5 +99,8 @@ def _take_action(state, action, params: EnvParams, action_space=DISCRETE_GRID):
     return new_state
 
 
-def _zero_reward(_old_positions, _new_positions, _old_placed, _new_placed) -> jax.Array:
+def _zero_reward(_old_positions, _new_positions, _old_placed, _new_placed,
+                 _orientations=None) -> jax.Array:
+    """Takes the orientation argument `step()` passes under an orientation-bearing space, and
+    ignores it like everything else here: these agents rank whole placements, not steps."""
     return jnp.array(0.0)

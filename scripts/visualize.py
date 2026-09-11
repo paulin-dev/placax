@@ -15,7 +15,7 @@ from placax_viz.masks import plot_observation_channels
 from placax_viz.placement import save_placement_image
 from placax_viz.rollout import collect_placement_history
 from placax_agents.experiment.build import build
-from placax_agents.experiment.presets import OUTPUT_SUBDIRS
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, find_run_dir
 from scripts.presets import config_for
 
 import jax.numpy as jnp
@@ -47,7 +47,9 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--gif", action="store_true", help="Also render a placement-progress GIF (one extra rollout).")
     args = parser.parse_args(argv[1:])
 
-    run_dir = args.run_dir or args.benchmark_dir / OUTPUT_SUBDIRS[args.preset]
+    # find_run_dir handles both layouts: a pre-seed run directory, or the newest
+    # <subdir>/seed<N> one. --run_dir names a run exactly.
+    run_dir = args.run_dir or find_run_dir(args.preset, args.benchmark_dir)
     args.run_dir = run_dir
     args.output_dir = args.output_dir or run_dir
     args.macro_budget = (

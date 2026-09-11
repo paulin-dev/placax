@@ -1,5 +1,6 @@
 """HPWL (half-perimeter wirelength) and wiremask(), its per-candidate increase map used for guidance."""
 from placax import _device  # noqa: F401  must run before any `import jax` below
+from placax.extras.orientation import oriented_pin_offsets
 
 import jax
 import jax.numpy as jnp
@@ -177,19 +178,27 @@ def make_hpwl_reward(
     reward_scale: float = 1.0,
     cell_size: float | None = None,
 ) -> RewardFn:
-    """Builds a RewardFn over -HPWL (real units) * reward_scale; dense=True pays it out incrementally each step instead of at the end."""
+    """Builds a RewardFn over -HPWL (real units) * reward_scale; dense=True pays it out incrementally each step instead of at the end.
 
-    def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
-        return -hpwl(positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask, cell_size)
+    `orientations` turns each pin about its own macro's center before measuring, so a macro laid
+    on its side is scored with its pins where they actually are. None - the default, and every
+    un-oriented run - leaves `padded_pin_offset` untouched.
+    """
+
+    def value_of(positions: jax.Array, placed_mask: jax.Array, offsets: jax.Array) -> jax.Array:
+        return -hpwl(positions, padded_pin_idx, offsets, valid_mask, placed_mask, cell_size)
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
+        offsets = oriented_pin_offsets(padded_pin_offset, padded_pin_idx, orientations)
         # dense: pay the change in -HPWL every step; sparse: 0 until the episode ends, then the whole -HPWL at once.
         if dense:
-            raw = value_of(new_positions, new_placed) - value_of(old_positions, old_placed)
+            raw = (value_of(new_positions, new_placed, offsets)
+                   - value_of(old_positions, old_placed, offsets))
         else:
-            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed), 0.0)
+            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed, offsets), 0.0)
         return raw * reward_scale
 
     return reward_fn
@@ -253,18 +262,21 @@ def make_smoothed_wirelength_reward(
 ) -> RewardFn:
     """make_hpwl_reward's shape over smoothed_wirelength instead - a drop-in RewardFn."""
 
-    def value_of(positions: jax.Array, placed_mask: jax.Array) -> jax.Array:
+    def value_of(positions: jax.Array, placed_mask: jax.Array, offsets: jax.Array) -> jax.Array:
         return -smoothed_wirelength(
-            positions, padded_pin_idx, padded_pin_offset, valid_mask, placed_mask, cell_size, gamma
+            positions, padded_pin_idx, offsets, valid_mask, placed_mask, cell_size, gamma
         )
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
+        offsets = oriented_pin_offsets(padded_pin_offset, padded_pin_idx, orientations)
         if dense:
-            raw = value_of(new_positions, new_placed) - value_of(old_positions, old_placed)
+            raw = (value_of(new_positions, new_placed, offsets)
+                   - value_of(old_positions, old_placed, offsets))
         else:
-            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed), 0.0)
+            raw = jnp.where(new_placed.all(), value_of(new_positions, new_placed, offsets), 0.0)
         return raw * reward_scale
 
     return reward_fn

@@ -45,6 +45,13 @@ def observation(
     }
 
 
+# `current_macro_size`, `lookahead_sizes` and `step` are all about the macro being placed NEXT, so
+# this observation only means anything under a space that names one - see ActionSpace.target() and
+# build()'s checks. The canvas, positions and placed mask are true whatever the space is, which is
+# why local_search can read those under a perturbation space.
+observation.needs_current_macro = True
+
+
 def make_wiremask_observation(
     padded_pin_idx: jax.Array,
     padded_pin_offset: jax.Array,
@@ -70,4 +77,7 @@ def make_wiremask_observation(
         )
         return obs
 
+    # The wiremask baseline is "the first state.step macros are placed" - constructive-only, for
+    # the same reason as the base observation above.
+    state_fn.needs_current_macro = True
     return state_fn

@@ -84,7 +84,7 @@ Each run writes, into its output directory:
 | file | contents |
 |---|---|
 | `manifest.json` | the full config, all four hashes, **what every logged metric means**, and a machine fingerprint (git SHA, library versions, backend, device), written **before** training so a crashed run is still attributable |
-| `training_log.jsonl` | one line per iteration, each carrying `full_hash`, `env_steps`, `eval_env_steps`, `episodes`, `gradient_steps`, `wall_clock_s`, `loss`, and — on evaluated iterations — `real_hpwl`, `reward_return` and the placement's **legality** (`overlap_ratio`, `out_of_bounds_ratio`, `is_legal`) |
+| `training_log.jsonl` | one line per iteration, each carrying `full_hash`, `env_steps`, `eval_env_steps`, `episodes`, `gradient_steps`, `wall_clock_s`, `loss`, and — on evaluated iterations — `real_hpwl`, `reward_return` and the placement's **legality** (`overlap_ratio`, `out_of_bounds_ratio`, `is_legal`). `reward_return` is the episode sum under a constructive action space; under `perturbation` a placement is not a sequence of actions, so it is what the episode improved over the placement it started from |
 | `ppa.json` | real measured PPA plus the tools that produced it, when the config names a validator (`scripts/validate_design.py --config=...`) |
 | `state.json` | budget spend, so a resumed run continues the same budget instead of starting a fresh one |
 | `checkpoint.bin` | resumable training state |
@@ -92,6 +92,16 @@ Each run writes, into its output directory:
 
 Re-run a recorded configuration exactly with `--config=<path to a manifest's config>`; every flag
 describing the setup is then ignored in favor of the recorded one.
+
+**One directory holds exactly one run.** A run resumes from whatever is in its output directory,
+so pointing a second configuration at an existing one used to inherit its budget spend and its
+checkpoint while overwriting its manifest — leaving a directory whose manifest described one
+experiment, whose log lines carried another's `full_hash`, and whose weights belonged to neither.
+That is refused now, naming both runs and the axes they differ on. Raising a budget and carrying
+on is still the same run, which is what a TOTAL budget is for; a different seed, reward, agent or
+design is not. The training scripts' default output directory is per run rather than per preset
+(`<benchmark_dir>/output_maskplace/seed42`), so the "vary `--seed`" advice above no longer walks
+every seed into one directory.
 
 ### Compute budget
 
@@ -106,7 +116,9 @@ python -m scripts.run_maskplace --benchmark_dir=benchmarks/adaptec1 --env_steps=
 The loop refuses to *start* an iteration that would exceed the cap, so two different loop shapes
 given one `--env_steps` budget both finish at or below it rather than overshooting by a whole
 iteration each. Evaluation rollouts are charged too — an eval places every remaining macro, which
-is exactly as much environment work as a training episode. `--wall_clock_s` is also available and
+is exactly as much environment work as a training episode, and an iteration that is *about* to be
+evaluated has to fit together with its eval, or the last one crosses the cap it was checked
+against. `--wall_clock_s` is also available and
 accumulates across resumes, but measures the hardware as much as the method. Budgets may be
 combined; the first to bind stops the run, and which one it was is logged. A deterministic agent
 that reports itself converged stops early rather than replaying one placement for the rest of the
@@ -127,6 +139,23 @@ budget, one scoring path.
 python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 \
     --env_steps=500000 --agents=greedy_wiremask,random_search,ppo --seeds=3
 ```
+
+`--action_space` and `--initial_placement` set the two environment axes an agent can *require*,
+written as `name` or `name:key=value` — so the agents needing something other than the default are
+reachable from here rather than only from Python:
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 --env_steps=500000 \
+    --agents=local_search --action_space=perturbation:n_moves=128 \
+    --initial_placement=greedy_wiremask_prefix:n_macros=null --seeds=3
+```
+
+Both are applied to the *reference* config, so every row inherits them — an override reaching only
+some agents is the exact incomparability this script exists to refuse. `--agent_kwargs` is the
+per-row escape hatch (`'{"genetic": {"population": 64}}'`), because the agent is the thing under
+test. An action space is part of the environment, so agents driving different spaces have
+different `environment_hash`es and will not appear in one table: that is the honest answer rather
+than a missing feature — a constructive agent and a perturbation agent are not solving one task.
 
 It asserts the environment hash matches across every run *before* anything starts, so it refuses
 to produce a table rather than producing a misleading one, and it scores each agent's placement
@@ -175,9 +204,9 @@ matters for the reward axis: if a baseline scored with HPWL regardless, swapping
 change what PPO optimizes and leave its baselines untouched, while `assert_comparable` reported
 the two environments as identical.
 
-Adding a fifth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
-three methods (`placax_agents/agents/base.py`); it inherits the shared evaluation, checkpointing,
-budgeting and logging automatically, plus the environment wiring in
+Adding a sixth is one entry in `AGENTS` (`placax_agents/experiment/build.py`) and a class with
+four methods - `init`, `update`, `best_positions`, `converged` (`placax_agents/agents/base.py`);
+it inherits the shared evaluation, checkpointing, budgeting and logging automatically, plus the environment wiring in
 `placax_agents/agents/environment_bound.py` that stops it running under different rules from
 whatever it is being compared against.
 
@@ -217,6 +246,13 @@ geometry inputs — `effective_sizes` swaps width and height under a quarter tur
 turns pins about their macro's center — so wirelength, the canvas, legality and the written
 `.pl`/DEF all become orientation-aware without a new argument, and both transforms are the
 identity when nothing is oriented. Rotations only, not mirrors.
+
+It reaches the **reward** too, which is what makes searching over it mean anything: `step()` hands
+the orientations to `reward_fn` whenever the space produces them, so a `RewardFn` used under
+`oriented_grid` takes `(old_positions, new_positions, old_placed, new_placed, orientations=None)`.
+Every shipped reward does; one that does not is refused at `build()` rather than left to score a
+placement nobody made. A reward that never mentions orientation keeps its four-parameter signature
+and every un-oriented run calls it exactly as before, bit for bit.
 
 `local_search` is the agent that proves the seam: hill climbing / simulated annealing over macro
 *moves*, which the constructive kernel had no action for. It needs a **dense** reward — under a

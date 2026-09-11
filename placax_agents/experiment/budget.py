@@ -160,7 +160,7 @@ class BudgetTracker:
         )
         return self.use
 
-    def can_afford(self, episodes: int, steps_per_episode: int) -> bool:
+    def can_afford(self, episodes: int, steps_per_episode: int, eval_steps: int = 0) -> bool:
         """Whether one more iteration of this size fits inside the budget without exceeding it.
 
         Checked BEFORE running an iteration, because an iteration is atomic: stopping only once
@@ -169,13 +169,20 @@ class BudgetTracker:
         which is exactly the incomparability the budget exists to remove. Refusing to start means
         two loop shapes given one env_step budget both finish at or below it.
 
+        `eval_steps` is the evaluation rollout that iteration will ALSO pay for, when one is
+        scheduled. An eval is charged after the iteration it follows, so leaving it out of this
+        check let the last one cross the cap: 100 steps per iteration and per eval against a
+        budget of 950 spent 1000. An iteration plus its eval is what an iteration costs when it
+        evaluates, and that is what has to fit.
+
         Wall-clock is deliberately not predicted here - how long an iteration takes isn't known
         before running it - so that dimension still stops after the fact. It is the one budget
         dimension that was never exactly comparable anyway.
         """
         if self.budget.env_steps is None:
             return True
-        return self.use.env_steps + episodes * steps_per_episode <= self.budget.env_steps
+        cost = episodes * steps_per_episode + eval_steps
+        return self.use.env_steps + cost <= self.budget.env_steps
 
     def exhausted(self) -> str | None:
         """The name of the first cap that has been reached, or None while budget remains."""

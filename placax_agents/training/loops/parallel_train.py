@@ -1,7 +1,8 @@
 """Parallel training: n_envs episodes vmapped and averaged into one gradient update per iteration (see train.py for sequential)."""
 import pathlib
 
-from placax.types import EnvParams, RewardFn  # must precede jax imports
+from placax.action_space import DISCRETE_GRID  # must precede jax imports
+from placax.types import EnvParams, RewardFn
 from placax_agents.policy.observation import observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.gae import compute_gae
@@ -33,6 +34,7 @@ def parallel_train_step(
     extra_illegal_fn: ExtraIllegalFn | None = None,
     initial_positions: jax.Array | None = None,
     n_placed: int = 0,
+    action_space=DISCRETE_GRID,
 ):
     """Like train.train_step, but keys has a leading n_envs dimension: n_envs episodes are collected and averaged into one update."""
     # 1. Run one episode per key, all at once via vmap instead of a Python loop. Every argument
@@ -43,7 +45,7 @@ def parallel_train_step(
     batched_rollout = jax.vmap(
         lambda k: collect_rollout(
             k, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
-            extra_illegal_fn, initial_positions, n_placed,
+            extra_illegal_fn, initial_positions, n_placed, action_space,
         )
     )
     trajectories, final_states = batched_rollout(keys)
@@ -79,7 +81,7 @@ def parallel_train_step(
 _jitted_parallel_train_step = jax.jit(
     parallel_train_step,
     static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config",
-                     "extra_illegal_fn", "n_placed"),
+                     "extra_illegal_fn", "n_placed", "action_space"),
 )
 
 

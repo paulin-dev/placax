@@ -177,6 +177,37 @@ OUTPUT_SUBDIRS = {"maskplace": "output_maskplace", "training": "output"}
 """Where each preset's runs write by default, under the benchmark directory."""
 
 
+def default_output_dir(preset: str, benchmark_dir: pathlib.Path | str, seed: int) -> pathlib.Path:
+    """`<benchmark_dir>/<preset subdir>/seed<N>` - one directory per RUN, not per preset.
+
+    The seed is in the path because a different seed is a different run: it produces different
+    weights, a different budget spend and a different `full_hash`. While the default was per
+    preset, the project's own advice - vary `--seed` and report across seeds - walked every run
+    into the same directory, where the second one resumed the first one's checkpoint and
+    overwrote its manifest. `run_experiment` now refuses that outright; this is what keeps the
+    refusal from firing on the ordinary workflow.
+    """
+    return pathlib.Path(benchmark_dir) / OUTPUT_SUBDIRS[preset] / f"seed{seed}"
+
+
+def find_run_dir(preset: str, benchmark_dir: pathlib.Path | str) -> pathlib.Path:
+    """A run directory for `preset` under `benchmark_dir`, for the scripts that RELOAD one.
+
+    Prefers the pre-seed layout (`<subdir>` holding a manifest directly) so runs produced before
+    `default_output_dir` existed keep loading, then the most recently written `seed*` directory.
+    Falls back to the bare subdirectory so a "not found" error names the place someone would look.
+    This is a convenience for the default; `--config`/`--checkpoint` name a run exactly.
+    """
+    root = pathlib.Path(benchmark_dir) / OUTPUT_SUBDIRS[preset]
+    if (root / "manifest.json").exists():
+        return root
+    seeded = sorted(
+        (path for path in root.glob("seed*") if (path / "manifest.json").exists()),
+        key=lambda path: path.stat().st_mtime,
+    )
+    return seeded[-1] if seeded else root
+
+
 def build_preset(name: str, benchmark_dir: pathlib.Path | str, **overrides) -> ExperimentConfig:
     """Looks up a preset by name, with a readable error listing what is registered."""
     if name not in PRESETS:

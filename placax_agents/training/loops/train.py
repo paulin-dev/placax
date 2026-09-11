@@ -1,7 +1,8 @@
 """Sequential training: one episode, one gradient update, repeated (see parallel_train.py for the vmapped version)."""
 import pathlib
 
-from placax.types import EnvParams, RewardFn  # must precede jax imports
+from placax.action_space import DISCRETE_GRID  # must precede jax imports
+from placax.types import EnvParams, RewardFn
 from placax_agents.policy.observation import observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.gae import compute_gae
@@ -33,12 +34,14 @@ def train_step(
     extra_illegal_fn: ExtraIllegalFn | None = None,
     initial_positions: jax.Array | None = None,
     n_placed: int = 0,
+    action_space=DISCRETE_GRID,
 ):
     """One full episode + one gradient update, returning (variables, opt_state, running_stats, loss, final_state)."""
-    # 1. Play one full episode with the current policy, recording every transition.
+    # 1. Play one full episode with the current policy, recording every transition - under the
+    #    environment's own action space, which is part of the task and not of this loop.
     trajectory, final_state = collect_rollout(
         key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
-        extra_illegal_fn, initial_positions, n_placed,
+        extra_illegal_fn, initial_positions, n_placed, action_space,
     )
     # 2. Turn raw rewards/values into advantages and returns (the value function's training target).
     advantages, returns = compute_gae(
@@ -67,7 +70,7 @@ def train_step(
 _jitted_train_step = jax.jit(
     train_step,
     static_argnames=("optimizer", "policy_apply_fn", "reward_fn", "state_fn", "ppo_config",
-                     "extra_illegal_fn", "n_placed"),
+                     "extra_illegal_fn", "n_placed", "action_space"),
 )
 
 

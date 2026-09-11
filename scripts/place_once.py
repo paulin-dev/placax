@@ -18,6 +18,7 @@ from placax_agents.experiment.run import score
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.training.loops.common import open_train_state
 from placax_agents.policy.scale import to_real_centers
+from placax_agents.experiment.presets import find_run_dir
 from scripts.presets import config_for
 
 from jax import random
@@ -38,7 +39,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Which preset to rebuild from when no --config is given "
                              "(default: %(default)s).")
     parser.add_argument("--checkpoint", type=pathlib.Path, default=None,
-                        help="Defaults to <benchmark_dir>/output_maskplace/checkpoint.bin.")
+                        help="Defaults to checkpoint.bin in the preset's own newest run "
+                             "directory under <benchmark_dir>.")
     parser.add_argument("--macro_budget", type=str, default=None,
                         help='--preset only: budget the checkpoint was trained with; "all" for '
                              "the whole netlist.")
@@ -47,8 +49,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         None if args.macro_budget is None or args.macro_budget.lower() == "all"
         else int(args.macro_budget)
     )
+    # Both run-directory layouts, newest first - see presets.find_run_dir.
     args.checkpoint = args.checkpoint or (
-        args.benchmark_dir / "output_maskplace" / "checkpoint.bin"
+        find_run_dir(args.preset, args.benchmark_dir) / "checkpoint.bin"
     )
     return args
 

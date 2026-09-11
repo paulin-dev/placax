@@ -39,8 +39,18 @@ def step(
     #    re-derivable after a real-unit conversion, so we pass it explicitly.
     old_placed = state.positions[:, 0] >= 0
     new_placed = new_state.positions[:, 0] >= 0
-    # 4. Delegate the actual reward shaping (sparse vs. dense) to the caller's reward_fn.
-    reward = reward_fn(state.positions, new_state.positions, old_placed, new_placed)
+    # 4. Delegate the actual reward shaping (sparse vs. dense) to the caller's reward_fn - with
+    #    the placement's ORIENTATIONS when the space produces any. A turned macro sits at a
+    #    different center and its pins are somewhere else, so a reward computed without them
+    #    scores a placement that was never made: measured at 21.91 vs 23.91 real HPWL for one
+    #    placement at two orientation assignments, while the reward returned the same number for
+    #    both. Passed only when the state carries them, so every un-oriented run calls the same
+    #    four-argument reward it always did, bit for bit - see placax/types.py's RewardFn.
+    if new_state.orientations is None:
+        reward = reward_fn(state.positions, new_state.positions, old_placed, new_placed)
+    else:
+        reward = reward_fn(state.positions, new_state.positions, old_placed, new_placed,
+                           new_state.orientations)
     return new_state, reward, done
 
 
@@ -50,6 +60,7 @@ def replay(
     params: EnvParams,
     n_placed: int = 0,
     action_space: ActionSpace = DISCRETE_GRID,
+    orientations: jax.Array | None = None,
 ) -> jax.Array:
     """Drives the kernel through an already-decided placement, returning the episode's total reward.
 
@@ -66,10 +77,26 @@ def replay(
 
     `n_placed` is the environment's warm-start prefix: those rows are kept as given and replay
     starts after them. Constructive spaces only - a placement is a sequence of appends there, and
-    is not a sequence of anything under a space whose actions move committed macros.
+    is not a sequence of anything under a space whose actions move committed macros, which
+    `action_space.encode` refuses rather than silently mis-replays.
+
+    `orientations` are the turns that came with the placement, for a space that has them. The
+    space turns the pair back into actions: feeding the bare position rows in worked only for a
+    space whose action IS a grid cell, and under `oriented_grid` the y coordinate was read as the
+    orientation.
     """
+    if not action_space.constructive:
+        raise ValueError(
+            f"replay() re-drives a placement through step() one action at a time, which the "
+            f"{action_space.name!r} action space cannot express - its actions move macros that "
+            f"are already placed, so a finished placement carries no episode to replay. Score it "
+            f"against the placement its episode started from instead; "
+            f"placax_agents.experiment.run.episode_return does that for whichever space a run "
+            f"configured."
+        )
     # Rebuild the starting state: the warm-start prefix as it was, everything after it unplaced.
     initial_positions = positions.at[n_placed:].set(-1)
+    actions = action_space.encode(positions, orientations)
 
     def scan_step(carry, action):
         state, total = carry
@@ -77,7 +104,7 @@ def replay(
         return (state, total + reward), None
 
     start = (reset(params, initial_positions, action_space), jnp.array(0.0))
-    (_final_state, total), _ = jax.lax.scan(scan_step, start, positions[n_placed:])
+    (_final_state, total), _ = jax.lax.scan(scan_step, start, actions[n_placed:])
     return total
 
 

@@ -48,6 +48,29 @@ class ActionSpace(Protocol):
 
     name: str
 
+    constructive: bool
+    """Whether a finished placement IS the sequence of actions that produced it.
+
+    True for the spaces that append one macro per step: the placement can be re-driven through
+    `step()` action by action, which is what `replay()` and every population method do. False for
+    a space whose actions move macros already down - the same placement is reachable by countless
+    different move sequences, so it carries no episode to replay, and scoring one means asking
+    what it is worth relative to where the episode STARTED (see `experiment.run.episode_return`).
+    Two different answers to "what is this placement's return", and the space is what decides
+    which one applies."""
+
+    def encode(self, positions: jax.Array, orientations: jax.Array | None) -> jax.Array:
+        """The action sequence that produces `positions` (and `orientations`) under this space.
+
+        The inverse of `apply`, and the piece `replay()` was missing: it used to feed the raw
+        `(n_macros, 2)` position rows in as actions, which is right only for a space whose action
+        IS a grid cell. Under `oriented_grid` a 2-wide row was read as a 3-wide action, and JAX's
+        out-of-bounds clamping quietly turned the y coordinate into the orientation.
+
+        Non-constructive spaces raise: there is no sequence to return.
+        """
+        ...
+
     def reset(self, params: EnvParams, initial_positions: jax.Array | None) -> EnvState:
         """The starting state, given an optional warm start."""
         ...
@@ -92,6 +115,12 @@ class DiscreteGridPlacement:
     """
 
     name: str = "discrete_grid"
+
+    constructive: bool = True
+
+    def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
+        """The action IS the grid cell, so a placement is already its own action sequence."""
+        return positions
 
     def reset(self, params: EnvParams, initial_positions: jax.Array | None) -> EnvState:
         if initial_positions is None:
@@ -141,6 +170,18 @@ class Perturbation:
     that two agents given the same config do the same amount of work."""
 
     name: str = "perturbation"
+
+    constructive: bool = False
+    """A placement here is not a sequence of appends - countless move sequences reach the same
+    one - so it cannot be replayed, and its return is measured against the episode's start."""
+
+    def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
+        raise ValueError(
+            "a perturbation placement is not a sequence of actions: its macros were moved, not "
+            "appended, and many different move sequences produce the same final placement. Score "
+            "it against the placement the episode STARTED from instead - see "
+            "placax_agents.experiment.run.episode_return."
+        )
 
     def reset(self, params: EnvParams, initial_positions: jax.Array | None) -> EnvState:
         if initial_positions is None:
@@ -192,6 +233,19 @@ class OrientedGridPlacement:
     """
 
     name: str = "oriented_grid"
+
+    constructive: bool = True
+
+    def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
+        """`(x, y)` plus the turn, so a replay reproduces the orientations as well as the cells.
+
+        Without this, `replay()` fed 2-wide rows to `apply`, which reads `action[2]` - clamped by
+        JAX to the y coordinate, so every macro was replayed at an orientation nobody chose, and
+        the reward that came back described a placement that never existed.
+        """
+        if orientations is None:
+            orientations = jnp.zeros((positions.shape[0],), dtype=jnp.int32)
+        return jnp.concatenate([positions, orientations[:, None]], axis=1)
 
     def reset(self, params: EnvParams, initial_positions: jax.Array | None) -> EnvState:
         if initial_positions is None:

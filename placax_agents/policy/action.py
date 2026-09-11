@@ -44,7 +44,21 @@ def legal_action_logits(
     macro_size: tuple[int, int],
     extra_illegal: jax.Array | None = None,
 ) -> jax.Array:
-    """Sets illegal cells' logits to -inf so they're never sampled/argmax'd."""
+    """Sets illegal cells' logits to -inf so they're never sampled/argmax'd.
+
+    `logits` is a `(grid_x, grid_y)` map, matching the shape of the legality map itself. A space
+    whose action carries a further axis - `oriented_grid`'s quarter turn - needs a policy that
+    emits that axis AND a legality map per turn, because a turned macro has a different footprint
+    and therefore fits in different cells. Broadcasting this two-dimensional map across a third
+    axis would call those placements legal without checking, so a rank mismatch is refused here
+    rather than silently accepted.
+    """
+    if logits.ndim != 2:
+        raise ValueError(
+            f"legal_action_logits masks a (grid_x, grid_y) logits map, got shape {logits.shape}. "
+            f"An action space with an extra axis needs legality computed FOR that axis - see "
+            f"placax/extras/orientation.py's effective_sizes - not this map stretched over it."
+        )
     illegal = illegal_cells(occupied, params, macro_size, extra_illegal)
     # Widen to float64 here, matching MaskPlace's own `x.double()` right before its softmax:
     # the CNN itself stays float32, but softmax/log_softmax downstream of this function need
@@ -74,18 +88,27 @@ def make_wiremask_quality_illegal(
 
         return quality_mask(normalized, min_source.min() + margin)
 
+    # This rule is ABOUT the macro being placed next: its footprint, and a wiremask whose baseline
+    # is "the macros before it are down". A space that names no such macro (perturbation) cannot
+    # supply either, and build() refuses the pairing rather than masking for an arbitrary macro.
+    extra_illegal_fn.needs_current_macro = True
     return extra_illegal_fn
 
 
 def sample_action(key: jax.Array, logits: jax.Array) -> jax.Array:
-    """Samples one (x, y) from a (grid_x, grid_y) logits map."""
-    grid = logits.shape[1]
+    """Samples one action from a logits map of ANY rank - `(x, y)`, or `(x, y, turn)`.
+
+    Unravelled rather than divided by `logits.shape[1]`, so the shape of an action is the shape
+    of the logits a policy emits and nothing here has to know which space is in play. Identical
+    to the old arithmetic for a two-dimensional map.
+    """
     flat_idx = jax.random.categorical(key, logits.ravel())
-    return jnp.array([flat_idx // grid, flat_idx % grid])
+    return jnp.stack(jnp.unravel_index(flat_idx, logits.shape))
 
 
 def action_log_prob(logits: jax.Array, action: jax.Array) -> jax.Array:
     """Log probability of `action` under logits, used at rollout time and for PPO's ratio."""
-    grid = logits.shape[1]
-    flat_idx = action[0] * grid + action[1]
+    flat_idx = jnp.ravel_multi_index(
+        tuple(action[i] for i in range(logits.ndim)), logits.shape, mode="clip"
+    )
     return jax.nn.log_softmax(logits.ravel())[flat_idx]

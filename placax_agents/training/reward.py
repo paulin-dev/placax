@@ -1,5 +1,14 @@
-"""Wraps make_hpwl_reward with the grid-to-real-unit conversion."""
+"""Wraps make_hpwl_reward with the grid-to-real-unit conversion.
+
+**Orientation enters here, as a transform on the inputs.** Every reward in this file turns grid
+cells into real-unit centers with the design's macro footprints, and a quarter-turned macro is its
+height by its width - so its center sits somewhere else, and its pins rotate with it.
+`effective_sizes` and `oriented_pin_offsets` (extras/orientation.py) are both the identity on
+`None`, which is what every un-oriented run passes, so this costs the historical path nothing and
+keeps its numbers bit-identical.
+"""
 from placax.extras.masks import regularity_cost, regularity_max  # must precede jax imports
+from placax.extras.orientation import effective_sizes
 from placax.extras.congestion import make_congestion_cost
 from placax.extras.rewards import make_hpwl_reward, make_smoothed_wirelength_reward
 from placax.types import EnvParams, RewardFn
@@ -27,14 +36,17 @@ def make_scaled_hpwl_reward(
     )
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
         """Converts grid positions to real-unit centers, then delegates to the -HPWL reward."""
+        sizes = effective_sizes(sizes_array, orientations)
         return base_reward_fn(
-            to_real_centers(old_positions, sizes_array, cell_size),
-            to_real_centers(new_positions, sizes_array, cell_size),
+            to_real_centers(old_positions, sizes, cell_size),
+            to_real_centers(new_positions, sizes, cell_size),
             old_placed,
             new_placed,
+            orientations,
         )
 
     return reward_fn
@@ -62,13 +74,16 @@ def make_scaled_smoothed_reward(
     )
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
+        sizes = effective_sizes(sizes_array, orientations)
         return base_reward_fn(
-            to_real_centers(old_positions, sizes_array, cell_size),
-            to_real_centers(new_positions, sizes_array, cell_size),
+            to_real_centers(old_positions, sizes, cell_size),
+            to_real_centers(new_positions, sizes, cell_size),
             old_placed,
             new_placed,
+            orientations,
         )
 
     return reward_fn
@@ -107,20 +122,24 @@ def make_hpwl_congestion_reward(
     )
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
-        reward = hpwl_reward_fn(old_positions, new_positions, old_placed, new_placed)
+        reward = hpwl_reward_fn(
+            old_positions, new_positions, old_placed, new_placed, orientations
+        )
+        sizes = effective_sizes(sizes_array, orientations)
         if congestion_weight == 0.0:
             return reward * reward_scale
         # Congestion is a property of a layout, not of a step, so the dense form pays its DELTA -
         # which telescopes over an episode to the same total the sparse form pays once, exactly
         # as the HPWL term does.
         new_cost = congestion_cost(
-            to_real_centers(new_positions, sizes_array, cell_size), new_placed
+            to_real_centers(new_positions, sizes, cell_size), new_placed
         )
         if dense:
             old_cost = congestion_cost(
-                to_real_centers(old_positions, sizes_array, cell_size), old_placed
+                to_real_centers(old_positions, sizes, cell_size), old_placed
             )
             penalty = new_cost - old_cost
         else:
@@ -162,16 +181,20 @@ def make_expert_reward(
     )
 
     def reward_fn(
-        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array, new_placed: jax.Array
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
     ) -> jax.Array:
-        reward = hpwl_reward_fn(old_positions, new_positions, old_placed, new_placed)
+        reward = hpwl_reward_fn(
+            old_positions, new_positions, old_placed, new_placed, orientations
+        )
         if regularity_weight == 0.0:
             return reward
         # Recover which macro this step placed, and where, straight from the RewardFn signature -
         # exactly one macro flips from unplaced to placed per step(), so no wider signature is needed.
         newly_placed = new_placed & ~old_placed
         idx = jnp.argmax(newly_placed)
-        macro_size = to_grid_units(sizes_array[idx], cell_size)
+        # The footprint AS PLACED: a turned macro reaches a different distance from the periphery.
+        macro_size = to_grid_units(effective_sizes(sizes_array, orientations)[idx], cell_size)
         cost = regularity_cost(params, macro_size, new_positions[idx], cell_size, regularity_mode)
         # A macro too big to leave any interior has an all-zero cost map; guard that 0/0.
         scale = regularity_max(params, macro_size, cell_size, regularity_mode)

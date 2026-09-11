@@ -1,7 +1,8 @@
 """Buffer + minibatch-epoch PPO training, matching MaskPlace's own PPO2.py procedure."""
 import pathlib
 
-from placax.types import EnvParams, RewardFn  # must precede jax imports
+from placax.action_space import DISCRETE_GRID  # must precede jax imports
+from placax.types import EnvParams, RewardFn
 from placax_agents.policy.observation import observation
 from placax_agents.training.algorithm.config import PPOConfig
 from placax_agents.training.algorithm.gae import compute_gae
@@ -30,6 +31,7 @@ def collect_buffer(
     extra_illegal_fn: ExtraIllegalFn | None = None,
     initial_positions: jax.Array | None = None,
     n_placed: int = 0,
+    action_space=DISCRETE_GRID,
 ):
     """Collects n_episodes of rollout (vmapped) and flattens them into one buffer of transitions."""
     # 1. One fresh random key per episode, run all episodes at once via vmap.
@@ -39,7 +41,7 @@ def collect_buffer(
     trajectories, _ = jax.vmap(
         lambda k: collect_rollout(
             k, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, state_fn,
-            extra_illegal_fn, initial_positions, n_placed,
+            extra_illegal_fn, initial_positions, n_placed, action_space,
         )
     )(keys)
     # 2. Flatten (n_episodes, episode_length, ...) into one buffer axis, keeping episodes in temporal order for compute_gae.
@@ -51,7 +53,7 @@ def collect_buffer(
 _jitted_collect_buffer = jax.jit(
     collect_buffer,
     static_argnames=("policy_apply_fn", "reward_fn", "state_fn", "extra_illegal_fn",
-                     "n_episodes", "n_placed"),
+                     "n_episodes", "n_placed", "action_space"),
 )
 
 # Same reasoning as above; donate_argnums=(0, 1) lets XLA reuse the reward/value buffers for the (advantages, returns) output.
@@ -135,13 +137,14 @@ def buffered_train_step(
     extra_illegal_fn: ExtraIllegalFn | None = None,
     initial_positions: jax.Array | None = None,
     n_placed: int = 0,
+    action_space=DISCRETE_GRID,
 ):
     """One full buffer-collect + multi-epoch-minibatch update cycle, returning updated (variables, opt_state, running_stats, loss)."""
     # 1. Fill the buffer with n_episodes of fresh rollout data using the current policy.
     key, buffer_key = jax.random.split(key)
     buffer = _jitted_collect_buffer(
         buffer_key, variables, policy_apply_fn, params, reward_fn, sizes_array, cell_size, n_episodes,
-        state_fn, extra_illegal_fn, initial_positions, n_placed,
+        state_fn, extra_illegal_fn, initial_positions, n_placed, action_space,
     )
     # 2. Compute advantages/returns once for the whole buffer; valid since GAE resets at each episode's done flag.
     advantages, returns = _jitted_compute_gae(

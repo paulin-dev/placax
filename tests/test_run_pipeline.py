@@ -51,15 +51,27 @@ def test_parse_args_nets_sample_fraction_and_seed() -> None:
     assert args.nets_seed == 7
 
 
-def test_resolve_checkpoint_uses_the_given_default_subdir(tmp_path) -> None:
+def test_resolve_checkpoint_uses_the_presets_own_output_subdir(tmp_path) -> None:
     # Different presets keep their checkpoints under different default subdirs (output_maskplace,
     # output, ...) - _resolve_checkpoint must look under the ONE the caller's preset actually uses,
     # not a hardcoded "output_maskplace".
-    checkpoint_path = tmp_path / "output_training" / "best_checkpoint.bin"
+    checkpoint_path = tmp_path / "output" / "best_checkpoint.bin"
     save_checkpoint({"variables": {"params": {}}, "real_hpwl": jnp.array(1.0)}, checkpoint_path)
-    path, bare = _resolve_checkpoint(tmp_path, "output_training", None)
+    path, bare = _resolve_checkpoint(tmp_path, "training", None)
     assert path == checkpoint_path
     assert bare is True
+
+
+def test_resolve_checkpoint_finds_a_seeded_run_directory(tmp_path) -> None:
+    # Runs write to <subdir>/seed<N> now, one directory per run (see presets.default_output_dir),
+    # so the default checkpoint lookup has to see that layout as well as the older flat one.
+    run_dir = tmp_path / "output" / "seed3"
+    (run_dir).mkdir(parents=True)
+    (run_dir / "manifest.json").write_text("{}")
+    checkpoint_path = run_dir / "best_checkpoint.bin"
+    save_checkpoint({"variables": {"params": {}}, "real_hpwl": jnp.array(1.0)}, checkpoint_path)
+    path, _bare = _resolve_checkpoint(tmp_path, "training", None)
+    assert path == checkpoint_path
 
 
 def test_build_cell_placer_returns_a_cell_placer() -> None:

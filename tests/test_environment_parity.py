@@ -22,6 +22,7 @@ from placax_agents.experiment.budget import Budget
 from placax_agents.experiment.build import build, build_benchmark
 from placax_agents.experiment.config import AgentSpec, Spec, assert_comparable
 from placax_agents.experiment.presets import maskplace
+from placax_agents.experiment.run import score
 from placax_agents.policy.action import illegal_cells
 from placax_agents.policy.scale import to_grid_units
 from placax_agents.training.reward import make_scaled_hpwl_reward
@@ -34,7 +35,15 @@ AGENT_SPECS = {
     "ppo": None,  # taken from the reference config
     "greedy_wiremask": AgentSpec(algorithm=Spec("greedy_wiremask")),
     "random_search": AgentSpec(algorithm=Spec("random_search", {"population": 2})),
+    "genetic": AgentSpec(algorithm=Spec("genetic", {"population": 2})),
 }
+"""Every agent that drives the constructive space this fixture configures.
+
+`local_search` is the one exception and gets its own fixture below rather than an exemption: it
+requires a perturbation space, so it cannot be dropped into this environment at all. It is still
+held to the same four properties, which is the point - the two newest agents used to be absent
+from this file entirely, while the README cited it as the mechanical guarantee that EVERY agent
+runs inside the environment its config describes."""
 
 
 def _write_tiny_bookshelf(tmp_path: pathlib.Path) -> pathlib.Path:
@@ -72,6 +81,92 @@ def masked_env(tmp_path: pathlib.Path):
 def _with_agent(config, name: str):
     agent = config.agent if AGENT_SPECS[name] is None else AGENT_SPECS[name]
     return dataclasses.replace(config, name=name, agent=agent)
+
+
+@pytest.fixture
+def perturbation_env(tmp_path: pathlib.Path):
+    """The same masked environment, over the space `local_search` requires.
+
+    A perturbation episode moves macros that are already down, so it needs a warm start covering
+    the whole design - and it cannot carry `wiremask_quality`, whose rule is about the macro being
+    placed next. Both of those are the environment's choices, made here once, so the agent is
+    tested against a config it can actually run under rather than excused from the file.
+    """
+    benchmark_dir = _write_tiny_bookshelf(tmp_path)
+    config = maskplace(benchmark_dir, budget=Budget(iterations=1))
+    config = dataclasses.replace(config, name="local_search", environment=dataclasses.replace(
+        config.environment,
+        benchmark=dataclasses.replace(config.environment.benchmark, grid=24),
+        action_space=Spec("perturbation", {"n_moves": 4}),
+        initial_placement=Spec("greedy_wiremask_prefix", {"n_macros": None}),
+        action_mask=None,
+    ), agent=AgentSpec(algorithm=Spec("local_search")))
+    return config, build_benchmark(config)
+
+
+def test_local_search_receives_the_whole_environment_too(perturbation_env) -> None:
+    """The four properties the parametrized tests assert, for the agent that needs its own space.
+
+    It reads the run's observation and its action space, starts from the run's warm start, and
+    ranks its moves by the run's configured reward - none of which it may reconstruct for itself.
+    """
+    config, benchmark = perturbation_env
+    built = build(config, benchmark=benchmark)
+    agent = built.agent
+
+    assert agent.state_fn is built.state_fn
+    assert agent.action_space is built.action_space
+    assert agent.extra_illegal_fn is built.extra_illegal_fn
+    assert agent.initial_positions is built.initial_positions
+    assert built.n_placed == benchmark.params.n_macros, "a perturbation run starts from a full canvas"
+    assert agent.benchmark.reward_fn is benchmark.reward_fn
+
+
+def test_local_search_moves_macros_only_where_the_environment_allows(perturbation_env) -> None:
+    # Its placement is a starting placement with moves applied, so every macro must still sit
+    # somewhere the run's own legality rules permit.
+    config, benchmark = perturbation_env
+    built = build(config, benchmark=benchmark)
+    agent = built.agent
+    state, _result = agent.update(random.PRNGKey(0), agent.init(random.PRNGKey(0)))
+    grid_sizes = to_grid_units(benchmark.sizes_array, benchmark.cell_size)
+    measured = legality(agent.best_positions(state), grid_sizes, benchmark.params)
+    assert int(measured.n_unplaced) == 0
+    assert float(measured.out_of_bounds_area) == 0.0
+
+
+def test_a_perturbation_run_reports_what_its_episode_was_worth(perturbation_env) -> None:
+    """`reward_return` used to be exactly 0.0 for every perturbation run, every iteration.
+
+    `score()` replayed the placement as a sequence of appends, and a perturbation run's warm start
+    covers every macro - so the replay scan had nothing to iterate and returned zero, under the
+    metric the manifest defines as "what the agent was actually asked to optimize".
+    """
+    config, benchmark = perturbation_env
+    built = build(config, benchmark=benchmark)
+    agent = built.agent
+    state, _result = agent.update(random.PRNGKey(0), agent.init(random.PRNGKey(0)))
+    positions = agent.best_positions(state)
+
+    measured = score(benchmark, positions, built.n_placed, None, built.action_space,
+                     built.initial_positions)
+    # The episode's worth is what it improved over the placement it started from - which for this
+    # dense reward is exactly the sum of the per-move deltas that got there.
+    expected = float(benchmark.reward_fn(
+        built.initial_positions, positions,
+        built.initial_positions[:, 0] >= 0, positions[:, 0] >= 0,
+    ))
+    assert measured["reward_return"] == pytest.approx(expected, rel=1e-5)
+
+
+def test_a_placement_that_is_not_a_sequence_is_refused_rather_than_replayed(perturbation_env):
+    # replay() re-drives a placement action by action, which a perturbation space cannot express.
+    # Saying so is what stopped it returning 0.0 and calling that an episode return.
+    config, benchmark = perturbation_env
+    built = build(config, benchmark=benchmark)
+    with pytest.raises(ValueError, match="carries no episode to replay"):
+        replay(built.initial_positions, benchmark.reward_fn, benchmark.params,
+               built.n_placed, built.action_space)
 
 
 @pytest.mark.parametrize("algorithm", sorted(AGENT_SPECS))

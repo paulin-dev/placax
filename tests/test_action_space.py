@@ -28,6 +28,7 @@ from placax_agents.experiment.run import run_experiment, score
 
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 
 NODES = ("UCLA nodes 1.0\nNumNodes : 4\nNumTerminals : 4\n"
          "a 4 4 terminal\nb 2 2 terminal\nc 2 4 terminal\nd 4 2 terminal\n")
@@ -278,3 +279,126 @@ def test_a_local_search_run_leaves_the_same_evidence_as_any_other(tmp_path) -> N
     assert (output / "manifest.json").exists()
     assert log and log[-1]["gradient_steps"] == 0
     assert "acceptance_rate" in log[-1]
+
+
+# ------------------------------------------- the space reaches the LEARNER, not only the agents
+
+
+class _TinyPolicy(nn.Module):
+    """A minimal actor-critic emitting the usual (grid_x, grid_y) logits map."""
+
+    grid: int
+
+    @nn.compact
+    def __call__(self, obs):
+        x = obs["canvas"].astype(jnp.float32).ravel()
+        logits = nn.Dense(self.grid * self.grid)(x).reshape(self.grid, self.grid)
+        return logits, nn.Dense(1)(x)[0]
+
+
+def _zero_reward(_a, _b, _c, _d, _orientations=None):
+    return jnp.array(0.0)
+
+
+def test_the_ppo_rollout_drives_the_configured_action_space() -> None:
+    """`collect_rollout` and `evaluate` used to call reset()/step() with no space at all.
+
+    So the whole PPO path was silently `discrete_grid` whatever a config said, and the one axis
+    the kernel was generalized for could never be studied with the learner. The space is threaded
+    through now; a recording space proves the rollout actually drives it.
+    """
+    from placax_agents.policy.observation import observation
+    from placax_agents.training.rollout import collect_rollout
+
+    @dataclasses.dataclass(frozen=True)
+    class PinnedToOrigin(DiscreteGridPlacement):
+        """Both halves of what the rollout must take from a space: its transition, and its length.
+
+        Asserted through the trajectory rather than through a Python counter - `lax.scan` traces
+        its body once, so a side effect inside `apply` fires once however many steps run.
+        """
+
+        def apply(self, state, action, params):
+            return DiscreteGridPlacement.apply(self, state, jnp.zeros_like(action), params)
+
+        def episode_length(self, params, n_placed):
+            return 2   # deliberately NOT n_macros - n_placed, which is what the rollout assumed
+
+    params = EnvParams(grid=6, n_macros=3)
+    sizes = jnp.ones((3, 2))
+    policy = _TinyPolicy(grid=6)
+    variables = policy.init(
+        jax.random.PRNGKey(0), observation(reset(params), params, sizes, cell_size=1.0)
+    )
+    trajectory, final_state = collect_rollout(
+        jax.random.PRNGKey(0), variables, policy.apply, params, _zero_reward, sizes, 1.0,
+        action_space=PinnedToOrigin(),
+    )
+    assert trajectory["action"].shape[0] == 2, "the rollout sized the episode itself"
+    assert final_state.positions[:2].tolist() == [[0, 0], [0, 0]], (
+        "the rollout applied its own transition instead of the space's"
+    )
+
+
+def test_the_rollout_length_comes_from_the_space_not_from_the_macro_count() -> None:
+    # A perturbation episode is a move budget and has nothing to do with how many macros exist,
+    # so `n_macros - n_placed` was the wrong scan length the moment a second space existed.
+    params = EnvParams(grid=6, n_macros=3)
+    assert Perturbation(n_moves=9).episode_length(params, n_placed=3) == 9
+    assert DISCRETE_GRID.episode_length(params, n_placed=1) == 2
+
+
+def test_a_policy_declares_which_action_spaces_its_output_can_express() -> None:
+    """Read from the policy rather than hard-coded against the agent's name.
+
+    A `(grid_x, grid_y)` logits map is exactly one grid cell, so every shipped architecture drives
+    `discrete_grid` and says so. A policy with a turn axis declares more - and then has to supply
+    per-turn legality, which `legal_action_logits` insists on rather than broadcasting a
+    position-only mask over an axis it never checked.
+    """
+    from placax_agents.experiment.build import CELL_ONLY, policy_action_spaces
+    from placax_agents.policy.action import legal_action_logits
+    from placax_agents.policy.architectures.cnn import CNNActorCritic
+
+    assert policy_action_spaces(CNNActorCritic(features=4, num_conv_layers=1)) == CELL_ONLY
+
+    class Oriented(CNNActorCritic):
+        action_spaces = ("discrete_grid", "oriented_grid")
+
+    assert "oriented_grid" in policy_action_spaces(Oriented(features=4, num_conv_layers=1))
+
+    # ...and a three-dimensional logits map is refused by the mask rather than silently stretched.
+    with pytest.raises(ValueError, match="legality computed FOR that axis"):
+        legal_action_logits(
+            jnp.zeros((4, 4, 4)), jnp.zeros((4, 4), dtype=bool), EnvParams(grid=4, n_macros=1),
+            (1, 1),
+        )
+
+
+def test_an_action_mask_that_needs_a_current_macro_is_refused_without_one(tmp_path) -> None:
+    """`ActionSpace.target()` finally decides something.
+
+    `wiremask_quality` reads `current_macro_size` and a wiremask baseline built from "the first
+    `state.step` macros are down". Under a perturbation space `state.step` is a move counter, so
+    both describe an arbitrary macro - and JAX clamps the out-of-range index rather than raising,
+    so the mask came back looking perfectly well-formed while masking for the wrong macro.
+    """
+    from placax_agents.experiment.presets import maskplace
+
+    directory = _design(tmp_path / "masked")
+    config = maskplace(directory, budget=Budget(iterations=1))
+    config = dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment,
+        benchmark=dataclasses.replace(config.environment.benchmark, grid=24),
+        action_space=Spec("perturbation", {"n_moves": 2}),
+        initial_placement=Spec("greedy_wiremask_prefix", {"n_macros": None}),
+    ), agent=AgentSpec(algorithm=Spec("local_search")))
+    assert config.environment.action_mask is not None, "the fixture must actually constrain"
+
+    with pytest.raises(ValueError, match="has no such macro"):
+        build(config)
+
+    # Dropping the mask - the environment's own choice - is what makes the pairing runnable.
+    without = dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment, action_mask=None))
+    assert build(without).agent.name == "local_search"

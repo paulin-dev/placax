@@ -105,7 +105,9 @@ def test_the_oriented_space_records_the_turn_the_action_chose() -> None:
     params = EnvParams(grid=8, n_macros=3)
     space = OrientedGridPlacement()
 
-    def zero(_a, _b, _c, _d):
+    # Five parameters, because an oriented space hands the reward the turns it chose - a reward
+    # that cannot see them scores a placement that was never made. See placax/types.py's RewardFn.
+    def zero(_a, _b, _c, _d, _orientations=None):
         return jnp.array(0.0)
 
     state = reset(params, None, space)
@@ -148,15 +150,24 @@ def test_legality_is_measured_on_the_rotated_footprint(tmp_path) -> None:
 
 
 def test_score_reports_legality_against_the_orientation_it_scored(tmp_path) -> None:
-    # score() has to apply the same transform to both halves, or it reports a wirelength for one
-    # placement and a legality for another.
-    built = build(training(_design(tmp_path / "bench"), budget=Budget(iterations=1)))
+    # score() has to apply the same transform to every half - wirelength, legality AND reward -
+    # or it reports one placement's number beside another's.
+    built = build(_oriented_config(_design(tmp_path / "bench")))
     positions = jnp.array([[0, 0], [8, 0], [0, 8], [8, 8]])
     orientations = jnp.array([orient.WEST, orient.NORTH, orient.EAST, orient.NORTH])
-    measured = score(built.benchmark, positions, 0, orientations)
+    measured = score(built.benchmark, positions, 0, orientations, built.action_space)
     assert measured["real_hpwl"] == pytest.approx(
         score_placement(built.benchmark, positions, orientations)
     )
+
+
+def test_scoring_a_turned_placement_under_a_space_without_turns_is_refused(tmp_path) -> None:
+    # The half-rotated number: real_hpwl would measure the turns while the reward could not see
+    # them, so one call would describe two different placements.
+    built = build(training(_design(tmp_path / "bench"), budget=Budget(iterations=1)))
+    positions = jnp.array([[0, 0], [8, 0], [0, 8], [8, 8]])
+    with pytest.raises(ValueError, match="does not produce any"):
+        score(built.benchmark, positions, 0, jnp.array([orient.WEST, 0, 0, 0]))
 
 
 # --------------------------------------------------------------- it reaches the file
@@ -252,7 +263,10 @@ def test_the_ga_reports_the_turns_it_chose_and_is_scored_on_them(tmp_path) -> No
     orientations = best_orientations(built.agent, state)
     assert orientations is not None and orientations.shape == (4,)
     assert bool(((orientations >= 0) & (orientations < orient.N_ORIENTATIONS)).all())
-    measured = score(built.benchmark, built.agent.best_positions(state), 0, orientations)
+    # Scored under the space the placement was MADE in - that is what lets the reward see the
+    # turns too, rather than reporting a rotated wirelength beside an all-north reward.
+    measured = score(built.benchmark, built.agent.best_positions(state), 0, orientations,
+                     built.action_space, built.initial_positions)
     # Whatever the search found, what is reported is the placement it actually chose - overlap
     # included, which is the project's rule: a wirelength without its legality is not a result.
     assert measured["real_hpwl"] == pytest.approx(
@@ -294,3 +308,126 @@ def test_a_cell_only_agent_refuses_the_oriented_space(tmp_path) -> None:
         base.environment, action_space=Spec("oriented_grid")))
     with pytest.raises(ValueError, match="cannot use"):
         build(config)
+
+
+# ------------------------------------------------- orientation reaches the REWARD, not only HPWL
+
+
+def _oriented_benchmark(tmp_path):
+    """A 4-macro design whose macros are not square, so a quarter turn actually changes something."""
+    import dataclasses
+
+    from placax_agents.experiment.budget import Budget
+    from placax_agents.experiment.build import build
+    from placax_agents.experiment.config import AgentSpec, Spec
+    from placax_agents.experiment.presets import training
+
+    directory = tmp_path / "bench"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "s.aux").write_text("RowBasedPlacement : s.nodes s.nets s.wts s.pl s.scl\n")
+    (directory / "s.nodes").write_text(
+        "UCLA nodes 1.0\nNumNodes : 4\nNumTerminals : 4\n"
+        "a 4 2 terminal\nb 2 6 terminal\nc 2 4 terminal\nd 6 2 terminal\n"
+    )
+    (directory / "s.nets").write_text(
+        "UCLA nets 1.0\nNumNets : 3\nNumPins : 6\n"
+        "NetDegree : 2 n0\n\ta I : 1.0 0.0\n\tb O : 0.0 2.0\n"
+        "NetDegree : 2 n1\n\tb I : 0.0 -2.0\n\tc O : 0.0 1.0\n"
+        "NetDegree : 2 n2\n\tc I : 0.0 0.0\n\td O : 2.0 0.0\n"
+    )
+    config = training(directory, budget=Budget(iterations=1))
+    config = dataclasses.replace(
+        config,
+        environment=dataclasses.replace(
+            config.environment,
+            benchmark=dataclasses.replace(config.environment.benchmark, grid=12),
+            reward=Spec("hpwl", {"dense": True}),
+            action_space=Spec("oriented_grid"),
+        ),
+        agent=AgentSpec(algorithm=Spec("genetic", {"population": 4})),
+    )
+    return build(config)
+
+
+def test_turning_every_macro_changes_the_reward_it_is_scored_by(tmp_path) -> None:
+    """The measurement that motivated widening RewardFn.
+
+    One placement, two orientation assignments: real HPWL moved (21.907 -> 23.907 on this design)
+    and the legality changed, while `reward_return` came back identical, because every reward
+    converted grid cells to real centers with the UNROTATED footprint and never rotated a pin. So
+    the GA on `oriented_grid` evolved a third gene its own fitness could not see.
+    """
+    from placax.core import replay
+
+    built = _oriented_benchmark(tmp_path)
+    benchmark, space = built.benchmark, built.action_space
+    positions = jnp.array([[0, 0], [4, 0], [0, 4], [6, 6]])
+    north = jnp.zeros((4,), dtype=jnp.int32)
+    turned = jnp.ones((4,), dtype=jnp.int32)   # every macro a quarter turn
+
+    north_return = float(replay(positions, benchmark.reward_fn, benchmark.params, 0, space, north))
+    turned_return = float(replay(positions, benchmark.reward_fn, benchmark.params, 0, space, turned))
+    assert north_return != pytest.approx(turned_return)
+
+    # ...and it moves the same way the reported metric does: both see the rotated geometry.
+    from placax_agents.experiment.run import score_placement
+
+    assert score_placement(benchmark, positions, north) != pytest.approx(
+        score_placement(benchmark, positions, turned)
+    )
+
+
+def test_an_all_north_placement_scores_exactly_what_it_always_did(tmp_path) -> None:
+    # The identity property the whole transform-on-inputs design rests on: passing explicit
+    # all-north orientations must be indistinguishable from passing none.
+    from placax.core import replay
+
+    built = _oriented_benchmark(tmp_path)
+    benchmark, space = built.benchmark, built.action_space
+    positions = jnp.array([[0, 0], [4, 0], [0, 4], [6, 6]])
+    explicit = float(
+        replay(positions, benchmark.reward_fn, benchmark.params, 0, space,
+               jnp.zeros((4,), dtype=jnp.int32))
+    )
+    implicit = float(replay(positions, benchmark.reward_fn, benchmark.params, 0))
+    assert explicit == pytest.approx(implicit)
+
+
+def test_encoding_a_placement_carries_its_turns_into_the_actions(tmp_path) -> None:
+    """`replay` used to feed 2-wide position rows to a 3-wide `apply`.
+
+    JAX clamps the out-of-range index, so `action[2]` silently became the y coordinate and every
+    macro was replayed at an orientation nobody chose. The space encodes the pair now.
+    """
+    space = OrientedGridPlacement()
+    positions = jnp.array([[1, 2], [3, 4]])
+    turns = jnp.array([orient.WEST, orient.EAST], dtype=jnp.int32)
+    actions = space.encode(positions, turns)
+    assert actions.tolist() == [[1, 2, orient.WEST], [3, 4, orient.EAST]]
+    # And with no turns given it is the all-north placement, not whatever y happened to be.
+    assert space.encode(positions, None).tolist() == [[1, 2, 0], [3, 4, 0]]
+
+
+def test_a_reward_that_cannot_see_orientation_is_refused_at_build(tmp_path) -> None:
+    # Better to refuse than to produce a plausible number for a placement nobody made.
+    import dataclasses
+
+    from placax_agents.experiment.build import build
+    from placax_agents.experiment.registry import register, REWARDS
+
+    def blind(_grid, **_kwargs):
+        def factory(_idx, _offset, _mask, _sizes, _cell_size):
+            def reward_fn(_old, _new, _old_placed, _new_placed):   # four parameters, no turns
+                return jnp.array(0.0)
+            return reward_fn
+        return factory
+
+    register("reward", "orientation_blind_for_test", blind)
+    try:
+        built = _oriented_benchmark(tmp_path)
+        blind_config = dataclasses.replace(built.config, environment=dataclasses.replace(
+            built.config.environment, reward=Spec("orientation_blind_for_test")))
+        with pytest.raises(ValueError, match="cannot see one"):
+            build(blind_config)
+    finally:
+        REWARDS.pop("orientation_blind_for_test", None)

@@ -16,7 +16,7 @@ from placax.extras.mst import hpwl_wirelength
 from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
 from placax_agents.experiment.build import build
 from placax_agents.experiment.export import write_placement
-from placax_agents.experiment.presets import OUTPUT_SUBDIRS
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, find_run_dir
 from placax_agents.experiment.run import write_manifest
 from scripts.presets import config_for
 from placax_agents.ops.evaluate import evaluate
@@ -124,7 +124,7 @@ def _parse_args(argv: list[str]):
 
 
 def _resolve_checkpoint(
-    benchmark_dir: pathlib.Path, default_subdir: str, checkpoint_arg: pathlib.Path | None
+    benchmark_dir: pathlib.Path, preset: str, checkpoint_arg: pathlib.Path | None
 ) -> tuple[pathlib.Path, bool]:
     """Returns (checkpoint_path, bare): bare=True for a bare-weights bundle (the production default - no
     optimizer/RNG state), detected from the file's own contents (is_bare_checkpoint) so this works
@@ -132,9 +132,10 @@ def _resolve_checkpoint(
     names. Only the DEFAULT --checkpoint path (when none is given) uses that naming convention, to pick
     which of the two conventional files to default to, under the given preset's own default output
     subdir (e.g. output_maskplace, output - see placax_agents/experiment/presets.py)."""
-    checkpoint_path = checkpoint_arg or (benchmark_dir / default_subdir / "best_checkpoint.bin")
+    run_dir = find_run_dir(preset, benchmark_dir)
+    checkpoint_path = checkpoint_arg or (run_dir / "best_checkpoint.bin")
     if checkpoint_arg is None and not checkpoint_path.exists():
-        checkpoint_path = benchmark_dir / default_subdir / "checkpoint.bin"
+        checkpoint_path = run_dir / "checkpoint.bin"
     if not checkpoint_path.exists():
         return checkpoint_path, True  # doesn't exist yet; bare is just a harmless default, caller errors next
     return checkpoint_path, is_bare_checkpoint(checkpoint_path)
@@ -148,11 +149,33 @@ def _build_cell_placer(
     use_docker: bool,
     extra_mounts: tuple[pathlib.Path, ...],
     extra_config: dict | None = None,
+    config=None,
 ) -> CellPlacer:
-    """The one place this pipeline decides WHICH CellPlacer to use - DREAMPlace by default, matching
-    docs/JAX_Placement_Environment_Spec.md section 5.4. Swap in a different Bookshelf-capable
-    CellPlacer (RePlAce, AutoDMP, a commercial tool) by changing only this function; every call site
-    downstream depends on the generic CellPlacer.place_bookshelf() contract, not this class."""
+    """The CellPlacer this run uses: the one its CONFIG names, or DREAMPlace from the flags.
+
+    A config that names a cell placer in `EnvironmentSpec.physical` has that choice hashed and
+    written into its manifest, and this script writes a manifest beside its outputs - so it has to
+    honor the recorded choice rather than construct DREAMPlace regardless, which would put one
+    tool's numbers under another tool's name. `build_physical` makes the same split the rest of the
+    physical flow makes: WHICH tool comes from the config, WHERE it is installed comes from this
+    machine's flags, and only the second belongs on a command line.
+
+    Falls back to DREAMPlace when the config names none, which is every shipped preset - a proxy
+    run has no physical stack, and this pipeline still has to place cells.
+    """
+    machine = {
+        "dreamplace_root": dreamplace_root, "gpu": gpu, "use_docker": use_docker,
+        "python_executable": python_executable, "extra_mounts": extra_mounts,
+        "extra_config": extra_config, "target_density": target_density,
+    }
+    if config is not None and config.environment.physical.cell_placer is not None:
+        from placax_agents.experiment.build import build_physical
+
+        Log.info(
+            f"cell placer {config.environment.physical.cell_placer.name!r}, from this run's config"
+        )
+        placer, _validator = build_physical(config, machine)
+        return placer
     return DREAMPlaceCellPlacer(
         dreamplace_root=dreamplace_root, gpu=gpu, target_density=target_density,
         python_executable=python_executable, use_docker=use_docker, extra_mounts=extra_mounts,
@@ -192,7 +215,7 @@ def main() -> None:
     default_subdir = OUTPUT_SUBDIRS[preset]
     config = config_for(config_path, preset, benchmark_dir, macro_budget)
 
-    checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, default_subdir, checkpoint_arg)
+    checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, preset, checkpoint_arg)
     if not checkpoint_path.exists():
         Log.error(f"'{checkpoint_path}' not found - train first (--preset={preset} expects a checkpoint "
                    f"matching that preset's own training script).")
@@ -262,10 +285,10 @@ def main() -> None:
               "is ready for it once this design has real LEF/DEF).")
         return
 
-    # 6. Hand off to a CellPlacer (default: DREAMPlace) to place every remaining standard cell around
-    # the now-fixed macros. Only construction is DREAMPlace-specific; the call site below depends on
-    # CellPlacer.place_bookshelf()'s generic contract (placax_tools/cell_placer.py), so swapping in a
-    # different Bookshelf-capable CellPlacer only means changing _build_cell_placer, not this call site.
+    # 6. Hand off to a CellPlacer to place every remaining standard cell around the now-fixed
+    # macros - the one this run's config names, or DREAMPlace when it names none. The call site
+    # depends only on CellPlacer.place_bookshelf()'s generic contract (placax_tools/cell_placer.py),
+    # so a different Bookshelf-capable placer is a registry entry and a config change.
     # Docker mode: the container only sees dreamplace_root (mounted at /DREAMPlace) plus whatever we
     # explicitly mount below - benchmark_dir (nodes/nets/wts/scl) and output_dir (pl/aux/config/result),
     # each at their own identical host path, so the absolute paths already written into new_aux_path
@@ -273,7 +296,7 @@ def main() -> None:
     common_mount_root = pathlib.Path(os.path.commonpath([benchmark_dir.resolve(), output_dir.resolve()]))
     cell_placer = _build_cell_placer(
         dreamplace_root, gpu, target_density, python_executable, use_docker, (common_mount_root,),
-        extra_config=dreamplace_extra_config,
+        extra_config=dreamplace_extra_config, config=built.config,
     )
     try:
         result_pl = cell_placer.place_bookshelf(new_aux_path, output_dir)
