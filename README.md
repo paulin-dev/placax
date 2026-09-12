@@ -252,7 +252,7 @@ like the only paradigm in a project built to compare several.
 | action space | action | episode ends | drivers |
 |---|---|---|---|
 | `discrete_grid` | `(x, y)` | every macro placed | every agent; the default, unchanged |
-| `oriented_grid` | `(x, y, turn)` | every macro placed | `genetic` |
+| `oriented_grid` | `(x, y, turn)` | every macro placed | `genetic`; `ppo` with the `oriented_cnn` policy |
 | `perturbation` | `(macro, x, y)` | move budget spent | `local_search` |
 
 The crux was not the transition but that `state.step` meant two things at once: *how many actions
