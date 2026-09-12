@@ -83,7 +83,7 @@ def main() -> None:
 
     # 3. One greedy (no training, no sampling) rollout over the macros the environment left to the
     #    agent - the warm-start prefix comes from the config, not from an assumption of none.
-    positions, _hpwl = evaluate(
+    positions, _orientations, _hpwl = evaluate(
         variables, built.policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         built.state_fn, built.extra_illegal_fn, built.initial_positions, built.n_placed,

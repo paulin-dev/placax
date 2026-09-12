@@ -245,7 +245,7 @@ def main() -> None:
     # 3. One greedy rollout, placing every macro the environment left to the agent. The warm-start
     # prefix and the macro count come from the config: replaying a warm-started checkpoint from an
     # empty canvas, as this script used to, is a different environment and a different result.
-    positions, hpwl_value = evaluate(
+    positions, orientations, hpwl_value = evaluate(
         variables, policy.apply, benchmark.params, benchmark.sizes_array, benchmark.cell_size,
         benchmark.padded_pin_idx, benchmark.padded_pin_offset, benchmark.valid_mask,
         state_fn, built.extra_illegal_fn, built.initial_positions, built.n_placed,

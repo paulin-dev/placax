@@ -1,5 +1,6 @@
 """Turns a policy's raw logits into a legal action."""
 from placax.extras.masks import boundary_mask, occupancy_mask, quality_mask  # must precede jax imports
+from placax.extras.orientation import N_ORIENTATIONS
 from placax.types import EnvParams
 from placax_agents.policy.scale import to_grid_units
 from placax_agents.types import ExtraIllegalFn
@@ -93,6 +94,75 @@ def make_wiremask_quality_illegal(
     # supply either, and build() refuses the pairing rather than masking for an arbitrary macro.
     extra_illegal_fn.needs_current_macro = True
     return extra_illegal_fn
+
+
+def oriented_illegal_actions(
+    obs: dict, params: EnvParams, cell_size: float, extra_illegal_fn: ExtraIllegalFn | None = None
+) -> jax.Array:
+    """`(grid_x, grid_y, N_ORIENTATIONS)` bool: which (cell, turn) pairs this macro may not take.
+
+    Legality per TURN, because a quarter-turned macro is its height by its width and therefore
+    fits in different cells. That is the whole reason `legal_action_logits` refuses to broadcast
+    its two-dimensional map over a turn axis: stretching it would mark placements legal that were
+    never checked, which is the failure this project keeps finding rather than a shortcut.
+
+    The relaxation valve fires over the WHOLE action set rather than per turn. Per turn, a turn
+    with nowhere legal to go would relax to "everywhere legal" and become the attractive option;
+    across the set, the quality rule is dropped only when no (cell, turn) pair survives it at all,
+    and legality itself only if that is still empty - the same two-stage valve `illegal_cells`
+    applies, over the actions this space actually has.
+
+    **One documented approximation.** An extra rule that reads a wiremask - `wiremask_quality` -
+    is handed this macro's ROTATED footprint, so the part of it that asks "does this macro fit
+    here" is right; the wiremask preview it reads is still computed from the unrotated geometry by
+    `make_wiremask_observation`, one level up. That makes the quality threshold slightly off for a
+    turned macro, in the direction of ranking cells rather than of admitting illegal ones. Stated
+    here because a legality rule is exactly where an unstated approximation does damage.
+    """
+    size = obs["current_macro_size"]
+
+    def per_turn(turn: jax.Array) -> tuple[jax.Array, jax.Array]:
+        # A quarter turn (WEST or EAST) swaps width and height; a half turn does not.
+        turned = jnp.where(turn % 2 == 1, size[::-1], size)
+        macro_size = to_grid_units(turned, cell_size)
+        base = occupancy_mask(obs["canvas"], macro_size) | boundary_mask(params, macro_size)
+        if extra_illegal_fn is None:
+            return base, base
+        extra = extra_illegal_fn({**obs, "current_macro_size": turned})
+        return base | extra, base
+
+    full, base = jax.vmap(per_turn)(jnp.arange(N_ORIENTATIONS))
+    full = jnp.where(full.all(), base, full)
+    full = jnp.where(full.all(), False, full)
+    # (n_turns, grid_x, grid_y) -> (grid_x, grid_y, n_turns), matching the action's own order.
+    return jnp.moveaxis(full, 0, -1)
+
+
+def masked_action_logits(
+    logits: jax.Array, obs: dict, params: EnvParams, cell_size: float,
+    extra_illegal_fn: ExtraIllegalFn | None = None,
+) -> jax.Array:
+    """A policy's logits with the run's legality applied, whatever action shape the policy emits.
+
+    THE one place a logits map meets the environment's rules, called by the rollout, the greedy
+    evaluation and PPO's loss alike. That last one is not a convenience: `ppo_loss` recomputes the
+    mask from the stored observation to get the probability ratio right, so if the rollout and the
+    loss built their masks from two copies of this logic, a change to one would make PPO train on
+    a ratio between two different distributions - silently, and only under the space nobody tests.
+    """
+    if logits.ndim == 2:
+        macro_size = to_grid_units(obs["current_macro_size"], cell_size)
+        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
+        return legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
+    if logits.ndim == 3:
+        illegal = oriented_illegal_actions(obs, params, cell_size, extra_illegal_fn)
+        # float64 for the same reason legal_action_logits widens - see there.
+        return jnp.where(illegal, -jnp.inf, logits.astype(jnp.float64))
+    raise ValueError(
+        f"a policy emits either a (grid_x, grid_y) logits map or a (grid_x, grid_y, "
+        f"{N_ORIENTATIONS}) one; got shape {logits.shape}. A wider action needs legality computed "
+        f"for its extra axis, which is what oriented_illegal_actions does for the turn."
+    )
 
 
 def sample_action(key: jax.Array, logits: jax.Array) -> jax.Array:

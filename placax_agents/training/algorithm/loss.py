@@ -2,8 +2,7 @@
 from typing import Callable
 
 from placax.types import EnvParams  # must precede jax imports
-from placax_agents.policy.action import action_log_prob, legal_action_logits
-from placax_agents.policy.scale import to_grid_units
+from placax_agents.policy.action import action_log_prob, masked_action_logits
 from placax_agents.types import AlgorithmFn, ExtraIllegalFn
 
 import jax
@@ -57,11 +56,10 @@ def ppo_loss(
         #    fresh logits/value - these will differ from rollout time as params update.
         logits, value = policy_apply_fn(policy_params, obs)
 
-        # 2. Recompute the same legal-action mask used at rollout time, so the
-        #    probability ratio below compares apples to apples.
-        macro_size = to_grid_units(obs["current_macro_size"], cell_size)
-        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
-        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
+        # 2. Recompute the same legal-action mask used at rollout time, so the probability ratio
+        #    below compares apples to apples - through the very function the rollout called, not
+        #    a second copy of it.
+        masked_logits = masked_action_logits(logits, obs, params, cell_size, extra_illegal_fn)
         new_log_prob = action_log_prob(masked_logits, action)
 
         # 3. PPO's clipped surrogate objective: reward the new policy for increasing

@@ -2,9 +2,8 @@
 from placax.action_space import DISCRETE_GRID  # must precede jax imports
 from placax.core import reset, step
 from placax.types import EnvParams, RewardFn
-from placax_agents.policy.action import action_log_prob, legal_action_logits, sample_action
+from placax_agents.policy.action import action_log_prob, masked_action_logits, sample_action
 from placax_agents.policy.observation import observation
-from placax_agents.policy.scale import to_grid_units
 from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
@@ -50,9 +49,10 @@ def collect_rollout(
             else state_fn(state, params, sizes_array)
         logits, value = policy_apply_fn(variables, obs)
 
-        macro_size = to_grid_units(obs["current_macro_size"], cell_size)
-        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
-        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
+        # One masking entry point, shared with ppo_loss and the greedy eval: the ratio PPO
+        # optimizes compares this distribution against the one the loss rebuilds, so they cannot
+        # be two copies of the same idea. See policy/action.py's masked_action_logits.
+        masked_logits = masked_action_logits(logits, obs, params, cell_size, extra_illegal_fn)
 
         action = sample_action(step_key, masked_logits)
         log_prob = action_log_prob(masked_logits, action)

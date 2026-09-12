@@ -465,6 +465,24 @@ against, while `assert_comparable` still reports the two environments as identic
 negative in exactly the check this machinery exists to provide."""
 
 
+INITIAL_PLACEMENT_KEY = 0
+"""The RNG key every warm start is drawn with - fixed, and deliberately not the run's seed.
+
+The initial placement is part of the ENVIRONMENT: `environment_hash` asserts that two runs being
+compared started from the same one, and TILOS's finding is that the starting placement can matter
+as much as the method refining it. Drawing it from `config.seed` made that assertion false the
+moment anyone registered a stochastic warm start - three seeds of one experiment would have
+started from three different placements while every hash reported the warm start as identical.
+
+So the warm start is a pure function of the environment spec. Variation that is supposed to
+matter goes in the component's own kwargs, where it is hashed and written down like everything
+else: `Spec("my_warm_start", {"sample_seed": 3})` is a different environment and says so, which
+is exactly the property a bare `config.seed` could not give it.
+
+Both shipped warm starts ignore the key entirely - `empty` returns None and
+`greedy_wiremask_prefix` is deterministic - so no run this project has produced is affected."""
+
+
 def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, key,
                               action_space=None):
     """The run's warm start, resolved once: (initial_positions, how many macros it placed).
@@ -473,6 +491,8 @@ def resolve_initial_placement(config: ExperimentConfig, benchmark: Benchmark, ke
     static shape for the rollout scan; and "the initial placement" is a property of the
     environment being compared, so resampling it inside the run would make two runs of the same
     config differ on an axis the config claims to pin down.
+
+    `key` is `INITIAL_PLACEMENT_KEY` for the same reason - see there.
     """
     init_fn = resolve(INITS, config.environment.initial_placement, benchmark,
                       what="initial placement")
@@ -583,10 +603,12 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     # space chooses, and can the legality rules answer "which macro is this step about".
     _require_orientation_aware_reward(config, benchmark, action_space)
     _require_answerable_constraints(config, benchmark, extra_illegal_fn, action_space)
-    # Derived from the run's seed, so a stochastic warm start is reproducible with the run, and
-    # validated against the action space, which decides what "nothing left to do" means.
+    # Drawn with a FIXED key, not the run's seed: the warm start is part of the environment, and
+    # `environment_hash` claims two runs being compared started from the same one. See
+    # INITIAL_PLACEMENT_KEY. Validated against the action space, which decides what "nothing left
+    # to do" means.
     initial_positions, n_placed = resolve_initial_placement(
-        config, benchmark, jax.random.PRNGKey(config.seed), action_space
+        config, benchmark, jax.random.PRNGKey(INITIAL_PLACEMENT_KEY), action_space
     )
     env = ResolvedEnvironment(state_fn, extra_illegal_fn, initial_positions, n_placed, action_space)
     legalize_fn = (

@@ -103,6 +103,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Override the preset's warm start, same 'name:key=value' form - e.g. "
                              "'greedy_wiremask_prefix:n_macros=null' to pre-place every macro, "
                              "which is what a perturbation space has to start from.")
+    parser.add_argument("--agent_environment", default=None,
+                        help='JSON mapping an agent name to the environment axes its own '
+                             'PARADIGM forces, e.g. \'{"local_search": {"action_space": '
+                             '"perturbation:n_moves=128", "initial_placement": '
+                             '"greedy_wiremask_prefix:n_macros=null"}}\'. Only "action_space" '
+                             'and "initial_placement" may be set here, and only with '
+                             '--level=paradigm: a constructive agent and a perturbation one move '
+                             'macros differently by definition, which is what that level exists '
+                             'to say. Everything else stays shared.')
     parser.add_argument("--agent_kwargs", default=None,
                         help='JSON mapping an agent name to its own kwargs, e.g. '
                              '\'{"genetic": {"population": 64}, "local_search": '
@@ -122,12 +131,35 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "training work for measurement; leave it at 0 unless you want the "
                              "curve, and use the same value for every agent if you do.")
     parser.add_argument("--level", default="environment",
-                        choices=("benchmark", "task", "environment"),
+                        choices=("benchmark", "task", "paradigm", "environment"),
                         help="Which invariant this comparison claims (default: %(default)s - "
-                             "everything the agent did not choose). Drop to 'task' only for a "
-                             "study that varies the observation on purpose.")
+                             "everything the agent did not choose). Drop to 'task' for a study "
+                             "that varies the observation on purpose, or to 'paradigm' to put a "
+                             "constructive agent and a perturbation one in one table - they move "
+                             "macros differently, so their action space and warm start differ "
+                             "and the budget stops being work-matched. The table says so.")
     parsed = parser.parse_args(argv[1:])
     parsed.agent_kwargs = json.loads(parsed.agent_kwargs) if parsed.agent_kwargs else {}
+    parsed.agent_environment = (
+        json.loads(parsed.agent_environment) if parsed.agent_environment else {}
+    )
+    unknown = {axis for axes in parsed.agent_environment.values() for axis in axes} - {
+        "action_space", "initial_placement"
+    }
+    if unknown:
+        raise SystemExit(
+            f"--agent_environment may set 'action_space' and 'initial_placement' and nothing "
+            f"else; got {', '.join(sorted(unknown))}. Every other environment axis is shared by "
+            f"definition - that is what makes the rows comparable at all."
+        )
+    if parsed.agent_environment and parsed.level != "paradigm":
+        raise SystemExit(
+            f"--agent_environment gives agents different action spaces or warm starts, which "
+            f"--level={parsed.level} asserts are identical. Use --level=paradigm, which is the "
+            f"claim such a table actually makes: same design, reward, observation, legality and "
+            f"budget; different ways of moving a macro. Note what that level does NOT claim - "
+            f"see the note printed under the table."
+        )
     parsed.benchmark_dirs = (
         [pathlib.Path(part.strip()) for part in parsed.benchmark_dirs.split(",") if part.strip()]
         if parsed.benchmark_dirs else [parsed.benchmark_dir]
@@ -181,9 +213,25 @@ def _agent_spec(name: str, reference: ExperimentConfig, population: int,
     return AgentSpec(algorithm=Spec(name, kwargs))
 
 
+def _agent_environment(reference: ExperimentConfig, name: str, overrides: dict | None):
+    """The reference environment, with the axes THIS agent's paradigm forces.
+
+    Only two axes may differ, and only at `--level=paradigm`: how a macro moves, and therefore
+    where an episode has to start. Everything else is the reference's, which is what keeps the
+    rows a comparison rather than a collection.
+    """
+    axes = (overrides or {}).get(name, {})
+    if not axes:
+        return reference.environment
+    return dataclasses.replace(reference.environment, **{
+        axis: Spec.parse(value) for axis, value in axes.items()
+    })
+
+
 def build_comparison(
     reference: ExperimentConfig, agents: list[str], seeds: int, population: int,
     level: str = "environment", agent_kwargs: dict | None = None,
+    agent_environment: dict | None = None,
 ) -> list[ExperimentConfig]:
     """One config per (agent, seed), all sharing the reference's environment exactly."""
     configs = []
@@ -192,7 +240,7 @@ def build_comparison(
             configs.append(ExperimentConfig(
                 name=f"{name}-seed{seed}",
                 seed=seed,
-                environment=reference.environment,
+                environment=_agent_environment(reference, name, agent_environment),
                 agent=_agent_spec(name, reference, population, agent_kwargs),
             ))
     # The whole point. If a future edit lets an agent perturb the environment, this stops the run
@@ -245,7 +293,52 @@ def _format_table(results: dict[str, list[dict]], budget: Budget, level: str) ->
                  "'grad steps' is what env steps deliberately does not price.")
     lines.append("'legal' counts seeds whose placement had no overlap, nothing out of bounds and "
                  "every macro placed; 'overlap' is the worst seed's overlapping macro area.")
+    lines.extend(_paradigm_note(results))
     return "\n".join(lines)
+
+
+def _paradigm_note(results: dict[str, list[dict]]) -> list[str]:
+    """What a cross-paradigm table does NOT claim, printed under the rows that make it one.
+
+    `--level=paradigm` drops two axes, and neither loss is cosmetic:
+
+      * **env_steps stop being one unit.** A constructive env step PLACES a macro; a perturbation
+        env step MOVES one. Both are one `step()` call and one reward evaluation, so the budget
+        matches INTERACTION - which is real, and is the only thing it matches. It does not match
+        work, and the README's "sample-matched, not compute-matched" caveat gets a second half
+        here rather than being quietly stretched to cover this too.
+      * **the warm start differs.** A perturbation agent has to start from a complete placement,
+        so it is typically handed one a constructive agent was never given. If that placement
+        came from `greedy_wiremask`, the row is reporting what local search added to a strong
+        heuristic, not what it achieves alone - and `greedy_wiremask`'s own row is the number to
+        read it against.
+
+    Printed only when the rows actually differ, so an ordinary comparison is not lectured.
+    """
+    spaces = {run.get("action_space") for runs in results.values() for run in runs}
+    starts = {run.get("initial_placement") for runs in results.values() for run in runs}
+    if len(spaces - {None}) <= 1 and len(starts - {None}) <= 1:
+        return []
+
+    lines = ["", "THESE ROWS MOVE MACROS DIFFERENTLY (--level=paradigm)", ""]
+    header = f"{'agent':<22s}{'action space':>16s}{'warm start':>28s}"
+    lines.extend([header, "-" * len(header)])
+    for name, runs in sorted(results.items()):
+        row = runs[0]
+        lines.append(f"{name:<22s}{str(row.get('action_space')):>16s}"
+                     f"{str(row.get('initial_placement')):>28s}")
+    lines.extend([
+        "",
+        "One env step is one macro PLACED under a constructive space and one macro MOVED under a "
+        "perturbation one.",
+        "The budget matches environment INTERACTION across these rows - one step() call, one "
+        "reward evaluation each - and nothing else:",
+        "it is not work-matched, and 'grad steps' is not the only axis it fails to price.",
+        "A perturbation agent also starts from a complete placement a constructive agent was "
+        "never given; where that placement",
+        "came from a heuristic, read its row against that heuristic's own.",
+    ])
+    return lines
 
 
 def _rank_summary(by_design: dict[str, dict[str, list[dict]]]) -> str:
@@ -324,7 +417,7 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
     """
     reference = _with_overrides(build_preset(args.preset, benchmark_dir, budget=budget), args)
     configs = build_comparison(reference, agents, args.seeds, args.population, args.level,
-                               args.agent_kwargs)
+                               args.agent_kwargs, args.agent_environment)
     output_root = (args.output_dir or (benchmark_dir / "comparison"))
     if len(args.benchmark_dirs) > 1 and args.output_dir is not None:
         output_root = output_root / benchmark_dir.name
@@ -357,6 +450,10 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
         final = log[-1] if log else {}
         results.setdefault(agent_name, []).append({
             **measured,
+            # The two axes a paradigm comparison lets vary, recorded per row: a reader of
+            # results.json has to be able to see which rows moved macros which way.
+            "action_space": built.config.environment.action_space.name,
+            "initial_placement": built.config.environment.initial_placement.name,
             "seed": config.seed,
             "env_steps": final.get("env_steps", 0),
             "eval_env_steps": final.get("eval_env_steps", 0),

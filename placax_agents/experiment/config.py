@@ -33,6 +33,11 @@ entirely, which is how the mechanism stops being used:
                        vs. image vs. graph, algorithm held fixed") - those runs differ in
                        `state` on purpose, so `environment_hash` would reject them and tell the
                        researcher nothing.
+  `paradigm_hash()`    the environment MINUS the action space and the warm start - what a
+                       constructive agent and a perturbation one can share, since they move
+                       macros differently by definition. Looser than `environment` on exactly
+                       those two axes, and a table at this level owes its reader a note that
+                       env_steps mean different things on either side of it.
   `environment_hash()` + the observation. The default, and the right level for an agent
                        comparison: everything the agent did not choose.
   `full_hash()`        + the agent and the seed. Identifies an exact run.
@@ -296,6 +301,31 @@ class EnvironmentSpec:
         """The task plus the observation: everything the agent did not choose."""
         return {**self.task_identity(), "state": self.state.identity("state")}
 
+    def paradigm_identity(self) -> dict:
+        """The environment with the ACTION SPACE and the warm start removed.
+
+        What a cross-paradigm comparison shares, and the level it has to assert: same design,
+        reward, observation, legality rules, legalization, physical stack and budget, while the
+        way a macro moves - and therefore where an episode has to start - differs by agent.
+
+        Both axes go, not just the space. A perturbation episode moves macros that are already
+        down, so it cannot begin from an empty canvas; requiring one warm start across the
+        comparison would rule the comparison out rather than describe it.
+
+        **This level drops more than the others, and what it drops is not free.** A perturbation
+        agent handed `greedy_wiremask_prefix` starts from a strong heuristic solution that a
+        constructive agent starting empty was never given, and `env_steps` stops meaning one
+        thing: a constructive env step PLACES a macro and a perturbation env step MOVES one.
+        Neither is a bug to be fixed here - they are inherent to comparing the two families - but
+        a table at this level has to report both rather than imply a match. See
+        `scripts/compare_agents.py`, which prints each row's space and warm start whenever they
+        differ, and says plainly that the budget is interaction-matched and not work-matched.
+        """
+        identity = self.identity()
+        identity.pop("action_space", None)
+        identity.pop("initial_placement", None)
+        return identity
+
     def protocol_identity(self) -> dict:
         """The environment with the DESIGN removed - what a multi-design suite holds fixed.
 
@@ -392,7 +422,7 @@ def _hash(data: dict) -> str:
     return hashlib.sha256(_canonical_json(data).encode()).hexdigest()[:12]
 
 
-COMPARISON_LEVELS = ("benchmark", "task", "environment", "full", "protocol")
+COMPARISON_LEVELS = ("benchmark", "task", "paradigm", "environment", "full", "protocol")
 """Definitions of "the same run setup" - see this module's docstring.
 
 The first four are increasingly strict and all include the design. `protocol` is the odd one and
@@ -446,6 +476,16 @@ class ExperimentConfig:
         """
         return _hash(self.environment.identity())
 
+    def paradigm_hash(self) -> str:
+        """Identifies everything a cross-paradigm comparison holds fixed - see paradigm_identity.
+
+        Looser than `environment_hash` on exactly two axes, and only those two: a run comparing a
+        constructive agent against a perturbation one is comparing methods that move macros
+        differently, which is the whole point of running it and the reason the default level
+        refuses it.
+        """
+        return _hash(self.environment.paradigm_identity())
+
     def protocol_hash(self) -> str:
         """Identifies the experimental protocol, independent of which design it ran on.
 
@@ -485,8 +525,8 @@ class ExperimentConfig:
             )
         return {
             "benchmark": self.benchmark_hash, "task": self.task_hash,
-            "environment": self.environment_hash, "full": self.full_hash,
-            "protocol": self.protocol_hash,
+            "paradigm": self.paradigm_hash, "environment": self.environment_hash,
+            "full": self.full_hash, "protocol": self.protocol_hash,
         }[level]()
 
     # ------------------------------------------------------------ serialization
@@ -546,6 +586,7 @@ class ExperimentConfig:
 _LEVEL_IDENTITY = {
     "benchmark": lambda config: config.environment.benchmark.identity(),
     "task": lambda config: config.environment.task_identity(),
+    "paradigm": lambda config: config.environment.paradigm_identity(),
     "environment": lambda config: config.environment.identity(),
     "full": lambda config: {"environment": config.environment.identity(),
                             "agent": config.agent.identity(), "seed": config.seed},

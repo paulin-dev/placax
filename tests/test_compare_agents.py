@@ -232,3 +232,75 @@ def test_the_table_scores_a_placement_the_way_the_runner_does() -> None:
     assert scoring, "the comparison must score the placements itself"
     assert "best_orientations" in source
     assert "built.action_space" in source and "built.initial_positions" in source
+
+
+# ----------------------------------------- a table whose rows move macros differently
+
+
+def test_a_cross_paradigm_table_must_say_that_it_is_one() -> None:
+    # Giving agents different action spaces is only honest at --level=paradigm, which is the
+    # claim such a table makes. At any stricter level the flags contradict the assertion.
+    with pytest.raises(SystemExit, match="--level=paradigm"):
+        _parse_args([
+            "compare_agents", "--env_steps=400", "--agents=ppo,local_search",
+            '--agent_environment={"local_search": {"action_space": "perturbation"}}',
+        ])
+
+
+def test_only_the_two_paradigm_axes_may_differ_per_agent() -> None:
+    # Everything else is shared by definition - letting an agent pick its own reward would make
+    # the table a collection of unrelated runs wearing one budget.
+    with pytest.raises(SystemExit, match="action_space"):
+        _parse_args([
+            "compare_agents", "--env_steps=400", "--agents=ppo", "--level=paradigm",
+            '--agent_environment={"ppo": {"reward": "smoothed"}}',
+        ])
+
+
+def test_each_agent_gets_the_environment_its_paradigm_forces() -> None:
+    args = _parse_args([
+        "compare_agents", "--env_steps=400", "--agents=greedy_wiremask,local_search",
+        "--level=paradigm",
+        '--agent_environment={"local_search": {"action_space": "perturbation:n_moves=8",'
+        ' "initial_placement": "greedy_wiremask_prefix:n_macros=null"}}',
+    ])
+    reference = build_preset("training", "b", budget=Budget(env_steps=400))
+    configs = build_comparison(reference, ["greedy_wiremask", "local_search"], seeds=1,
+                               population=2, level="paradigm",
+                               agent_environment=args.agent_environment)
+    by_name = {config.name: config for config in configs}
+    assert by_name["greedy_wiremask-seed0"].environment.action_space.name == "discrete_grid"
+    assert by_name["local_search-seed0"].environment.action_space.name == "perturbation"
+    # ...and they still share everything the level claims they share.
+    assert len({config.paradigm_hash() for config in configs}) == 1
+
+
+def test_the_table_says_what_a_paradigm_comparison_does_not_claim() -> None:
+    """A reader has to be told that env_steps mean different things on either side of the table.
+
+    One env step PLACES a macro under a constructive space and MOVES one under a perturbation
+    space. Both are one step() call and one reward evaluation, so the budget matches interaction
+    and nothing else - and the warm start differs too, which is not cosmetic when it came from a
+    heuristic that has its own row.
+    """
+    results = {
+        "greedy_wiremask": [dict(_run(100.0, 4), action_space="discrete_grid",
+                                 initial_placement="empty")],
+        "local_search": [dict(_run(90.0, 400), action_space="perturbation",
+                              initial_placement="greedy_wiremask_prefix")],
+    }
+    table = _format_table(results, Budget(env_steps=400), "paradigm")
+    assert "MOVE MACROS DIFFERENTLY" in table
+    assert "perturbation" in table and "greedy_wiremask_prefix" in table
+    assert "INTERACTION" in table
+
+
+def test_an_ordinary_comparison_is_not_lectured() -> None:
+    # The note appears only when the rows actually differ on those axes.
+    results = {
+        "ppo": [dict(_run(100.0, 400), action_space="discrete_grid", initial_placement="empty")],
+        "random_search": [dict(_run(120.0, 400), action_space="discrete_grid",
+                               initial_placement="empty")],
+    }
+    assert "MOVE MACROS DIFFERENTLY" not in _format_table(results, Budget(env_steps=400),
+                                                          "environment")

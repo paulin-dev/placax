@@ -211,13 +211,18 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
     policy/
         observation.py                observation(), lookahead_sizes(), make_wiremask_observation()
         action.py                     illegal_cells() (the one definition of legality),
-                                       legal_action_logits(), sample_action(), action_log_prob()
+                                       legal_action_logits(), masked_action_logits(), oriented_illegal_actions(),
+                                       sample_action(), action_log_prob()
         scale.py                      grid-cell <-> real-unit conversion
         architectures/
             cnn.py                      CNNActorCritic
             mlp.py                      MLPActorCritic — reads raw coordinates instead of the
                                          canvas image; the non-CNN arm of Section 12's
                                          state-representation comparison
+            oriented_cnn.py             OrientedCNNActorCritic — emits (grid_x, grid_y, 4) logits, so
+                                         PPO can LEARN a macro's quarter turn and not only search
+                                         it; declares `oriented_grid` as the space it drives, and
+                                         gets per-turn legality from oriented_illegal_actions
             wiremask_cnn.py             WiremaskCNNActorCritic (pairs with make_wiremask_observation)
             resnet_cnn.py               ResNetCoarseFineActorCritic — injected (optionally ImageNet-
                                          pretrained) ResNet coarse branch + fine branch (Section 8)

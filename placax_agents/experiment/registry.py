@@ -427,8 +427,26 @@ def _policy_resnet_coarse_fine(benchmark, critic_style: str = "step_embedding", 
     )
 
 
+def _policy_oriented_cnn(benchmark, features: int = 16, num_conv_layers: int = 2):
+    """The plain CNN plus a head that chooses each macro's quarter turn - PPO's `oriented_grid` arm.
+
+    The architecture that makes orientation learnable rather than only searchable: it emits
+    `(grid_x, grid_y, 4)` logits, declares `oriented_grid` as the space it can drive, and gets
+    per-turn legality from `policy.action.oriented_illegal_actions`. Pair it with
+    `EnvironmentSpec.action_space = Spec("oriented_grid")` and a reward that sees orientations -
+    every shipped one does.
+    """
+    from placax_agents.policy.architectures.oriented_cnn import OrientedCNNActorCritic
+
+    return OrientedCNNActorCritic(
+        features=features, num_conv_layers=num_conv_layers,
+        size_scale=float(benchmark.sizes_array.max()),
+    )
+
+
 POLICIES = {
     "cnn": _policy_cnn,
+    "oriented_cnn": _policy_oriented_cnn,
     "mlp": _policy_mlp,
     "wiremask_cnn": _policy_wiremask_cnn,
     "resnet_coarse_fine": _policy_resnet_coarse_fine,

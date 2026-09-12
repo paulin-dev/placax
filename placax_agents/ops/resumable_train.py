@@ -36,7 +36,7 @@ def _evaluate(
     extra_illegal_fn: ExtraIllegalFn | None = None,
 ) -> tuple[float, jax.Array]:
     """Runs one full greedy rollout with the current policy and returns (real HPWL, final grid positions)."""
-    positions, hpwl_value = _jitted_evaluate(
+    positions, _orientations, hpwl_value = _jitted_evaluate(
         variables, policy_apply_fn, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask, state_fn, extra_illegal_fn,
     )

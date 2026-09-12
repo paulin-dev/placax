@@ -1,11 +1,12 @@
 """Evaluates a policy's placement quality via a greedy (argmax) rollout, reporting real HPWL."""
 from placax.action_space import DISCRETE_GRID  # must precede jax imports
 from placax.core import reset, step
+from placax.extras.orientation import effective_sizes, oriented_pin_offsets
 from placax.extras.rewards import hpwl
 from placax.types import EnvParams
-from placax_agents.policy.action import legal_action_logits
+from placax_agents.policy.action import masked_action_logits
 from placax_agents.policy.observation import observation
-from placax_agents.policy.scale import to_grid_units, to_real_centers
+from placax_agents.policy.scale import to_real_centers
 from placax_agents.types import AlgorithmFn, ExtraIllegalFn, StateFn
 
 import jax
@@ -38,7 +39,10 @@ def evaluate(
     n_placed: int = 0,
     action_space=DISCRETE_GRID,
 ):
-    """Places every remaining macro greedily (argmax over legal cells) and returns (final_positions, real_hpwl).
+    """Places every remaining macro greedily (argmax over legal actions) and returns (positions, orientations, real_hpwl).
+
+    `orientations` is None unless the run's action space produces them, so an un-oriented caller
+    sees exactly what it always did in the two values it reads.
 
     Drives the run's own action space, like the training rollout it is measuring - an eval under
     different rules from the episodes that produced the policy would not be measuring that policy.
@@ -56,10 +60,9 @@ def evaluate(
             else state_fn(state, params, sizes_array)
         logits, _value = policy_apply_fn(variables, obs)
 
-        # 2. Mask out illegal cells (occupied/out-of-bounds, plus any extra rule) before choosing.
-        macro_size = to_grid_units(obs["current_macro_size"], cell_size)
-        extra_illegal = extra_illegal_fn(obs) if extra_illegal_fn is not None else None
-        masked_logits = legal_action_logits(logits, obs["canvas"], params, macro_size, extra_illegal)
+        # 2. Mask out illegal actions (occupied/out-of-bounds, plus any extra rule) before
+        #    choosing - the same masking the training rollout applied, from the same function.
+        masked_logits = masked_action_logits(logits, obs, params, cell_size, extra_illegal_fn)
 
         # 3. Greedily take the single best legal cell (no sampling, unlike training rollouts).
         #    Unravelled against the logits' own shape, so an action carrying a further axis comes
@@ -77,9 +80,19 @@ def evaluate(
         scan_step, state, jnp.arange(action_space.episode_length(params, n_placed))
     )
 
-    # Convert grid positions to real-unit centers to score the final layout with true HPWL.
-    real_centers = to_real_centers(final_state.positions, sizes_array, cell_size)
-    return final_state.positions, hpwl(real_centers, padded_pin_idx, padded_pin_offset, valid_mask)
+    # Convert grid positions to real-unit centers to score the final layout with true HPWL - with
+    # the turns this rollout chose, where it chose any. A macro on its side sits at a different
+    # center and its pins rotate with it, so both transforms are the identity on None and neither
+    # is optional once a space produces orientations.
+    orientations = final_state.orientations
+    sizes = effective_sizes(sizes_array, orientations)
+    real_centers = to_real_centers(final_state.positions, sizes, cell_size)
+    offsets = oriented_pin_offsets(padded_pin_offset, padded_pin_idx, orientations)
+    return (
+        final_state.positions,
+        orientations,
+        hpwl(real_centers, padded_pin_idx, offsets, valid_mask),
+    )
 
 
 # Built once at import to avoid retracing/recompiling on every call (same fix as buffered_train.py's jitted fns).

@@ -139,6 +139,58 @@ def test_a_reward_change_breaks_comparability_at_every_level_above_benchmark(tmp
         assert_comparable(base, other, level="task")
 
 
+def test_two_paradigms_share_everything_except_how_a_macro_moves(tmp_path) -> None:
+    """The level a constructive agent and a perturbation one can actually be compared at.
+
+    They differ in the action space by definition, and therefore in the warm start - a
+    perturbation episode moves macros that are already down, so it cannot begin from an empty
+    canvas. `environment_hash` rejects that pairing, correctly; without a level below it the
+    comparison had no invariant to assert at all and simply could not be run.
+    """
+    directory = _bookshelf(tmp_path / "bench")
+    constructive = _small(training(directory, budget=Budget(iterations=1)))
+    perturbation = _small(
+        training(directory, budget=Budget(iterations=1)),
+        action_space=Spec("perturbation", {"n_moves": 8}),
+        initial_placement=Spec("greedy_wiremask_prefix", {"n_macros": None}),
+    )
+
+    assert constructive.paradigm_hash() == perturbation.paradigm_hash()
+    assert constructive.environment_hash() != perturbation.environment_hash()
+    assert_comparable(constructive, perturbation, level="paradigm")
+    with pytest.raises(ValueError, match="do not share a environment"):
+        assert_comparable(constructive, perturbation, level="environment")
+
+
+def test_the_paradigm_level_still_holds_everything_else_fixed(tmp_path) -> None:
+    # It drops exactly two axes. A different reward, observation, design or budget is still a
+    # different experiment, or the level would be a way to compare anything with anything.
+    directory = _bookshelf(tmp_path / "bench")
+    base = _small(training(directory, budget=Budget(iterations=1)),
+                  action_space=Spec("perturbation", {"n_moves": 8}),
+                  initial_placement=Spec("greedy_wiremask_prefix", {"n_macros": None}))
+    for axis, value in (
+        ("reward", Spec("smoothed", {"dense": False})),
+        ("state", Spec("wiremask", {"lookahead": 2})),
+        ("budget", Budget(iterations=9)),
+    ):
+        other = _small(training(directory, budget=Budget(iterations=1)),
+                       action_space=Spec("perturbation", {"n_moves": 8}),
+                       initial_placement=Spec("greedy_wiremask_prefix", {"n_macros": None}),
+                       **{axis: value})
+        assert base.paradigm_hash() != other.paradigm_hash(), axis
+        with pytest.raises(ValueError, match="do not share a paradigm"):
+            assert_comparable(base, other, level="paradigm")
+
+
+def test_every_level_is_reachable_by_name() -> None:
+    # hash_at parameterizes over strictness, so a new level that the dispatch table forgot would
+    # be selectable in a CLI and then raise at the call site.
+    config = training("b")
+    for level in ("benchmark", "task", "paradigm", "environment", "full", "protocol"):
+        assert isinstance(config.hash_at(level), str)
+
+
 def test_an_unknown_comparison_level_is_refused() -> None:
     with pytest.raises(ValueError, match="unknown comparison level"):
         assert_comparable(level="vibes")
@@ -157,6 +209,40 @@ def test_the_default_initial_placement_is_recorded_rather_than_implied(tmp_path)
     assert built.initial_positions is None
     assert built.n_placed == 0
     assert built.steps_per_episode == built.n_macros
+
+
+def test_the_warm_start_is_a_property_of_the_environment_not_of_the_seed(tmp_path) -> None:
+    """`environment_hash` claims two runs started from the same placement. It has to be true.
+
+    The warm start used to be drawn with `jax.random.PRNGKey(config.seed)`, so a stochastic one
+    would have handed three seeds of one experiment three different starting placements while
+    every hash reported the warm start as identical - and TILOS's whole finding is that the
+    starting placement can matter as much as the method refining it. It is drawn with a fixed key
+    now; variation that is meant to matter goes in the component's kwargs, where it is hashed.
+    """
+    from placax_agents.experiment.registry import INITS, register
+
+    drawn = []
+
+    def sampled(_benchmark, n_macros: int = 2):
+        def init_fn(key):
+            drawn.append(jax.random.randint(key, (), 0, 10 ** 6))
+            placement = jnp.zeros((4, 2), dtype=jnp.int32)
+            return placement.at[n_macros:].set(-1)
+        return init_fn
+
+    register("initial_placement", "sampled_for_test", sampled)
+    try:
+        directory = _bookshelf(tmp_path / "bench")
+        base = _small(training(directory, budget=Budget(iterations=1)),
+                      initial_placement=Spec("sampled_for_test"))
+        for seed in (0, 1, 7):
+            build(dataclasses.replace(base, seed=seed))
+        assert len({int(value) for value in drawn}) == 1, (
+            "three seeds drew three different warm starts while claiming one environment"
+        )
+    finally:
+        INITS.pop("sampled_for_test", None)
 
 
 def test_a_warm_start_shortens_the_episode_and_is_hashed(tmp_path: pathlib.Path) -> None:

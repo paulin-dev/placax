@@ -27,7 +27,7 @@ def test_evaluate_places_every_macro() -> None:
     obs0 = observation(reset(params), params, sizes_array)
     variables = policy.init(init_key, obs0)
 
-    positions, real_hpwl = evaluate(
+    positions, _orientations, real_hpwl = evaluate(
         variables, policy.apply, params, sizes_array, 1.0,
         padded_pin_idx, padded_pin_offset, valid_mask,
     )
@@ -53,7 +53,7 @@ def test_evaluate_extra_illegal_fn_restricts_actions() -> None:
         illegal = jnp.ones((params.grid, params.grid), dtype=bool)
         return illegal.at[1, 1].set(False)
 
-    positions, _real_hpwl = evaluate(
+    positions, _orientations, _real_hpwl = evaluate(
         variables, policy.apply, params, sizes_array, 1.0,
         padded_pin_idx, padded_pin_offset, valid_mask, extra_illegal_fn=only_one_legal_cell,
     )
@@ -69,11 +69,11 @@ def test_evaluate_is_deterministic() -> None:
     obs0 = observation(reset(params), params, sizes_array)
     variables = policy.init(init_key, obs0)
 
-    positions1, hpwl1 = evaluate(
+    positions1, _o1, hpwl1 = evaluate(
         variables, policy.apply, params, sizes_array, 1.0,
         padded_pin_idx, padded_pin_offset, valid_mask,
     )
-    positions2, hpwl2 = evaluate(
+    positions2, _o2, hpwl2 = evaluate(
         variables, policy.apply, params, sizes_array, 1.0,
         padded_pin_idx, padded_pin_offset, valid_mask,
     )
@@ -96,11 +96,11 @@ def test_evaluate_default_state_fn_uses_the_given_cell_size() -> None:
     obs0 = observation(reset(params), params, sizes_array, cell_size=cell_size)
     variables = policy.init(random.PRNGKey(0), obs0)
 
-    positions_default, hpwl_default = evaluate(
+    positions_default, _od, hpwl_default = evaluate(
         variables, policy.apply, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask,
     )
-    positions_explicit, hpwl_explicit = evaluate(
+    positions_explicit, _oe, hpwl_explicit = evaluate(
         variables, policy.apply, params, sizes_array, cell_size,
         padded_pin_idx, padded_pin_offset, valid_mask,
         state_fn=functools.partial(observation, cell_size=cell_size),

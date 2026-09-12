@@ -102,7 +102,7 @@ Everything below is named in a config as `Spec("<key>", {...kwargs})` and is **h
 | `legalization` | `LEGALIZERS` | `row_snap` |
 | `physical.cell_placer` | `CELL_PLACERS` | `dreamplace` |
 | `physical.validator` | `VALIDATORS` | `openroad` |
-| `agent.policy` | `POLICIES` | `cnn`, `mlp`, `wiremask_cnn`, `resnet_coarse_fine` |
+| `agent.policy` | `POLICIES` | `cnn`, `mlp`, `wiremask_cnn`, `resnet_coarse_fine`, `oriented_cnn` |
 | `agent.optimizer` | `OPTIMIZERS` | `adam`, `maskplace_split` |
 | `agent.algorithm` | `AGENTS` | `ppo`, `greedy_wiremask`, `random_search`, `genetic`, `local_search` |
 | `agent.loop` | `LOOPS` | `sequential`, `parallel`, `buffered` (PPO only) |
@@ -111,7 +111,9 @@ Plus two non-registry environment fields: `benchmark.canvas` (`die` or `core`) a
 `benchmark.macro_budget`. `agent.algorithm` for `ppo` also takes `value_loss` (`mse`, `huber`).
 
 **Which agent drives which action space.** `local_search` requires `perturbation`; `genetic`
-drives `discrete_grid` or `oriented_grid`; everything else is `discrete_grid` only. A mismatch is
+drives `discrete_grid` or `oriented_grid`; PPO drives whatever its POLICY declares - every shipped
+architecture emits a `(grid_x, grid_y)` logits map and so drives `discrete_grid`, except
+`oriented_cnn`, which emits `(grid_x, grid_y, 4)` and drives `oriented_grid` only. A mismatch is
 refused at `build()` — a policy emitting `(grid_x, grid_y)` logits has nowhere to put a macro
 index. PPO's answer comes from its POLICY, which declares an `action_spaces` attribute (default
 `("discrete_grid",)`), so an architecture with a turn axis is an addition rather than an edit to
@@ -150,7 +152,8 @@ orthogonal — the environment with the *design removed*, which is what a multi-
 |---|---|
 | `benchmark` | same design, grid, order, budget |
 | `task` | + reward, warm start, constraints, physical stack, compute budget |
-| `environment` | + the observation. **The default**, and the right level for comparing agents. Note the action space is in here: two agents driving different spaces are not solving one task and will not share a table |
+| `paradigm` | the environment **minus the action space and the warm start** — what a constructive agent and a perturbation one can share, since they move macros differently by definition. A table at this level is told what it does not claim: env steps place a macro on one side and move one on the other |
+| `environment` | + the action space and the observation. **The default**, and the right level for comparing agents that move macros the same way |
 | `full` | + the agent and the seed — one exact run |
 | `protocol` | everything except which netlist. For `--benchmark_dirs` suites |
 
@@ -175,7 +178,7 @@ One directory per run under `runs/`. A comparison writes one subdirectory per `(
 |---|---|
 | `scripts/run_training.py` | trains the plain-CNN preset |
 | `scripts/run_maskplace.py` | trains the MaskPlace-equivalent preset |
-| `scripts/compare_agents.py` | several agents, one environment, one budget, one table (`--benchmark_dirs` for a suite) |
+| `scripts/compare_agents.py` | several agents, one environment, one budget, one table (`--benchmark_dirs` for a suite; `--level=paradigm` plus `--agent_environment` to put a constructive agent and a perturbation one in one table) |
 | `scripts/run_pipeline.py` | a trained checkpoint to macro placement to DREAMPlace |
 | `scripts/validate_design.py` | the physical flow on a macro-placed DEF |
 | `scripts/place_once.py` | one greedy rollout from a checkpoint |
@@ -223,6 +226,10 @@ experiment while its config claims otherwise.
   Watch `acceptance_rate` in the log. Its `reward_return` is what the episode improved over the
   placement it started from, not a replayed episode sum: a perturbation placement is not a
   sequence of actions, and `replay()` refuses it rather than returning a zero.
+- **The warm start is a pure function of the environment**, drawn with a fixed key rather than
+  the run's seed — `environment_hash` claims two runs started from the same placement, so a
+  stochastic warm start must not quietly move with the seed. Variation that is meant to matter
+  goes in the component's own kwargs, where it is hashed.
 - **One output directory holds one run.** Resume is keyed on the directory, so a second config
   pointed at an existing one is refused. Raising a budget continues the same run; a different
   seed, reward, agent or design does not. Defaults are per run: `<benchmark_dir>/output/seed0`.

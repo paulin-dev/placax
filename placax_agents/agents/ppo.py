@@ -71,13 +71,28 @@ class PPOAgent:
         Only the positions are returned; the runner scores them, so every agent is measured by
         the same HPWL code rather than by whatever each one computes for itself.
         """
-        positions, _hpwl = _jitted_evaluate(
+        positions, _orientations, _hpwl = _jitted_evaluate(
             state["variables"], self.policy.apply, self.benchmark.params,
             self.benchmark.sizes_array, self.benchmark.cell_size, self.benchmark.padded_pin_idx,
             self.benchmark.padded_pin_offset, self.benchmark.valid_mask, self.state_fn,
             self.extra_illegal_fn, self.initial_positions, self.n_placed, self.action_space,
         )
         return positions
+
+    def best_orientations(self, state: dict):
+        """The turns the greedy rollout chose, or None under a space that has none.
+
+        Read by the runner through `getattr`, like every agent's - a policy driving
+        `discrete_grid` has nothing to say here and returns None, so its scoring path is exactly
+        what it always was. See experiment/run.py's best_orientations.
+        """
+        _positions, orientations, _hpwl = _jitted_evaluate(
+            state["variables"], self.policy.apply, self.benchmark.params,
+            self.benchmark.sizes_array, self.benchmark.cell_size, self.benchmark.padded_pin_idx,
+            self.benchmark.padded_pin_offset, self.benchmark.valid_mask, self.state_fn,
+            self.extra_illegal_fn, self.initial_positions, self.n_placed, self.action_space,
+        )
+        return orientations
 
     def converged(self, _state: dict) -> bool:
         """A learner is never done: another update might always improve the policy."""

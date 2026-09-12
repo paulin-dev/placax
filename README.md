@@ -68,7 +68,8 @@ assert_comparable(a, b)   # raises, listing every axis on which they differ
 |---|---|---|
 | `benchmark_hash()` | the design's own contents, grid, macro order and budget | "same design?" |
 | `task_hash()` | + reward, initial placement, action-legality rules, physical stack, budget | a state-representation study, whose whole point is that the observation differs |
-| `environment_hash()` | + the observation — everything the agent did not choose | comparing agents (the default) |
+| `paradigm_hash()` | the environment **minus the action space and the warm start** | a constructive agent against a perturbation one — they move macros differently by definition |
+| `environment_hash()` | + the action space and the observation — everything the agent did not choose | comparing agents (the default) |
 | `full_hash()` | + agent and seed | identifying one exact run |
 
 `assert_comparable(a, b, level="task")` picks the level; the default is `environment`. A looser
@@ -92,6 +93,11 @@ Each run writes, into its output directory:
 
 Re-run a recorded configuration exactly with `--config=<path to a manifest's config>`; every flag
 describing the setup is then ignored in favor of the recorded one.
+
+The **warm start** is drawn with a fixed key rather than the run's seed: `environment_hash` claims
+two runs being compared started from the same placement, and a stochastic warm start moving with
+`--seed` would have made that false. Variation that is meant to matter goes in the component's own
+kwargs, where it is hashed and written down.
 
 **One directory holds exactly one run.** A run resumes from whatever is in its output directory,
 so pointing a second configuration at an existing one used to inherit its budget spend and its
@@ -153,9 +159,26 @@ python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 --env_steps
 Both are applied to the *reference* config, so every row inherits them — an override reaching only
 some agents is the exact incomparability this script exists to refuse. `--agent_kwargs` is the
 per-row escape hatch (`'{"genetic": {"population": 64}}'`), because the agent is the thing under
-test. An action space is part of the environment, so agents driving different spaces have
-different `environment_hash`es and will not appear in one table: that is the honest answer rather
-than a missing feature — a constructive agent and a perturbation agent are not solving one task.
+test.
+
+**Comparing across paradigms.** A constructive agent and a perturbation agent move macros
+differently by definition, so they cannot share an `environment_hash` — and simulated annealing
+against a learner at matched budget is exactly the comparison the field wants. `--level=paradigm`
+is that claim, and `--agent_environment` gives each agent the two axes its own paradigm forces:
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 --env_steps=500000 \
+    --agents=greedy_wiremask,ppo,local_search --level=paradigm --seeds=3 \
+    --agent_environment='{"local_search": {"action_space": "perturbation:n_moves=128",
+                          "initial_placement": "greedy_wiremask_prefix:n_macros=null"}}'
+```
+
+Only `action_space` and `initial_placement` may differ, only at that level, and the table then
+prints what it is **not** claiming: one env step *places* a macro on one side and *moves* one on
+the other, so the budget matches environment interaction — one `step()` call, one reward
+evaluation each — and not work. A perturbation agent also starts from a complete placement a
+constructive agent was never given; where that came from `greedy_wiremask`, read its row against
+`greedy_wiremask`'s own.
 
 It asserts the environment hash matches across every run *before* anything starts, so it refuses
 to produce a table rather than producing a misleading one, and it scores each agent's placement
@@ -253,6 +276,18 @@ the orientations to `reward_fn` whenever the space produces them, so a `RewardFn
 Every shipped reward does; one that does not is refused at `build()` rather than left to score a
 placement nobody made. A reward that never mentions orientation keeps its four-parameter signature
 and every un-oriented run calls it exactly as before, bit for bit.
+
+And it is **learnable**, not only searchable. `POLICIES["oriented_cnn"]` emits
+`(grid_x, grid_y, 4)` logits — a placement head over cells plus a turn head reading the macro's own
+footprint, which the canvas does not carry — so PPO drives `oriented_grid` end to end. What a
+policy can express is the policy's own declaration (`action_spaces`), not a table in `build.py`:
+that is why adding this one needed no change there. Legality is computed **per turn**
+(`oriented_illegal_actions`), because a quarter-turned macro fits in different cells; a
+two-dimensional mask broadcast over the turn axis would mark placements legal that were never
+checked, so `legal_action_logits` refuses the rank mismatch rather than stretching. The rollout,
+the greedy eval and PPO's loss all mask through one function, since the loss rebuilds the mask to
+compute its ratio and two copies of that logic would silently train on a ratio between two
+different distributions.
 
 `local_search` is the agent that proves the seam: hill climbing / simulated annealing over macro
 *moves*, which the constructive kernel had no action for. It needs a **dense** reward — under a
