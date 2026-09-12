@@ -2,8 +2,14 @@
 import re
 
 _COMPONENT_RE = re.compile(
-    r"-\s+(\S+)\s+(\S+)\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)(\s+(?:F?[NSEW]))?"
+    r"-\s+(\S+)\s+(\S+)\s+\+\s+(PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)"
+    r"(\s+(?:F?[NSEW]))?"
 )
+"""Same widening as the reader's, and for the same reason: a placed macro is written `FIXED`.
+
+The status is captured rather than hard-coded into the replacement so that rewriting a position
+does not quietly promote a FIXED macro to PLACED, or demote a placed cell - a cell placer reads
+that difference as "may I move this"."""
 
 
 def write_placed_def(original_def_text: str, positions: dict[str, tuple]) -> str:
@@ -16,13 +22,13 @@ def write_placed_def(original_def_text: str, positions: dict[str, tuple]) -> str
     """
     def replace_component(match: re.Match) -> str:
         # Leave any instance we weren't given a new position for exactly as-is.
-        name, cell_type = match.group(1), match.group(2)
+        name, cell_type, status = match.group(1), match.group(2), match.group(3)
         if name not in positions:
             return match.group(0)
         placement = positions[name]
         new_x, new_y = placement[0], placement[1]
-        source_orient = match.group(5)
+        source_orient = match.group(6)
         orient = f" {placement[2]}" if len(placement) > 2 else (source_orient or "")
-        return f"- {name} {cell_type} + PLACED ( {int(new_x)} {int(new_y)} ){orient}"
+        return f"- {name} {cell_type} + {status} ( {int(new_x)} {int(new_y)} ){orient}"
 
     return _COMPONENT_RE.sub(replace_component, original_def_text)

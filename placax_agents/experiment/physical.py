@@ -154,17 +154,27 @@ def evaluate_placement(
     physical flow could only ever be pointed at a file someone made by hand, and no agent's
     placement could reach it. `positions` here is the array the agent handed the runner and
     `score()` measured, so the design that gets validated is the placement that was reported.
+
+    For a Bookshelf design the LEFs are an OUTPUT of the export rather than an input: Bookshelf
+    carries no cell library, so one is derived from the netlist's own geometry and appended to
+    whatever `lef_paths` the caller supplied.
     """
-    exported = write_placement(built, positions, output_dir / "placement", orientations)
+    # Bookshelf designs are CONVERTED rather than refused. This used to raise, which made the
+    # whole physical box unreachable from any benchmark that ships: OpenROAD reads DEF/LEF, every
+    # benchmark here is Bookshelf or protobuf, and nothing bridged them. The conversion exports
+    # the full netlist - macros FIXED where the agent put them, standard cells UNPLACED for the
+    # cell placer - and writes the cell library it derived, which the validator then needs.
+    exported = write_placement(
+        built, positions, output_dir / "placement", orientations, as_def=True
+    )
     if exported.format is not NetlistFormat.DEF:  # noqa: SIM102  - the message needs `exported`
         raise NotImplementedError(
             f"this run's design is {exported.format.value}, and the validator reads DEF/LEF only. "
-            f"The placement itself was still written to {exported.path}, which DREAMPlace reads "
-            f"natively - see scripts/run_pipeline.py for that route. Bring a DEF/LEF design here "
-            f"for a PPA number."
+            f"Bookshelf designs are converted (placax/netlist/def_export.py); a protobuf netlist "
+            f"carries no cell geometry to convert, so bring a DEF/LEF or a Bookshelf design here."
         )
     result = evaluate_physical(
-        built, exported.path, lef_paths, output_dir,
+        built, exported.path, list(lef_paths) + list(exported.lef_paths), output_dir,
         skip_cell_placement=skip_cell_placement, machine=machine,
     )
     # Carry what legalization cost into the PPA record: this number describes the design that was

@@ -23,7 +23,7 @@ through untouched, because both writers rewrite only the instances they are hand
 """
 import pathlib
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from placax.log import Log  # must precede jax imports
 from placax.netlist import NetlistFormat, detect_format
@@ -71,6 +71,13 @@ class ExportedPlacement:
     zero; anything else means the legalizer could not place them and the design is not realizable.
     Both are 0 when the design carries no rows to check against."""
 
+    lef_paths: list = field(default_factory=list)
+    """Cell/technology LEFs written ALONGSIDE this placement, for a design that had none.
+
+    Empty for a native DEF design, whose LEFs are whatever the caller already has. Non-empty when
+    a Bookshelf design was converted: the library is derived from the netlist, so it is an output
+    of the export rather than an input to it, and the validator has to be handed it."""
+
 
 def _export_bookshelf(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
     """A new .pl/.aux pair with the run's macros FIXED, beside symlinks to the untouched rest."""
@@ -94,6 +101,32 @@ def _export_bookshelf(built, named, output_dir: pathlib.Path) -> ExportedPlaceme
         f"{design}.nodes", f"{design}.nets", f"{design}.wts", pl_path.name, f"{design}.scl",
     ))
     return ExportedPlacement(NetlistFormat.BOOKSHELF, aux_path, built.config.full_hash(), len(named))
+
+
+def _export_bookshelf_as_def(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
+    """A Bookshelf design converted to DEF/LEF, so it can reach a validator that reads neither.
+
+    The physical box was configured, hashed and tested, and structurally unreachable: OpenROAD
+    reads DEF/LEF, every benchmark here is Bookshelf, and nothing converted between them. This is
+    that conversion - and it exports the WHOLE netlist, macros FIXED at the agent's placement and
+    standard cells UNPLACED, because a DEF of 543 macros and no logic measures a die that does not
+    exist. See placax/netlist/def_export.py for what the generated LEF is and is not.
+    """
+    from placax.netlist.def_export import export_bookshelf_as_def
+
+    benchmark_dir = built.config.environment.benchmark.path.resolve()
+    # The orientation letter rides along, like it does for a native DEF.
+    placement = {name: (value[0], value[1]) for name, value in named.items()}
+    orientations = {
+        name: value[2] for name, value in named.items() if len(value) > 2
+    } or None
+    def_path, lef_path = export_bookshelf_as_def(
+        benchmark_dir, output_dir, placement, orientations
+    )
+    return ExportedPlacement(
+        NetlistFormat.DEF, def_path, built.config.full_hash(), len(named),
+        lef_paths=[lef_path],
+    )
 
 
 def _export_def(built, named, output_dir: pathlib.Path) -> ExportedPlacement:
@@ -161,7 +194,7 @@ def _oriented_macro_sizes(built, orientations) -> dict:
 
 
 def write_placement(built, positions, output_dir: pathlib.Path,
-                    orientations=None) -> ExportedPlacement:
+                    orientations=None, as_def: bool = False) -> ExportedPlacement:
     """Writes `positions` back into the design's own format, and says where it landed.
 
     `positions` are the grid cells an agent handed the runner - the same array `score()` measures,
@@ -170,6 +203,10 @@ def write_placement(built, positions, output_dir: pathlib.Path,
     The run's configured legalizer, if it has one, is applied here: this is the boundary between a
     placement that is legal on the GRID (guaranteed by masking) and one that is legal on the DIE
     (rows, sites, core area), and how far the two differ is reported rather than assumed.
+
+    `as_def` converts a Bookshelf design to DEF/LEF instead of writing `.pl`/`.aux` - what the
+    validator needs, since OpenROAD reads no Bookshelf. Off by default because the DREAMPlace
+    route reads Bookshelf natively and converting would be work for nothing.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     benchmark = built.benchmark
@@ -212,6 +249,11 @@ def write_placement(built, positions, output_dir: pathlib.Path,
     design_format = detect_format(benchmark_dir)
     if design_format is NetlistFormat.BOOKSHELF:
         exported = _export_bookshelf(built, named, output_dir)
+        if as_def:
+            # The same placement, in the format a validator reads. Written beside the .pl/.aux
+            # rather than instead of it: DREAMPlace reads Bookshelf natively and the two routes
+            # should measure the same placement.
+            exported = _export_bookshelf_as_def(built, named, output_dir)
     elif design_format is NetlistFormat.DEF:
         exported = _export_def(built, named, output_dir)
     else:

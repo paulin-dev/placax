@@ -499,9 +499,22 @@ Until that existed, nothing in this repository converted a placement into a file
 could open, and the whole physical box - configured, hashed and documented - was unreachable from
 any run.
 
-**Not yet verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
-dependency, so the real binary has never been driven through this path - the export, the TCL
-generation, the output parsing and the composition all have tests, but someone with a real design
-should run it before trusting the numbers. The Bookshelf benchmarks under `benchmarks/` still
-cannot reach the *validator*, since OpenROAD reads no Bookshelf; their placements export to
-`.pl`/`.aux` for DREAMPlace instead.
+**The Bookshelf benchmarks can reach the validator now.** OpenROAD reads no Bookshelf, so for a
+long time none of the designs that ship here could be pushed through the physical flow at all -
+the box was configured, hashed, documented and structurally unreachable.
+`placax/netlist/def_export.py` is the conversion: it writes the **whole** netlist as DEF/LEF, with
+the agent's macros `FIXED` and the standard cells `UNPLACED` for the cell placer, and derives the
+cell library Bookshelf does not carry. On adaptec1 that is 211,447 instances and 216,932 nets in
+5.6s, and the library collapses to **520 cell types** because only that many distinct
+(size + pin-offset) geometries exist. `scripts/run_pipeline.py` closes the loop end to end: RL
+macros, DREAMPlace cells, conversion, validator, `ppa.json`.
+
+**Still not verified against a real binary.** OpenROAD is not a dependency and has never been run
+against these files - what is verified is that the design round-trips through this project's own
+DEF/LEF parsers with its geometry, placement and connectivity intact, which catches a converter's
+real failure modes (a pin offset measured from the wrong corner, a unit scale applied twice, a
+macro dropped) but says nothing about whether OpenROAD accepts the file. And the generated LEF is
+deliberately **not a technology**: one routing layer, a site matching the design's own rows, no via
+rules and no timing library. That supports reading, placing, area and utilization; a routed
+wirelength or a DRC count taken against it would be a number about that file rather than about a
+chip.

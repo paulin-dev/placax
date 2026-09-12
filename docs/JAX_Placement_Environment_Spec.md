@@ -151,6 +151,12 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
     netlist/
         __init__.py                  load_netlist() — detects format, dispatches (Bookshelf/DEF/protobuf)
         bookshelf.py, def_reader.py, def_writer.py, lef.py, protobuf_reader.py
+        def_export.py                Bookshelf -> DEF/LEF, so a shipped design can reach the
+                                      VALIDATOR at all: OpenROAD reads no Bookshelf, and every
+                                      benchmark here is Bookshelf or protobuf. Exports the whole
+                                      netlist - macros FIXED at the agent's placement, cells
+                                      UNPLACED for the cell placer - and derives the cell library
+                                      Bookshelf does not have (Section 5.5)
         padding.py                   build_padded_arrays()/build_macro_net_index() — order_fn plugs in here
         order.py                     OrderFn implementations: alphabetical_order (default),
                                       area_desc_order, connectivity_order (Section 5.1b)

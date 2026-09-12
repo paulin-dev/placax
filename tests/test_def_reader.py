@@ -88,3 +88,32 @@ def test_load_def_resolves_to_same_shape_as_bookshelf() -> None:
     # nets carry real offsets now, not just bare instance names
     all_pins = [pin for net in nets for pin in net]
     assert any(abs(x) > 1e-6 or abs(y) > 1e-6 for _name, x, y in all_pins)
+
+
+def test_the_last_pin_of_a_macro_is_not_dropped() -> None:
+    """A silently lost pin is a net that measures shorter than it is.
+
+    The MACRO block pattern consumed the newline after its final `END <pin>`, and the PIN pattern
+    needed one - so every macro in every LEF lost its LAST pin, including the fixture below, whose
+    output pin simply never appeared. Nothing raised; the design just had less connectivity than
+    the file described, and every HPWL taken from a DEF design was measured against it.
+    """
+    import pathlib as _pathlib
+
+    from placax.netlist.lef import parse_lef_pin_offsets
+
+    lef = _pathlib.Path(__file__).parent / "fixtures" / "def" / "sample.lef"
+    declared = {line.split()[1] for line in lef.read_text().splitlines()
+                if line.strip().startswith("PIN ")}
+    parsed = parse_lef_pin_offsets(lef)["INVD1BWP240H8P57PDSVT"]
+    assert set(parsed) == declared == {"I1", "O1"}
+
+
+def test_a_lef_whose_last_macro_ends_at_eof_still_parses(tmp_path) -> None:
+    # The same missing terminator, one level up: a file with no trailing newline used to lose its
+    # final MACRO entirely.
+    from placax.netlist.lef import parse_lef_sizes
+
+    lef = tmp_path / "t.lef"
+    lef.write_text("MACRO A\n  SIZE 2 BY 3 ;\nEND A")   # no trailing newline
+    assert parse_lef_sizes(lef) == {"A": (2.0, 3.0)}

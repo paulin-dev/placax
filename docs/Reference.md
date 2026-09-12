@@ -45,6 +45,7 @@ run_experiment(a, output_dir=pathlib.Path("runs/adaptec1-training"))
 | `placax/extras/legality.py` | overlap / out-of-bounds / completeness of a finished placement |
 | `placax/extras/orientation.py` | macro orientation as a transform on the geometry inputs |
 | `placax/netlist/rows.py` | placement rows and the core area, from `.scl` or DEF `ROW` |
+| `placax/netlist/def_export.py` | Bookshelf → DEF/LEF — what lets a shipped design reach the validator at all |
 | `placax_agents/benchmark.py` | `Benchmark.load()` — netlist to ready-to-train bundle |
 | `placax_agents/experiment/config.py` | `ExperimentConfig` and the comparison levels |
 | `placax_agents/experiment/registry.py` | every swappable component, by name |

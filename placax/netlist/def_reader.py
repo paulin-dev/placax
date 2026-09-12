@@ -5,7 +5,16 @@ import re
 from placax.netlist.lef import parse_lef_pin_offsets, parse_lef_sizes
 from placax.types import NetPin, Nets, PinOffsets, SizeMap
 
-_COMPONENT_RE = re.compile(r"-\s+(\S+)\s+(\S+)\s+\+\s+PLACED\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)")
+_COMPONENT_RE = re.compile(
+    r"-\s+(\S+)\s+(\S+)\s+\+\s+(?:PLACED|FIXED)\s+\(\s*(-?\d+)\s+(-?\d+)\s*\)"
+)
+"""A component with a position, however it was fixed there.
+
+`FIXED` used to be invisible here, which is a real omission rather than a stylistic one: every
+tool in this flow marks a placed MACRO `FIXED` - that is what tells the cell placer not to move
+it - so a DEF produced by OpenROAD, by DREAMPlace, or by this project's own
+`netlist/def_export.py` had its macros silently skipped on the way back in. `UNPLACED` components
+deliberately still do not match: they carry no coordinates to read."""
 _NET_LINE_RE = re.compile(r"-\s+(\S+)\s+(.*)\+\s+USE\s+SIGNAL\s*;")
 _NET_PIN_RE = re.compile(r"\(\s*(\S+)\s+(\S+)\s*\)")
 _UNITS_RE = re.compile(r"UNITS\s+DISTANCE\s+MICRONS\s+(\d+)")

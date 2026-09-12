@@ -5,8 +5,14 @@ import re
 from placax.types import PinOffsets, SizeMap
 
 _SIZE_RE = re.compile(r"MACRO\s+(\S+).*?SIZE\s+([\d.]+)\s+BY\s+([\d.]+)", re.DOTALL)
-_MACRO_BLOCK_RE = re.compile(r"MACRO\s+(\S+)(.*?)\n\s*END\s+\1\s*\n", re.DOTALL)
-_PIN_BLOCK_RE = re.compile(r"PIN\s+(\S+)(.*?)\n\s*END\s+\1\s*\n", re.DOTALL)
+# The trailing terminator is `\n` OR end-of-input, and that is not a nicety - it is a bug fix.
+# With `\n` required, the MACRO pattern consumed the newline after its last `END <pin>`, so the
+# PIN pattern - which needed one - could not match the final pin of a block. Every macro in every
+# LEF silently lost its LAST pin: the shipped sample.lef has I1 and O1 and returned only I1. A
+# dropped pin is not a parse error, it is a net that measures shorter than it is, which is exactly
+# the kind of wrong number this project exists to not produce.
+_MACRO_BLOCK_RE = re.compile(r"MACRO\s+(\S+)(.*?)\n\s*END\s+\1\s*(?:\n|$)", re.DOTALL)
+_PIN_BLOCK_RE = re.compile(r"PIN\s+(\S+)(.*?)\n\s*END\s+\1\s*(?:\n|$)", re.DOTALL)
 _RECT_RE = re.compile(r"RECT\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)")
 _SIZE_IN_BLOCK_RE = re.compile(r"SIZE\s+([\d.]+)\s+BY\s+([\d.]+)")
 

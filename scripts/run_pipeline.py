@@ -1,7 +1,10 @@
 """Production pipeline: loads a trained checkpoint (no training happens here), places every macro via
-the RL policy, then hands off to DREAMPlace to place every remaining standard cell. OpenROAD validation
-is intentionally not wired up yet - placax_tools/openroad/validator.py is ready for it once this design
-has real LEF/DEF (our Bookshelf-only benchmarks don't)."""
+the RL policy, then hands off to DREAMPlace to place every remaining standard cell - and then, when the
+run's config names a validator, converts the finished design to DEF/LEF and measures real PPA.
+
+That last step is why placax/netlist/def_export.py exists. OpenROAD reads no Bookshelf, so the
+benchmarks that ship here could not reach a validator at all: the box was configured, hashed and
+documented, and no design in the repository could be pushed through it."""
 import argparse
 import json
 import os

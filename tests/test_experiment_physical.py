@@ -27,7 +27,13 @@ import pytest
 
 
 class StandInCellPlacer(CellPlacer):
+    def __init__(self):
+        self.lefs = []
+
     def place(self, def_path, lef_paths, output_dir):
+        # Recorded so a test can assert WHICH LEFs reached the tool - for a Bookshelf design the
+        # library is derived by the export, so it has to be handed over rather than assumed.
+        self.lefs.extend(lef_paths)
         placed = output_dir / "placed.def"
         placed.write_text(def_path.read_text() + "\n# cells placed\n")
         return placed
@@ -202,14 +208,21 @@ def test_a_runs_placement_can_reach_the_physical_flow_without_a_hand_made_def(
     _add_bookshelf_placement_files(config.environment.benchmark.path)
     positions = jnp.array([[i, i] for i in range(built.benchmark.params.n_macros)])
 
-    # This design is Bookshelf, which OpenROAD cannot read - so the flow refuses, by design, and
-    # says where the placement went. That refusal is the honest half of the fix.
-    with pytest.raises(NotImplementedError, match="DEF/LEF only"):
-        evaluate_placement(built, positions, lef_paths, output_dir)
+    # This design is Bookshelf, which OpenROAD cannot read - so it is CONVERTED on the way in.
+    # That conversion is what made the physical box reachable from a design that actually ships;
+    # before it, this call raised and every benchmark here was stuck on the wrong side of it.
+    result = evaluate_placement(built, positions, lef_paths, output_dir)
 
-    exported = output_dir / "placement" / "s.aux"
-    assert exported.exists(), "the placement is written even when the validator cannot read it"
+    assert result.full_hash == built.config.full_hash()
+    assert (output_dir / "placement" / "s.def").exists()
+    assert (output_dir / "placement" / "s.lef").exists(), (
+        "Bookshelf carries no cell library, so the export has to derive one and hand it over"
+    )
+    # The derived LEF reaches the validator: it is an output of the export, not an input to it.
+    assert any(path.name == "s.lef" for path in built.cell_placer.lefs)
 
+    # The Bookshelf route is untouched - DREAMPlace reads it natively, and both routes have to
+    # describe the same placement.
     from placax_agents.experiment.export import write_placement
 
     assert write_placement(built, positions, tmp_path / "again").format is NetlistFormat.BOOKSHELF
