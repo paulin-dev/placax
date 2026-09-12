@@ -322,7 +322,14 @@ def score(benchmark, positions, n_placed: int = 0, orientations=None, action_spa
     grid_sizes = to_grid_units(
         effective_sizes(benchmark.sizes_array, orientations), benchmark.cell_size
     )
-    measured = jitted_legality(positions, grid_sizes, benchmark.params).to_dict()
+    # Legality is measured on the placement AS IT WOULD BE EXPORTED. A continuous action space
+    # produces real-valued coordinates, and "overlap" between two macros at 3.4 and 3.6 is a
+    # question about the placement that a tool would actually receive, which is the rounded one -
+    # the same rounding `experiment.export` applies on the way to a .pl or a DEF. Integer
+    # positions round to themselves, so every discrete run measures exactly what it always did.
+    measured = jitted_legality(
+        jnp.round(positions).astype(jnp.int32), grid_sizes, benchmark.params
+    ).to_dict()
     return {
         "real_hpwl": score_placement(benchmark, positions, orientations),
         "reward_return": episode_return(

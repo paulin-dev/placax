@@ -198,7 +198,7 @@ which also makes the action mask's relaxation valve visible — it drops the qua
 legality itself, rather than leaving an episode with no legal move, and until now did so
 silently.
 
-Five agents ship, across three genuinely different families. `ppo` is the learner; `genetic` is a
+Six agents ship, across four genuinely different families. `ppo` is the learner; `genetic` is a
 population method; the other two are baselines the project previously had none of, which is why
 "better than X" could not be stated even against a trivial reference:
 
@@ -213,6 +213,11 @@ population method; the other two are baselines the project previously had none o
   moves. The first non-constructive agent here: it starts from a complete placement and improves
   it, which is what simulated annealing and FlowPlace's legalizer do and what the constructive
   kernel could not express at all.
+- **`shac`** - the analytic-gradient arm, and the comparison this project was built to run.
+  Instead of estimating the policy gradient from sampled returns the way PPO does, it
+  differentiates the objective *through the placement* for a short window of steps and bootstraps
+  the rest with a learned critic. See **Differentiable placement** below for what it needed and
+  what it costs.
 - **`genetic`** - a population of placement *preferences*, decoded through the run's own legality
   mask and bred under its configured reward. On `oriented_grid` the genome grows a third gene per
   macro and the search optimizes orientation too. The first agent here from a non-sequential family,
@@ -254,6 +259,7 @@ like the only paradigm in a project built to compare several.
 | `discrete_grid` | `(x, y)` | every macro placed | every agent; the default, unchanged |
 | `oriented_grid` | `(x, y, turn)` | every macro placed | `genetic`; `ppo` with the `oriented_cnn` policy |
 | `perturbation` | `(macro, x, y)` | move budget spent | `local_search` |
+| `continuous` | `(x, y)` as **floats** | every macro placed | `shac` |
 
 The crux was not the transition but that `state.step` meant two things at once: *how many actions
 have been taken* and *which macro is next*. Those coincide constructively and come apart the
@@ -293,6 +299,53 @@ different distributions.
 *moves*, which the constructive kernel had no action for. It needs a **dense** reward — under a
 perturbation space the per-step reward is the improvement — and reports `acceptance_rate` so a
 sparse-reward misconfiguration shows up in the log instead of as a bad result.
+
+### Differentiable placement, and SHAC
+
+`docs/JAX_Placement_Environment_Spec.md` §13 frames the project on one question - does an analytic
+policy gradient beat PPO on placement, or does it not? - and for a long time the agent could not
+be written, because three *environment* pieces were missing. All three now exist, and the order
+they arrived in was decided by measurement rather than by preference
+(`docs/Action_Space_Decision.md`):
+
+| what was missing | why it blocked SHAC | what it is now |
+|---|---|---|
+| a wirelength every macro feels | raw HPWL is a sum of per-net `max - min`, so 76% of adaptec1's connected macros got exactly zero gradient | `REWARDS["smoothed"]` - 100% coverage for 1% fidelity |
+| a legality with a gradient | legality is a MASK, and masks are comparisons: `d(overlap)/d(position)` is identically zero | `placax/extras/density.py` - overlap and the canvas edge as differentiable costs |
+| an action to differentiate | `d(action)/d(parameters)` through a categorical over grid cells does not exist | `ACTION_SPACES["continuous"]` + `POLICIES["continuous"]`, reparameterized |
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 --env_steps=500000 \
+    --agents=ppo,shac --level=paradigm --seeds=3 \
+    --reward='differentiable:density_weight=157' \
+    --agent_environment='{"shac": {"action_space": "continuous"}}'
+```
+
+Both arms get the same reward - that is what makes it a comparison of the methods - and PPO simply
+finds the density term already satisfied, because masking made its placement legal before the
+reward ever looked. `--reward` is shared for the same reason `--grid` is: what is being optimized
+belongs to the task, not to one competitor.
+
+**Two things a SHAC row owes its reader**, and both are printed rather than assumed:
+
+- **Its placement is not legal by construction.** Every discrete agent here places legally because
+  illegal cells are masked out of its action distribution. A continuous action cannot be masked -
+  there is nothing finite to rule out - so legality is a *cost* the reward charges, and the result
+  is only as legal as `density_weight` made it. Size that weight with
+  `scripts/measure_reward_terms.py`; on adaptec1 at 128 macros it comes out near **157**, not the
+  default of 1.0, because the wirelength term is in design units and the density term is in grid
+  bins.
+- **Its env steps are not PPO's env steps in the sense the budget usually means.** Both spend one
+  `step()` call and one reward evaluation per macro, so the budget matches environment
+  interaction - but the two arms are moving macros under different rules, which is exactly what
+  `--level=paradigm` exists to say out loud.
+
+Two things worth knowing about the density term itself, both measured before being trusted:
+`target_density` is the knob between "don't overlap" (1.0 - silent on any legal placement) and
+"spread out" (below the design's own average density), and it has an *interior* optimum, because
+density is conserved area: once every bin is over target, moving a macro changes nothing. And the
+gradient it produces is a congestion gradient, not a pairwise repulsion - where the free space
+lies on the far side of a neighbour, it will push a macro *toward* that neighbour.
 
 ### Rows, the canvas, and legalization
 

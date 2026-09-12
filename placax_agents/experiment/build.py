@@ -21,6 +21,7 @@ from placax_agents.agents.baselines import GreedyWiremaskAgent, RandomSearchAgen
 from placax_agents.agents.genetic import GeneticAgent
 from placax_agents.agents.local_search import LocalSearchAgent
 from placax_agents.agents.ppo import PPOAgent
+from placax_agents.agents.shac import SHACAgent
 from placax_agents.benchmark import Benchmark
 from placax_agents.experiment.config import ExperimentConfig
 from placax_agents.experiment.registry import (
@@ -47,8 +48,10 @@ def build_ppo_config(spec) -> PPOConfig:
     """PPOConfig from an algorithm Spec, resolving its value-loss name to the real function."""
     if spec.name != "ppo":
         raise KeyError(
-            f"unknown algorithm {spec.name!r}; only 'ppo' is implemented. SHAC, ACO and GA are "
-            f"the research plan, not shipped - see docs/JAX_Placement_Environment_Spec.md §12."
+            f"build_ppo_config builds PPO's own hyperparameters and got {spec.name!r}. SHAC "
+            f"carries its own (horizon, gamma, value_coef) and needs no loop, since it rolls out "
+            f"and updates in one differentiable pass; ACO remains unbuilt - see "
+            f"docs/JAX_Placement_Environment_Spec.md §12."
         )
     kwargs = dict(spec.kwargs)
     value_loss = kwargs.pop("value_loss", "mse")
@@ -274,6 +277,28 @@ def _names_a_macro(action_space, benchmark) -> bool:
     return int(action_space.target(start, benchmark.params)) != UNPLACED
 
 
+def _require_maskable_space(config, extra_illegal_fn, action_space) -> None:
+    """Refuses an action mask under a space whose actions cannot be masked.
+
+    Masking rules CELLS out of a categorical distribution. A continuous action has no cells, so a
+    mask attached to one would be built, hashed, written into the manifest and then quietly
+    ignored - the environment would claim a constraint it was not applying, which is the exact
+    class of thing this project's comparison machinery exists to catch.
+
+    Legality for such a space belongs in the reward instead, as a differentiable cost: see
+    `placax/extras/density.py` and `REWARDS["differentiable"]`.
+    """
+    if extra_illegal_fn is None or action_space.discrete:
+        return
+    raise ValueError(
+        f"action mask {config.environment.action_mask.name!r} rules grid CELLS out of the action "
+        f"distribution, and the {config.environment.action_space.name!r} action space has no "
+        f"cells to rule out - its actions are real-valued. Legality there has to be a cost the "
+        f"reward can differentiate, not a mask: drop the action mask and use a reward that "
+        f"charges for overlap and out-of-bounds (REWARDS['differentiable'])."
+    )
+
+
 def _require_answerable_constraints(config, benchmark, extra_illegal_fn, action_space) -> None:
     """Refuses an action mask that asks which macro is being placed, under a space with no answer.
 
@@ -434,6 +459,23 @@ def _build_genetic_agent(config, benchmark, env):
     return agent, agent.population, {}
 
 
+CONTINUOUS_ONLY = ("continuous",)
+"""The space a real-valued action fits, and the only one SHAC can drive."""
+
+
+def _build_shac_agent(config, benchmark, env):
+    """The analytic-gradient agent: a continuous policy, differentiated through the placement."""
+    policy = resolve(POLICIES, config.agent.policy, benchmark, what="policy")
+    _require_space(f"shac/{config.agent.policy.name}", env, policy_action_spaces(policy))
+    optimizer = resolve(OPTIMIZERS, config.agent.optimizer, what="optimizer")
+    agent = SHACAgent(
+        benchmark, policy, optimizer, env.state_fn,
+        extra_illegal_fn=env.extra_illegal_fn, initial_positions=env.initial_positions,
+        n_placed=env.n_placed, action_space=env.action_space, **config.agent.algorithm.kwargs,
+    )
+    return agent, 1, {"policy": policy, "optimizer": optimizer}
+
+
 def _build_local_search_agent(config, benchmark, env):
     """One annealing episode per iteration, over the perturbation space it requires."""
     space = getattr(env.action_space, "name", "discrete_grid")
@@ -449,6 +491,7 @@ def _build_local_search_agent(config, benchmark, env):
 
 AGENTS = {
     "ppo": _build_ppo_agent,
+    "shac": _build_shac_agent,
     "local_search": _build_local_search_agent,
     "greedy_wiremask": _build_greedy_wiremask_agent,
     "random_search": _build_random_search_agent,
@@ -602,6 +645,7 @@ def build(config: ExperimentConfig, benchmark: Benchmark | None = None) -> Built
     # rather than discovered as a wrong number later: can the reward see the orientations this
     # space chooses, and can the legality rules answer "which macro is this step about".
     _require_orientation_aware_reward(config, benchmark, action_space)
+    _require_maskable_space(config, extra_illegal_fn, action_space)
     _require_answerable_constraints(config, benchmark, extra_illegal_fn, action_space)
     # Drawn with a FIXED key, not the run's seed: the warm start is part of the environment, and
     # `environment_hash` claims two runs being compared started from the same one. See

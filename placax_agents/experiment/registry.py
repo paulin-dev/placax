@@ -28,8 +28,8 @@ from placax_agents.policy.observation import make_wiremask_observation, observat
 from placax_agents.training.algorithm.loss import huber_value_loss, mse_value_loss
 from placax_agents.training.algorithm.split_optimizer import make_grouped_optimizer
 from placax_agents.training.reward import (
-    make_expert_reward, make_hpwl_congestion_reward, make_scaled_hpwl_reward,
-    make_scaled_smoothed_reward,
+    make_differentiable_reward, make_expert_reward, make_hpwl_congestion_reward,
+    make_scaled_hpwl_reward, make_scaled_smoothed_reward,
 )
 
 import functools
@@ -177,7 +177,53 @@ def _reward_hpwl_congestion(grid: int, congestion_weight: float = 1.0, capacity:
     return factory
 
 
+def _reward_differentiable(
+    grid: int, density_weight: float = 1.0, target_density: float = 1.0,
+    bounds_weight: float = 1.0, gamma_cells: float = SMOOTHED_GAMMA_CELLS,
+    dense: bool = True, reward_scale: float = 1.0,
+):
+    """-(smoothed wirelength + density overflow + out-of-bounds): the objective SHAC descends.
+
+    The reward an analytic-gradient method needs, and the only one here whose LEGALITY has a
+    gradient. Under the discrete spaces legality is a mask and overlap is invisible to `jax.grad`;
+    a continuous action cannot be masked, so this charges for overlap and for leaving the canvas
+    instead (`placax/extras/density.py`).
+
+    `target_density` is the knob between "don't overlap" (1.0 - silent on any legal placement) and
+    "spread out" (below the design's own average density - active on a merely crowded region).
+    Measured on adaptec1, whose macros cover 47.7% of the canvas, as the share of macros receiving
+    a nonzero gradient from a uniformly random placement:
+
+        target_density   overflow   gradient coverage
+        1.0               3804       57.3%
+        0.9               5362       63.2%
+        0.8               6996       70.7%
+        0.7               8713       78.6%     <- the frontier is richest here
+        0.5              12376       67.4%
+        0.3              16352       53.4%
+
+    Coverage falls again below 0.7 because density is conserved area: once every bin is over
+    target, moving a macro shifts area between bins charged at the same rate and the total does
+    not move. The gradient lives on the frontier between over- and under-target bins, so a target
+    under the design's own density erases the very thing it was lowered to create.
+    """
+
+    def factory(padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size):
+        # Benchmark.load builds its own EnvParams after this factory runs, so rebuild the matching
+        # one here - the same pattern _reward_maskplace uses.
+        params = EnvParams(grid=grid, n_macros=sizes_array.shape[0])
+        return make_differentiable_reward(
+            padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size, params,
+            density_weight=density_weight, target_density=target_density,
+            bounds_weight=bounds_weight, gamma=gamma_cells * cell_size,
+            dense=dense, reward_scale=reward_scale,
+        )
+
+    return factory
+
+
 REWARDS = {
+    "differentiable": _reward_differentiable,
     "hpwl": _reward_hpwl,
     "maskplace": _reward_maskplace,
     "smoothed": _reward_smoothed,
@@ -356,7 +402,20 @@ def _action_space_oriented_grid(_benchmark):
     return OrientedGridPlacement()
 
 
+def _action_space_continuous(_benchmark):
+    """One macro per step at a REAL-VALUED coordinate - the space an analytic gradient needs.
+
+    Pair it with the `differentiable` reward and no action mask: legality cannot be masked out of
+    a continuous distribution, so it has to be charged for instead. `build()` refuses the other
+    combinations rather than letting a mask be silently ignored.
+    """
+    from placax.action_space import ContinuousPlacement
+
+    return ContinuousPlacement()
+
+
 ACTION_SPACES = {
+    "continuous": _action_space_continuous,
     "discrete_grid": _action_space_discrete_grid,
     "oriented_grid": _action_space_oriented_grid,
     "perturbation": _action_space_perturbation,
@@ -444,8 +503,27 @@ def _policy_oriented_cnn(benchmark, features: int = 16, num_conv_layers: int = 2
     )
 
 
+def _policy_continuous(benchmark, features: int = 256, num_layers: int = 2,
+                       init_log_std: float = -1.0):
+    """Mean + log-std over a real-valued coordinate - the policy SHAC differentiates through.
+
+    Reads raw coordinates rather than the canvas, and that is not a style choice here: `render` is
+    a comparison, so a canvas-reading policy has no gradient path from the placement it sees back
+    to the actions that made it, and SHAC would lose backpropagation through time while looking
+    identical from outside. See placax_agents/policy/architectures/continuous.py.
+    """
+    from placax_agents.policy.architectures.continuous import ContinuousActorCritic
+
+    return ContinuousActorCritic(
+        grid_x=benchmark.params.grid_x, grid_y=benchmark.params.effective_grid_y,
+        cell_size=benchmark.cell_size, size_scale=float(benchmark.sizes_array.max()),
+        features=features, num_layers=num_layers, init_log_std=init_log_std,
+    )
+
+
 POLICIES = {
     "cnn": _policy_cnn,
+    "continuous": _policy_continuous,
     "oriented_cnn": _policy_oriented_cnn,
     "mlp": _policy_mlp,
     "wiremask_cnn": _policy_wiremask_cnn,

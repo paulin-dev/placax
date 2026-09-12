@@ -41,6 +41,7 @@ run_experiment(a, output_dir=pathlib.Path("runs/adaptec1-training"))
 | `placax/action_space.py` | what an action IS, what it changes, when the episode ends |
 | `placax/types.py` | `EnvState`, `EnvParams`, `RewardFn` |
 | `placax/extras/rewards.py` | `hpwl`, `wiremask`, `smoothed_wirelength` |
+| `placax/extras/density.py` | the DIFFERENTIABLE legality term - what a continuous action needs in place of masking |
 | `placax/extras/legality.py` | overlap / out-of-bounds / completeness of a finished placement |
 | `placax/extras/orientation.py` | macro orientation as a transform on the geometry inputs |
 | `placax/netlist/rows.py` | placement rows and the core area, from `.scl` or DEF `ROW` |
@@ -94,24 +95,25 @@ Everything below is named in a config as `Spec("<key>", {...kwargs})` and is **h
 | Slot | Registry | Shipped keys |
 |---|---|---|
 | `benchmark.order` | `ORDERS` | `alphabetical`, `area_desc`, `connectivity`, `connectivity_maskplace` |
-| `reward` | `REWARDS` | `hpwl`, `maskplace`, `smoothed`, `hpwl_congestion` |
+| `reward` | `REWARDS` | `hpwl`, `maskplace`, `smoothed`, `hpwl_congestion`, `differentiable` |
 | `state` | `STATES` | `canvas`, `wiremask` |
 | `action_mask` | `MASKS` | `wiremask_quality` |
-| `action_space` | `ACTION_SPACES` | `discrete_grid`, `oriented_grid`, `perturbation` |
+| `action_space` | `ACTION_SPACES` | `discrete_grid`, `oriented_grid`, `perturbation`, `continuous` |
 | `initial_placement` | `INITS` | `empty`, `greedy_wiremask_prefix` |
 | `legalization` | `LEGALIZERS` | `row_snap` |
 | `physical.cell_placer` | `CELL_PLACERS` | `dreamplace` |
 | `physical.validator` | `VALIDATORS` | `openroad` |
-| `agent.policy` | `POLICIES` | `cnn`, `mlp`, `wiremask_cnn`, `resnet_coarse_fine`, `oriented_cnn` |
+| `agent.policy` | `POLICIES` | `cnn`, `mlp`, `wiremask_cnn`, `resnet_coarse_fine`, `oriented_cnn`, `continuous` |
 | `agent.optimizer` | `OPTIMIZERS` | `adam`, `maskplace_split` |
-| `agent.algorithm` | `AGENTS` | `ppo`, `greedy_wiremask`, `random_search`, `genetic`, `local_search` |
+| `agent.algorithm` | `AGENTS` | `ppo`, `shac`, `greedy_wiremask`, `random_search`, `genetic`, `local_search` |
 | `agent.loop` | `LOOPS` | `sequential`, `parallel`, `buffered` (PPO only) |
 
 Plus two non-registry environment fields: `benchmark.canvas` (`die` or `core`) and
 `benchmark.macro_budget`. `agent.algorithm` for `ppo` also takes `value_loss` (`mse`, `huber`).
 
-**Which agent drives which action space.** `local_search` requires `perturbation`; `genetic`
-drives `discrete_grid` or `oriented_grid`; PPO drives whatever its POLICY declares - every shipped
+**Which agent drives which action space.** `local_search` requires `perturbation`; `shac` requires
+`continuous`; `genetic` drives `discrete_grid` or `oriented_grid`; PPO drives whatever its POLICY
+declares - every shipped
 architecture emits a `(grid_x, grid_y)` logits map and so drives `discrete_grid`, except
 `oriented_cnn`, which emits `(grid_x, grid_y, 4)` and drives `oriented_grid` only. A mismatch is
 refused at `build()` — a policy emitting `(grid_x, grid_y)` logits has nowhere to put a macro
@@ -120,9 +122,10 @@ index. PPO's answer comes from its POLICY, which declares an `action_spaces` att
 `build.py` — it must also supply per-turn legality, which `legal_action_logits` insists on rather
 than stretching a position-only mask over an axis it never checked.
 
-`build()` refuses two more pairings for the same reason, rather than letting them produce a
-plausible number: a reward that cannot see the orientations its space chooses, and an action mask
-that needs a current macro under a space whose `target()` answers `UNPLACED`.
+`build()` refuses three more pairings for the same reason, rather than letting them produce a
+plausible number: a reward that cannot see the orientations its space chooses; an action mask that
+needs a current macro under a space whose `target()` answers `UNPLACED`; and an action mask under a
+space with no cells to mask, where legality has to be a differentiable cost in the reward instead.
 
 ## Classes
 
@@ -222,6 +225,11 @@ experiment while its config claims otherwise.
 - **`canvas` and `legalization` default to the historical behaviour** (`die`, none), which places
   macros off the design's real rows. `canvas="core"` + `legalization="row_snap"` is the
   physically realizable pair.
+- **`shac` needs `continuous` + `differentiable`, and no action mask.** Its placements are NOT
+  legal by construction the way masked ones are - they are only as legal as `density_weight` made
+  them, so a SHAC row that is not 100% legal has not produced a result. Size that weight with
+  `scripts/measure_reward_terms.py` before a real run; on adaptec1/128 it comes out near 157, not
+  the default 1.0.
 - **`local_search` needs a dense reward** — a terminal-only reward gives it no per-step signal.
   Watch `acceptance_rate` in the log. Its `reward_return` is what the episode improved over the
   placement it started from, not a replayed episode sum: a perturbation placement is not a

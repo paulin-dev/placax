@@ -57,7 +57,7 @@ Not a bet on unproven infrastructure. DREAMPlace, the field's standard standard-
 
 **The rule for every future decision:** if a piece of logic could plausibly be done differently by a different team, it's a parameter, not a hard-coded call.
 
-**What's swappable, as shipped today:** the algorithm (PPO, plus four gradient-free agents — Section 4.2), the policy (any Flax module matching `AlgorithmFn`), the state representation (`StateFn`), the reward/cost function including its density — sparse/terminal or dense/per-step — and its awareness of macro orientation (`RewardFn`), the macro placement order (`OrderFn`), the action space and placement representation (`ActionSpace` — Section 5.1d), the action-legality/quality masking, the critic's value loss, the netlist format, the cell placer, the validator. See Section 5 for the concrete function/module for each. **Not yet implemented, still design/research-plan (Section 12):** SHAC and ACO, a GNN state representation, the offline-pretraining data regime, a learned warm-start strategy.
+**What's swappable, as shipped today:** the algorithm (PPO, plus four gradient-free agents — Section 4.2), the policy (any Flax module matching `AlgorithmFn`), the state representation (`StateFn`), the reward/cost function including its density — sparse/terminal or dense/per-step — and its awareness of macro orientation (`RewardFn`), the macro placement order (`OrderFn`), the action space and placement representation (`ActionSpace` — Section 5.1d), the action-legality/quality masking, the critic's value loss, the netlist format, the cell placer, the validator. See Section 5 for the concrete function/module for each. **Not yet implemented, still design/research-plan (Section 12):** ACO, a GNN state representation, the offline-pretraining data regime, a learned warm-start strategy. SHAC shipped once its three prerequisites did.
 
 ---
 
@@ -106,7 +106,7 @@ EnvState + EnvParams  (two separate flax.struct.dataclass pytrees — Gymnax con
 
 **Why one kernel, not several**: `reset()`/`step()` know nothing about policies, rewards' internal shape, or how many episodes run in parallel — `jax.vmap` over `collect_rollout` is what turns "one episode" into "n_envs episodes at once" (`placax_agents/training/loops/parallel_train.py`), with zero change to the kernel. The same reasoning is why a population method (GA) or a pheromone-table method (ACO) would layer on top of the identical kernel without touching it — `step()` doesn't know or care whether the action it receives came from a policy network's sample, a pre-committed genome entry, or a pheromone draw. **As shipped, the PPO loops (sequential, parallel, buffered) are joined by four gradient-free agents** — `greedy_wiremask`, `random_search`, `genetic` and `local_search` (`placax_agents/agents/`), the last two driving the `oriented_grid` and `perturbation` action spaces respectively - and PPO
 itself drives `oriented_grid` through `POLICIES["oriented_cnn"]`, which emits a turn axis and gets
-legality computed per turn. The kernel needed no change for any of them, which was the claim. SHAC and ACO remain the research plan (Section 12): ACO is an agent file away, while SHAC still wants a differentiable density term that masking cannot provide.
+legality computed per turn. The kernel needed no change for any of them, which was the claim. ACO remains the research plan (Section 12) and is an agent file away; SHAC is no longer — `agents/shac.py` drives the continuous space against the differentiable reward, which is what the density term unblocked.
 
 ### 4.1 Core interface contract
 
@@ -174,6 +174,9 @@ placax/                          # Tier 1 — the environment library (≈ Gymna
                                       become orientation-aware without a new argument (5.1d)
         congestion.py                rudy_density()/congestion_overflow() — the routing-congestion
                                       proxy the reward comparison needs (Section 5.2)
+        density.py                   area_density()/density_overflow()/out_of_bounds_cost() — the
+                                      DIFFERENTIABLE legality term, which is what a continuous
+                                      action needs in place of masking (Section 5.1d)
         render.py                    render() — boolean canvas from placed macro footprints
         mst.py                       Steiner-tree/RSMT and plain-Python HPWL, for occasional
                                       reporting on full netlists — NOT a RewardFn (name-keyed,
@@ -185,6 +188,9 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
                                      contracts (Section 5.1)
     agents/
         base.py                       the Agent protocol: init/update/best_positions/converged
+        shac.py                       SHACAgent — the analytic-gradient agent: one episode, one
+                                       differentiable pass, backpropagation through the placement
+                                       truncated at a horizon (Section 12's core experiment)
         environment_bound.py          the environment half every agent must honor - observation,
                                        action mask, warm start, configured reward - in one place
         ppo.py                        PPOAgent — a policy, an optimizer and a loop behind that seam
@@ -221,6 +227,9 @@ placax_agents/                   # Tier 2 — reusable, forkable training loops 
             mlp.py                      MLPActorCritic — reads raw coordinates instead of the
                                          canvas image; the non-CNN arm of Section 12's
                                          state-representation comparison
+            continuous.py               ContinuousActorCritic — mean + log-std over a real-valued
+                                         coordinate, reparameterized so SHAC can differentiate
+                                         through the sample; reads coordinates, not the canvas
             oriented_cnn.py             OrientedCNNActorCritic — emits (grid_x, grid_y, 4) logits, so
                                          PPO can LEARN a macro's quarter turn and not only search
                                          it; declares `oriented_grid` as the space it drives, and
@@ -745,7 +754,7 @@ Exact matches aren't the goal — training randomness means results differ — b
 
 ## 12. Research plan enabled
 
-- **Core experiment:** PPO vs. SHAC, matched compute, multiple seeds — is analytic policy-gradient training viable for placement, or does gradient "stiffness" near overlap dominate?
+- **Core experiment:** PPO vs. SHAC, matched compute, multiple seeds — is analytic policy-gradient training viable for placement, or does gradient "stiffness" near overlap dominate? **Both arms now exist and neither has been run against the other.** SHAC needed three environment pieces, all shipped: the smoothed wirelength (`REWARDS["smoothed"]`), a differentiable legality term (`extras/density.py`, measured in `docs/Action_Space_Decision.md`) and a continuous action (`ACTION_SPACES["continuous"]`). Note what the comparison owes its reader: a continuous placement is not legal by construction the way a masked one is, so SHAC's overlap is a result rather than a formality, and the two arms differ in action space — which is what `--level=paradigm` is for.
 - **Reward comparisons:** HPWL vs. HPWL+congestion vs. a learned predictor, agent held fixed.
 - **Algorithm-family comparisons:** PPO/SHAC vs. ACO vs. GA, reward and benchmark held fixed — does BBOPlace-Bench's finding (evolutionary/BBO beats RL on several benchmarks) extend to ACO/GA specifically? **The GA arm is shipped** (`agents/genetic.py`, `AGENTS["genetic"]`): a population over placement preferences decoded through the run's own legality mask, so the search cannot express an illegal placement. ACO and SHAC remain unbuilt. A comparison across families that MOVE macros differently - local search against a learner - asserts the `paradigm` level (the environment minus the action space and the warm start) and is told what that level does not claim: one env step places a macro on one side of such a table and moves one on the other, so the budget matches environment interaction and not work.
 - **State-representation comparisons:** raw coordinates vs. image (CNN) vs. graph (GNN), algorithm held fixed — isolates what most papers change simultaneously with the algorithm, per Section 1's framing. **The coordinate arm is shipped** (`policy/architectures/mlp.py`, `POLICIES["mlp"]`). Note this comparison runs on the POLICY axis rather than on `state`: `observation()` returns both an image and the coordinates, and each architecture consumes the subset it wants — so two arms share an environment exactly and the study holds at `environment_hash`, which is stronger than the `task_hash` this document originally anticipated. A GNN arm is still missing.

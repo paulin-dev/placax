@@ -1,11 +1,17 @@
 # The action space decision, and what it costs
 
-Status: **option D is done; the decision is now taken on evidence rather than deferred.** The
-measurement D asked for has been run (see "What the smoothed surrogate actually buys" below), and
-it comes out in favour of continuing: a smoothed wirelength gives essentially complete gradient
-coverage for about one percent of fidelity. So the sparse-gradient objection to SHAC is answered,
-and what remains blocking it is the differentiable density term and the action space itself - in
-that order, and both still unbuilt.
+Status: **done. D, then C, then the density term, then SHAC - all of it, in that order, and the
+order was the measurement's.** A smoothed wirelength gave essentially complete gradient coverage
+for about one percent of fidelity (D, below), which took "drop SHAC" off the table. The
+`ActionSpace` protocol followed (C), and now has four implementations rather than the two it was
+designed against. The density term - the piece this document called "the one that is genuinely
+hard" - is `placax/extras/density.py`, and it was measured the same way before being trusted (see
+"What the density term actually buys"). `ContinuousPlacement` and `agents/shac.py` are the last
+two, and neither was hard once the three pieces beneath them existed, which is what the ordering
+was for.
+
+What remains is not a blocker but a result nobody has: **SHAC has never been run against PPO at a
+matched budget on a real design.** The machinery answers the question; it does not answer it.
 
 ## Why it is on the table
 
@@ -89,10 +95,61 @@ float32. The surrogate collapsed back to a hard max and delivered gradient to **
 macros - materially worse than raw HPWL, while looking like it was working. The registered
 `smoothed` reward now takes `gamma_cells` and scales by `cell_size`.
 
-**What this does not settle.** Density is still zero-gradient (below), and the action space is
-still discrete. The order of work that follows from the measurement is: differentiable density
-term, then the `ActionSpace` protocol (option C), then SHAC. The first of those is the one that
-is genuinely hard, and it has not become easier.
+**What this did not settle, and what settled it.** Density was still zero-gradient and the action
+space still discrete. The order of work that followed was: differentiable density term, then the
+`ActionSpace` protocol (option C), then SHAC - and all three are now done. The next section is the
+density term's own measurement, run before it was trusted for the same reason this one was.
+
+### What the density term actually buys, measured
+
+`extras/density.py` charges the area by which macros over-fill a bin, plus the area they put
+outside the canvas. Measured on adaptec1 - 543 macros whose footprints cover 47.7% of the canvas -
+as the share of macros receiving a nonzero `d(cost)/d(position)` from a uniformly random placement,
+which is what a fresh continuous policy produces:
+
+| `target_density` | overflow (bins) | gradient coverage |
+|---|---|---|
+| 1.0 | 3804 | 57.3% |
+| 0.9 | 5362 | 63.2% |
+| 0.8 | 6996 | 70.7% |
+| **0.7** | **8713** | **78.6%** |
+| 0.5 | 12376 | 67.4% |
+| 0.3 | 16352 | 53.4% |
+
+Two things worth having in writing.
+
+**Coverage is not monotonic, and the reason is conservation.** Density is area, and area is
+conserved: once *every* bin is above the target, moving a macro shifts area between bins charged
+at the same rate and the total overflow does not change. The gradient lives on the frontier
+between over-target and under-target bins, so a target below the design's own average density
+starts erasing the very thing it was lowered to create. `target_density` is therefore a real knob
+with an interior optimum, not a "lower is stricter" dial.
+
+**The same trap as the gamma bug, in a different place.** Measured against the greedy-wiremask
+placement at `target_density=1.0`, the term reports 0.0 overflow - correct, that placement is
+legal - and *99.8% gradient coverage*, which is nonsense. The greedy placement packs macros on
+integer cells, so its bins sit at exactly 1.000, exactly on the hinge of `clip(density - target,
+0, None)` - where JAX returns the tie subgradient, 0.5. A number that looks like complete coverage
+is an artifact of a placement sitting precisely on a kink. Read coverage beside the cost: where
+the cost is zero, coverage means nothing.
+
+### What running it found, which measuring it did not
+
+Two things only a real SHAC run surfaced, both now fixed and both tested:
+
+**A policy will escape the canvas if leaving is cheaper than packing.** With out-of-bounds charged
+as squared overhang distance alone, stepping one cell over the edge cost ~1 while overlapping a
+2x4-cell macro cost ~8 in overflow. On a 50%-full toy every density weight tried drove overlap to
+0% and out-of-bounds to 100% - a perfectly legal placement of an empty canvas. The fix is to charge
+the escaped AREA, in the same bin units overflow is charged in, so escaping costs exactly what
+overlapping costs; the distance term stays, to keep a gradient on a macro that is already fully
+outside and whose escaped area has stopped growing.
+
+**Bounding the corner is not bounding the macro.** The continuous policy's head emits a coordinate
+through a sigmoid, which keeps the *corner* on the canvas and says nothing about the body. Saturate
+it and the macro sits entirely past the far edge. The head bounds to `canvas - footprint` now,
+which is the continuous counterpart of `boundary_mask`: the policy's mean cannot ask for a
+placement that does not fit, and the penalty is left to handle the exploration noise.
 
 **HPWL's gradient is sparse by construction.** Half-perimeter wirelength is a sum of per-net
 `max - min` over pin coordinates. Only the pins actually *on* a net's bounding box receive
@@ -158,18 +215,23 @@ That is a fourth consumer of the same generalization, and it arrived on its own.
 
 What should *not* happen is B by accident - a continuous path bolted on beside the discrete one
 because it was faster than generalizing, ending with two kernels that drift apart. That is the
-per-paper one-off environment problem reproduced inside a project built to solve it.
-
-What should *not* happen is B by accident - a continuous path bolted on beside the discrete one
-because it was faster than generalizing, ending with two kernels that drift apart. That is the
-per-paper one-off environment problem reproduced inside a project built to solve it.
+per-paper one-off environment problem reproduced inside a project built to solve it. It did not:
+`ContinuousPlacement` is an `ActionSpace` like the other three, driving the same `step()`.
 
 ## What to fix in the documents either way
 
-`docs/JAX_Placement_Environment_Spec.md` §1 says the kernel "was tested end-to-end with four
-structurally different agents". Three exist now (PPO, greedy wiremask, random search) and are
-tested in `tests/test_agents.py`; the claim should be corrected to what is true rather than left
-in the past tense. §1 also presents SHAC-versus-PPO as enabled by the environment's
-differentiability. Per the measurement above that is not the case today, and the sentence should
-say what is actually differentiable - the metric with respect to positions - and what that is
-missing before an analytic policy gradient can use it.
+Both of the corrections this section originally asked for have been made, and the situation they
+described has changed underneath them:
+
+  * the kernel now runs **six** structurally different agents (PPO, SHAC, greedy wiremask, random
+    search, genetic, local search), tested in `tests/test_agents.py`,
+    `tests/test_environment_parity.py` and `tests/test_shac.py`;
+  * SHAC-versus-PPO really is enabled by the environment's differentiability now, but the sentence
+    still has to be precise about which differentiability: `hpwl()` has always had a gradient with
+    respect to positions, and what was missing - and now exists - is a smoothed objective every
+    macro feels, a legality term that is a cost rather than a mask, and an action the policy can
+    be differentiated through.
+
+The remaining honest caveat belongs in the README rather than here: a continuous placement is not
+legal by construction the way a masked one is, so a SHAC row that is not 100% legal has not
+produced a result, whatever its wirelength says.

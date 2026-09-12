@@ -92,6 +92,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--macro_budget", type=int, default=None,
                         help="Override the preset's macro budget - place only the first N macros "
                              "by the configured order (MaskPlace's --pnm).")
+    parser.add_argument("--reward", default=None,
+                        help="Override the preset's reward, as 'name' or 'name:key=value,...' - "
+                             "e.g. 'differentiable:density_weight=157'. Shared by every agent, "
+                             "since what is being optimized is the task's to fix and not one "
+                             "competitor's; that is what makes a reward-comparison study a study "
+                             "of the reward rather than of who got which one. Size a composite "
+                             "reward's weights with scripts/measure_reward_terms.py first.")
     parser.add_argument("--action_space", default=None,
                         help="Override the preset's action space, as 'name' or "
                              "'name:key=value,...' - e.g. 'perturbation:n_moves=128' or "
@@ -180,7 +187,7 @@ def _with_overrides(config: ExperimentConfig, args: argparse.Namespace) -> Exper
     # beside the agent for the reason the whole config is split in two: what an action is, and
     # what the run starts from, are the task's to fix, not one competitor's.
     environment = {name: Spec.parse(getattr(args, name))
-                   for name in ("action_space", "initial_placement")
+                   for name in ("reward", "action_space", "initial_placement")
                    if getattr(args, name) is not None}
     if not overrides and not environment:
         return config
@@ -208,6 +215,16 @@ def _agent_spec(name: str, reference: ExperimentConfig, population: int,
         return dataclasses.replace(reference.agent, algorithm=dataclasses.replace(
             algorithm, kwargs={**algorithm.kwargs, **kwargs}
         ))
+    if name == "shac":
+        # A learner, so it needs a policy and an optimizer - named here rather than defaulted
+        # inside the builder, so the config that gets hashed and written to the manifest says what
+        # ran. Its policy is not interchangeable with the others': a (grid_x, grid_y) logits map
+        # cannot express a real-valued coordinate.
+        return AgentSpec(
+            algorithm=Spec("shac", kwargs),
+            policy=Spec("continuous"),
+            optimizer=reference.agent.optimizer or Spec("adam"),
+        )
     if name == "random_search":
         kwargs = {"population": population, **kwargs}
     return AgentSpec(algorithm=Spec(name, kwargs))
@@ -298,26 +315,25 @@ def _format_table(results: dict[str, list[dict]], budget: Budget, level: str) ->
 
 
 def _paradigm_note(results: dict[str, list[dict]]) -> list[str]:
-    """What a cross-paradigm table does NOT claim, printed under the rows that make it one.
+    """What a cross-paradigm table does NOT claim - the caveats that apply to THESE rows.
 
-    `--level=paradigm` drops two axes, and neither loss is cosmetic:
+    `--level=paradigm` drops the action space and the warm start, and what that costs depends on
+    which spaces are actually in the table. Three different losses, printed only when the rows
+    concerned are present, because a caveat that does not apply is noise that teaches a reader to
+    skip the ones that do:
 
-      * **env_steps stop being one unit.** A constructive env step PLACES a macro; a perturbation
-        env step MOVES one. Both are one `step()` call and one reward evaluation, so the budget
-        matches INTERACTION - which is real, and is the only thing it matches. It does not match
-        work, and the README's "sample-matched, not compute-matched" caveat gets a second half
-        here rather than being quietly stretched to cover this too.
-      * **the warm start differs.** A perturbation agent has to start from a complete placement,
-        so it is typically handed one a constructive agent was never given. If that placement
-        came from `greedy_wiremask`, the row is reporting what local search added to a strong
-        heuristic, not what it achieves alone - and `greedy_wiremask`'s own row is the number to
-        read it against.
-
-    Printed only when the rows actually differ, so an ordinary comparison is not lectured.
+      * **a perturbation row against a constructive one**: env_steps stop being one unit. A
+        constructive env step PLACES a macro; a perturbation env step MOVES one.
+      * **a continuous row against a discrete one**: env_steps stay commensurable - both place one
+        macro per step - but LEGALITY does not. A discrete placement is legal by construction
+        because illegal cells are masked out; a continuous one is only as legal as its density
+        penalty made it, so its overlap column is a result rather than a formality.
+      * **different warm starts**: a row that started from a heuristic's placement is reporting
+        what it ADDED to that heuristic, which usually has its own row to be read against.
     """
-    spaces = {run.get("action_space") for runs in results.values() for run in runs}
-    starts = {run.get("initial_placement") for runs in results.values() for run in runs}
-    if len(spaces - {None}) <= 1 and len(starts - {None}) <= 1:
+    spaces = {run.get("action_space") for runs in results.values() for run in runs} - {None}
+    starts = {run.get("initial_placement") for runs in results.values() for run in runs} - {None}
+    if len(spaces) <= 1 and len(starts) <= 1:
         return []
 
     lines = ["", "THESE ROWS MOVE MACROS DIFFERENTLY (--level=paradigm)", ""]
@@ -327,17 +343,29 @@ def _paradigm_note(results: dict[str, list[dict]]) -> list[str]:
         row = runs[0]
         lines.append(f"{name:<22s}{str(row.get('action_space')):>16s}"
                      f"{str(row.get('initial_placement')):>28s}")
-    lines.extend([
-        "",
-        "One env step is one macro PLACED under a constructive space and one macro MOVED under a "
-        "perturbation one.",
-        "The budget matches environment INTERACTION across these rows - one step() call, one "
-        "reward evaluation each - and nothing else:",
-        "it is not work-matched, and 'grad steps' is not the only axis it fails to price.",
-        "A perturbation agent also starts from a complete placement a constructive agent was "
-        "never given; where that placement",
-        "came from a heuristic, read its row against that heuristic's own.",
-    ])
+    lines.append("")
+
+    if "perturbation" in spaces and spaces - {"perturbation"}:
+        lines.extend([
+            "One env step is one macro PLACED under a constructive space and one macro MOVED "
+            "under a perturbation one, so the",
+            "budget matches environment INTERACTION across those rows - one step() call, one "
+            "reward evaluation each - and not work.",
+        ])
+    if "continuous" in spaces and spaces - {"continuous"}:
+        lines.extend([
+            "A continuous row places one macro per step like the discrete ones, so the budget IS "
+            "commensurable - but its legality is not:",
+            "a discrete placement is legal by construction (illegal cells are masked out), while "
+            "a continuous one is only as legal as",
+            "its density penalty made it. Read the overlap column on those rows as a result, not "
+            "as a formality.",
+        ])
+    if len(starts) > 1:
+        lines.append(
+            "The rows also start from different placements; where one came from a heuristic, read "
+            "it against that heuristic's own row."
+        )
     return lines
 
 

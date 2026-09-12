@@ -22,11 +22,13 @@ returns -1, because at observation time nobody has chosen a macro yet. An observ
 current macro is a constructive-only observation, and that is honest rather than papered over -
 the same way a wiremask observation pairs with a policy that reads a wiremask.
 
-**What is NOT here.** A continuous space for SHAC. That needs a differentiable density term to
-express legality, which does not exist: legality is enforced by masking, and masks have no
-gradient. `docs/Action_Space_Decision.md` measured the other half of that problem (a smoothed
-wirelength gives 100% gradient coverage for 1% fidelity) and the density term is what remains. The
-protocol is shaped so that adding it later is an implementation, not another kernel change.
+**All four spaces the decision record designed this protocol against now exist.** The last to
+arrive was `ContinuousPlacement`, which needed a differentiable density term before it could mean
+anything: legality on the discrete spaces is enforced by masking, and a continuous distribution
+cannot be masked. `docs/Action_Space_Decision.md` measured the first half of that problem (a
+smoothed wirelength gives 100% gradient coverage for 1% fidelity) and `placax/extras/density.py`
+is the second. Adding the space itself was then what the protocol promised it would be - an
+implementation, not another kernel change.
 """
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -47,6 +49,16 @@ class ActionSpace(Protocol):
     """What an action is, what it does, and when the episode is over."""
 
     name: str
+
+    discrete: bool
+    """Whether an action names a grid CELL, and can therefore be constrained by masking.
+
+    True for every space whose action is an integer coordinate: legality there is enforced by
+    ruling cells out of the action distribution, which is the property that makes those placements
+    legal by construction. False for a continuous space, where there is no finite action set to
+    mask - legality has to be a differentiable COST in the reward instead
+    (`placax/extras/density.py`). `build()` refuses to pair an action mask with a space that
+    cannot use one, rather than letting the mask be silently ignored."""
 
     constructive: bool
     """Whether a finished placement IS the sequence of actions that produced it.
@@ -116,6 +128,8 @@ class DiscreteGridPlacement:
 
     name: str = "discrete_grid"
 
+    discrete: bool = True
+
     constructive: bool = True
 
     def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
@@ -170,6 +184,8 @@ class Perturbation:
     that two agents given the same config do the same amount of work."""
 
     name: str = "perturbation"
+
+    discrete: bool = True
 
     constructive: bool = False
     """A placement here is not a sequence of appends - countless move sequences reach the same
@@ -234,6 +250,8 @@ class OrientedGridPlacement:
 
     name: str = "oriented_grid"
 
+    discrete: bool = True
+
     constructive: bool = True
 
     def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
@@ -285,9 +303,71 @@ class OrientedGridPlacement:
         ])
 
 
+@dataclass(frozen=True)
+class ContinuousPlacement:
+    """One macro per step, at a REAL-VALUED grid coordinate - the space an analytic gradient needs.
+
+    The last of the four spaces `docs/Action_Space_Decision.md` designed the protocol against, and
+    the one it was written for: SHAC differentiates the objective with respect to the action, which
+    a discrete `argmax`/`categorical` cannot provide however smooth the reward is.
+
+    **What changes, and what deliberately does not.** The transition is the same append the
+    constructive spaces do - one macro per step, in the run's order - so warm starts, episode
+    lengths, `replay`, budgeting and scoring all work unchanged. The single difference is that the
+    action is a float, so `positions` holds float coordinates and `d(position)/d(action)` is the
+    identity rather than zero.
+
+    **Legality is not masked here, and cannot be.** You cannot rule cells out of a continuous
+    distribution, so this space is `discrete = False` and the environment has to charge for
+    overlap and out-of-bounds in the REWARD instead - `extras/density.py`, paired with the
+    `differentiable` reward. That is a real trade, stated plainly: placements under the discrete
+    spaces are legal by construction, and placements under this one are only as legal as the
+    penalty made them, which is why every run still measures and reports legality afterwards.
+    """
+
+    name: str = "continuous"
+
+    discrete: bool = False
+
+    constructive: bool = True
+
+    def encode(self, positions: jax.Array, orientations: jax.Array | None = None) -> jax.Array:
+        """The action IS the coordinate, so a placement is already its own action sequence."""
+        return positions
+
+    def reset(self, params: EnvParams, initial_positions: jax.Array | None) -> EnvState:
+        if initial_positions is None:
+            initial_positions = jnp.full((params.n_macros, 2), float(UNPLACED))
+        # Float, so a warm start handed over as integers still leaves the array differentiable.
+        initial_positions = initial_positions.astype(jnp.float32)
+        n_placed = (initial_positions[:, 0] >= 0).sum()
+        return EnvState(positions=initial_positions, step=n_placed)
+
+    def apply(self, state: EnvState, action: jax.Array, params: EnvParams) -> EnvState:
+        # Identical to the discrete append except for the dtype - which is the whole point: this
+        # scatter has a gradient with respect to `action`, and the integer one does not.
+        positions = state.positions.at[state.step].set(action.astype(jnp.float32))
+        return EnvState(positions=positions, step=state.step + 1)
+
+    def done(self, state: EnvState, params: EnvParams) -> jax.Array:
+        return state.step == params.n_macros
+
+    def target(self, state: EnvState, params: EnvParams) -> jax.Array:
+        return state.step
+
+    def episode_length(self, params: EnvParams, n_placed: int) -> int:
+        return params.n_macros - n_placed
+
+    def random_action(self, key: jax.Array, params: EnvParams) -> jax.Array:
+        """Uniform over the canvas, in grid units - the continuous analogue of a random cell."""
+        return jax.random.uniform(key, (2,)) * jnp.array(
+            [params.grid_x, params.effective_grid_y], dtype=jnp.float32
+        )
+
+
 DISCRETE_GRID = DiscreteGridPlacement()
 """The default everywhere, so the historical behaviour needs no argument to select."""
 
 
-__all__ = ["ActionSpace", "DiscreteGridPlacement", "OrientedGridPlacement", "Perturbation",
-           "DISCRETE_GRID", "UNPLACED"]
+__all__ = ["ActionSpace", "ContinuousPlacement", "DiscreteGridPlacement",
+           "OrientedGridPlacement", "Perturbation", "DISCRETE_GRID", "UNPLACED"]

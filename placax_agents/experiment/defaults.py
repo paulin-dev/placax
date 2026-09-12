@@ -137,12 +137,16 @@ def _algorithm_defaults(name: str) -> dict:
     from placax_agents.agents import baselines
     from placax_agents.agents.genetic import GeneticAgent
     from placax_agents.agents.local_search import LocalSearchAgent
+    from placax_agents.agents.shac import SHACAgent
 
     agent_class = {
         "greedy_wiremask": baselines.GreedyWiremaskAgent,
         "random_search": baselines.RandomSearchAgent,
         "genetic": GeneticAgent,
         "local_search": LocalSearchAgent,
+        # SHAC's kwargs are its constructor's, like every agent here except PPO - it carries its
+        # own horizon and discount rather than a PPOConfig, and has no loop to name.
+        "shac": SHACAgent,
     }.get(name)
     return _defaults_from_signature(agent_class.__init__) if agent_class is not None else {}
 

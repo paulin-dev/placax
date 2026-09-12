@@ -236,12 +236,31 @@ def test_build_rejects_an_unregistered_component(tmp_path: pathlib.Path) -> None
         build(broken)
 
 
-def test_build_rejects_an_unimplemented_algorithm() -> None:
+def test_ppos_hyperparameters_are_not_built_for_another_algorithm() -> None:
     from placax_agents.experiment.config import Spec
 
-    # SHAC/ACO/GA are the research plan, not shipped - failing loudly beats silently running PPO.
-    with pytest.raises(KeyError, match="only 'ppo' is implemented"):
+    # SHAC ships now, and carries its OWN hyperparameters (horizon, gamma, value_coef) with no
+    # loop - it rolls out and updates in one differentiable pass. Handing its Spec to PPO's
+    # config builder is a wiring mistake, and failing loudly beats silently running PPO's.
+    with pytest.raises(KeyError, match="build_ppo_config builds PPO's own"):
         build_ppo_config(Spec("shac"))
+
+
+def test_an_unregistered_algorithm_is_still_refused(tmp_path) -> None:
+    import dataclasses
+
+    from placax_agents.experiment.budget import Budget
+    from placax_agents.experiment.config import AgentSpec, Spec
+
+    config = training(_write_tiny_bookshelf(tmp_path), budget=Budget(iterations=1))
+    config = dataclasses.replace(
+        config,
+        environment=dataclasses.replace(config.environment, benchmark=dataclasses.replace(
+            config.environment.benchmark, grid=12)),
+        agent=AgentSpec(algorithm=Spec("aco")),
+    )
+    with pytest.raises(KeyError, match="unknown algorithm 'aco'"):
+        build(config)
 
 
 def test_buffered_loop_warns_when_the_buffer_cannot_fill_one_batch(tmp_path, caplog) -> None:

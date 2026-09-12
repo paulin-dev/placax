@@ -10,6 +10,7 @@ keeps its numbers bit-identical.
 from placax.extras.masks import regularity_cost, regularity_max  # must precede jax imports
 from placax.extras.orientation import effective_sizes
 from placax.extras.congestion import make_congestion_cost
+from placax.extras.density import make_density_cost
 from placax.extras.rewards import make_hpwl_reward, make_smoothed_wirelength_reward
 from placax.types import EnvParams, RewardFn
 from placax_agents.policy.scale import to_grid_units, to_real_centers
@@ -145,6 +146,74 @@ def make_hpwl_congestion_reward(
         else:
             penalty = jnp.where(new_placed.all(), new_cost, 0.0)
         return (reward - congestion_weight * penalty) * reward_scale
+
+    return reward_fn
+
+
+def make_differentiable_reward(
+    padded_pin_idx: jax.Array,
+    padded_pin_offset: jax.Array,
+    valid_mask: jax.Array,
+    sizes_array: jax.Array,
+    cell_size: float,
+    params: EnvParams,
+    density_weight: float = 1.0,
+    target_density: float = 1.0,
+    bounds_weight: float = 1.0,
+    gamma: float = 1.0,
+    dense: bool = True,
+    reward_scale: float = 1.0,
+) -> RewardFn:
+    """-(smoothed wirelength + density overflow + out-of-bounds) - the objective SHAC can descend.
+
+    The two halves `docs/Action_Space_Decision.md` says an analytic-gradient method needs, in one
+    RewardFn:
+
+      * **wirelength that every macro feels.** Raw HPWL is a sum of per-net `max - min`, so only
+        the pins ON a net's bounding box receive gradient - 76% of adaptec1's connected macros got
+        exactly zero. The log-sum-exp surrogate gives 100% coverage for 1% fidelity (measured; see
+        `extras/rewards.smoothed_wirelength`).
+      * **legality that has a gradient at all.** Under the discrete spaces legality is a MASK, and
+        masks are comparisons - `d(overlap)/d(position)` is identically zero. A continuous action
+        cannot be masked, so overlap and the canvas edge become costs here instead
+        (`extras/density.py`).
+
+    The weights are NOT auto-balanced, for the same reason `make_expert_reward`'s are not: the
+    wirelength term is in real design units and the density term in grid bins, so
+    `density_weight` has to be sized against the wirelength term's actual magnitude on YOUR
+    benchmark. `scripts/measure_reward_terms.py` prints both.
+
+    **`dense=True` by default, unlike every other reward here.** A short-horizon method
+    differentiates a window of steps; a reward that pays out only at the end gives the first steps
+    of that window nothing to differentiate.
+    """
+    wirelength = make_scaled_smoothed_reward(
+        padded_pin_idx, padded_pin_offset, valid_mask, sizes_array, cell_size,
+        dense=dense, reward_scale=1.0, gamma=gamma,
+    )
+    legality_cost = make_density_cost(
+        sizes_array, params, cell_size, target_density=target_density,
+        bounds_weight=bounds_weight,
+    )
+
+    def reward_fn(
+        old_positions: jax.Array, new_positions: jax.Array, old_placed: jax.Array,
+        new_placed: jax.Array, orientations: jax.Array | None = None,
+    ) -> jax.Array:
+        reward = wirelength(old_positions, new_positions, old_placed, new_placed, orientations)
+        if density_weight == 0.0:
+            return reward * reward_scale
+        sizes = effective_sizes(sizes_array, orientations)
+        # Legality is a property of a LAYOUT, not of a step, so the dense form pays its delta -
+        # which telescopes over an episode to the same total the sparse form pays once, exactly as
+        # the wirelength and congestion terms do.
+        new_cost = legality_cost(to_real_centers(new_positions, sizes, cell_size), new_placed)
+        if dense:
+            old_cost = legality_cost(to_real_centers(old_positions, sizes, cell_size), old_placed)
+            penalty = new_cost - old_cost
+        else:
+            penalty = jnp.where(new_placed.all(), new_cost, 0.0)
+        return (reward - density_weight * penalty) * reward_scale
 
     return reward_fn
 
