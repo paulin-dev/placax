@@ -28,6 +28,7 @@ import sys
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.log import Log
+from placax_agents.experiment.presets import RUNS_DIR
 from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 from placax_tools.openroad.validator import OpenROADValidator
 from placax_tools.pipeline import place_and_validate, validate_only
@@ -42,7 +43,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="A tech or cell LEF. Repeat for several; at least one is required.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where the placed DEF, TCL script and reports go "
-                             "(default: <def_path's directory>/validate).")
+                             "(default: runs/validate-<design>).")
     parser.add_argument("--skip_cell_placement", action="store_true",
                         help="Validate the DEF as given, without running a cell placer first - for "
                              "a design whose standard cells are already placed.")
@@ -164,7 +165,8 @@ def main() -> None:
         Log.error(f"LEF file(s) not found: {', '.join(str(p) for p in missing)}")
         sys.exit(1)
 
-    output_dir = args.output_dir or (args.def_path.parent / "validate")
+    # Under runs/, never beside the input: the DEF may be a benchmark's own file, or live in an image.
+    output_dir = args.output_dir or (RUNS_DIR / f"validate-{args.def_path.stem}")
     if args.config is not None:
         _run_from_config(args, output_dir, args.parser_defaults)
         return

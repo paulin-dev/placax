@@ -23,6 +23,7 @@ from placax_agents.experiment.build import build
 from placax_agents.experiment.config import Spec
 from placax_agents.experiment.export import write_placement
 from placax_agents.experiment.physical import evaluate_physical, write_ppa
+from placax_agents.experiment import presets as run_layout
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, find_run_dir
 from placax_agents.experiment.run import write_manifest
 from scripts.presets import config_for
@@ -53,7 +54,8 @@ def _parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--checkpoint", type=pathlib.Path, default=None,
-        help="Defaults to <benchmark_dir>/output_<preset>/best_checkpoint.bin if it exists, else "
+        help="Defaults to runs/<benchmark>-<preset>/best_checkpoint.bin (or its newest seed*/) if "
+             "it exists, else "
              ".../checkpoint.bin.",
     )
     parser.add_argument(
@@ -66,7 +68,8 @@ def _parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--output_dir", type=pathlib.Path, default=None,
-        help="Defaults to <benchmark_dir>/<preset's own output subdir>/pipeline, e.g. output_maskplace/"
+        help="Defaults to <the checkpoint's run directory>/pipeline when the checkpoint lives under "
+             "runs/, else runs/<benchmark>-<preset>/pipeline"
              "pipeline for --preset=maskplace, output/pipeline for --preset=training.",
     )
     parser.add_argument(
@@ -148,7 +151,7 @@ def _resolve_checkpoint(
     whatever the file is actually called, not just the conventional best_checkpoint.bin/checkpoint.bin
     names. Only the DEFAULT --checkpoint path (when none is given) uses that naming convention, to pick
     which of the two conventional files to default to, under the given preset's own default output
-    subdir (e.g. output_maskplace, output - see placax_agents/experiment/presets.py)."""
+    run directory (runs/<benchmark>-<preset> - see placax_agents/experiment/presets.py)."""
     run_dir = find_run_dir(preset, benchmark_dir)
     checkpoint_path = checkpoint_arg or (run_dir / "best_checkpoint.bin")
     if checkpoint_arg is None and not checkpoint_path.exists():
@@ -198,6 +201,20 @@ def _build_cell_placer(
         python_executable=python_executable, use_docker=use_docker, extra_mounts=extra_mounts,
         extra_config=extra_config,
     )
+
+
+def _default_output_dir(checkpoint_path: pathlib.Path, preset: str,
+                        benchmark_dir: pathlib.Path) -> pathlib.Path:
+    """Beside the run that produced the checkpoint, so a pipeline's results sit with their weights.
+
+    Only for a checkpoint under `runs/`; one kept anywhere else (an old download, a benchmark
+    directory) must not pull generated output in beside it.
+    """
+    runs = run_layout.RUNS_DIR.resolve()
+    run_dir = checkpoint_path.resolve().parent
+    if run_dir.is_relative_to(runs):
+        return run_dir / "pipeline"
+    return run_layout.run_root(preset, benchmark_dir) / "pipeline"
 
 
 def _measure_ppa(built, benchmark_dir, output_dir, full_placement, machine):
@@ -278,7 +295,6 @@ def main() -> None:
     # checkpoint in the environment it was trained in rather than in whatever a preset name
     # happens to resolve to today. Hand-matching a --preset string to a checkpoint is exactly the
     # error class ExperimentConfig removed upstream, and it survived down here far too long.
-    default_subdir = OUTPUT_SUBDIRS[preset]
     config = config_for(config_path, preset, benchmark_dir, macro_budget)
     if args.validator is not None:
         # Into the config, not beside it: the physical stack is part of the environment, so a PPA
@@ -295,7 +311,7 @@ def main() -> None:
                    f"matching that preset's own training script).")
         sys.exit(1)
 
-    output_dir = output_dir_arg or (benchmark_dir / default_subdir / "pipeline")
+    output_dir = output_dir_arg or _default_output_dir(checkpoint_path, preset, benchmark_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Resolve the config into the same benchmark/policy/observation/mask/warm start the

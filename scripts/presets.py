@@ -63,7 +63,7 @@ def setup_from_preset(name: str, benchmark_dir: pathlib.Path, macro_budget: int 
 
 
 def _preset_entry(name: str):
-    """Adapts one config preset to the (output_subdir, setup_fn) shape the scripts expect."""
+    """Adapts one config preset to the (run-name suffix, setup_fn) shape the scripts expect."""
     def setup_fn(benchmark_dir: pathlib.Path, macro_budget: int | None):
         return setup_from_preset(name, benchmark_dir, macro_budget)
 
@@ -71,5 +71,5 @@ def _preset_entry(name: str):
 
 
 PRESETS = {name: _preset_entry(name) for name in CONFIG_PRESETS}
-"""preset name -> (default output subdir under benchmark_dir, setup_fn); setup_fn(benchmark_dir,
+"""preset name -> (run-name suffix under runs/, setup_fn); setup_fn(benchmark_dir,
 macro_budget) -> (benchmark, policy, state_fn, extra_illegal_fn, optimizer)."""

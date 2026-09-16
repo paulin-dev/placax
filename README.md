@@ -106,7 +106,7 @@ experiment, whose log lines carried another's `full_hash`, and whose weights bel
 That is refused now, naming both runs and the axes they differ on. Raising a budget and carrying
 on is still the same run, which is what a TOTAL budget is for; a different seed, reward, agent or
 design is not. The training scripts' default output directory is per run rather than per preset
-(`<benchmark_dir>/output_maskplace/seed42`), so the "vary `--seed`" advice above no longer walks
+(`runs/adaptec1-maskplace/seed42`), so the "vary `--seed`" advice above no longer walks
 every seed into one directory.
 
 ### Compute budget
@@ -411,7 +411,7 @@ python -m scripts.run_maskplace --benchmark_dir=benchmarks/adaptec1 --n_iteratio
 - `--placement_images` / `--placement_images_dir`: also write a placement snapshot PNG on every `--eval_every` iteration, reusing that iteration's already-scheduled eval rollout, so it costs no extra rollout.
 - `--patience`: stop early once real HPWL hasn't beaten its best for this many consecutive evals; default `0` (disabled).
 - `--config`: run a recorded `ExperimentConfig` JSON exactly, ignoring the setup flags above.
-- `--output_dir`: where the manifest, log and checkpoints go; default `<benchmark_dir>/output_maskplace`.
+- `--output_dir`: where the manifest, log and checkpoints go; default `runs/<benchmark>-maskplace/seed<N>`. Every script writes under `runs/` by default - training runs, comparisons (`runs/<benchmark>-comparison`), pipelines and validations - never inside `benchmarks/`.
 - `--no_checkpoint`: run entirely in memory - no manifest, checkpoint or log written.
 
 Run `python -m scripts.run_maskplace --help` for the full flag list. The script auto-resumes from
@@ -453,9 +453,9 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 \
 - `--benchmark_dir`: path to a downloaded Bookshelf benchmark (only format supported so far); default `benchmarks/adaptec1`.
 - `--config`: **strongly preferred.** A run's own `manifest.json` (or a bare `ExperimentConfig` JSON). Rebuilds the exact environment the checkpoint was trained in - reward, observation, action mask, macro budget *and initial placement* - and writes a manifest beside the outputs so they are attributable. Without it this pipeline replays a checkpoint in whatever a preset name resolves to today, which is the same hand-matching problem `ExperimentConfig` removed from training.
 - `--preset`: which setup to rebuild when no `--config` is given - must match what the checkpoint was actually trained with; default `maskplace` (`scripts/run_maskplace.py`'s own setup). `training` uses `scripts/run_training.py`'s plain CNN setup instead.
-- `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `<benchmark_dir>/<preset's own output subdir>/best_checkpoint.bin` if it exists, else `.../checkpoint.bin`.
+- `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `runs/<benchmark>-<preset>/best_checkpoint.bin` (or its newest `seed*/`) if it exists, else `.../checkpoint.bin`.
 - `--macro_budget`: default `all` - every macro placed, the production default. Neither shipped preset's network has any architectural dependence on macro count, so a checkpoint trained with any budget (e.g. MaskPlace's own default of 128) still loads and places every macro with no shape mismatch and no retraining. Pass an integer instead to match a specific training budget, e.g. for a fast/partial preview.
-- `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `<benchmark_dir>/<preset's own output subdir>/pipeline`.
+- `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `pipeline/` inside the checkpoint's own run directory when that is under `runs/`, else `runs/<benchmark>-<preset>/pipeline`.
 - `--use_docker`: run the external tools from their official Docker images instead of local installs - no matching toolchain needed on the host. DREAMPlace comes from `limbo018/dreamplace:cuda` (cloned and built into `--dreamplace_root` automatically on first use, a few minutes, one time only); OpenROAD from the pinned `openroad/orfs` image named in `placax_tools/openroad/docker.py` (pull it once with `docker pull`; it is never pulled implicitly).
 - `--validator`: measure real PPA once the cells are placed, e.g. `openroad` or `openroad:route=global`. Written *into* the run's config - so into the manifest and the hash beside the result - rather than applied on the side.
 - `--openroad_binary`: the OpenROAD executable when not using Docker; default `openroad`. A property of the machine, never hashed.

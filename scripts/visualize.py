@@ -39,7 +39,7 @@ def _parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--run_dir", type=pathlib.Path, default=None,
-        help="Directory holding checkpoint.bin/training_log.jsonl (default: <benchmark_dir>/<preset default>).",
+        help="Directory holding checkpoint.bin/training_log.jsonl (default: runs/<benchmark>-<preset>, newest seed).",
     )
     parser.add_argument(
         "--output_dir", type=pathlib.Path, default=None, help="Where to write images (default: --run_dir).",
@@ -47,8 +47,8 @@ def _parse_args(argv: list[str]):
     parser.add_argument("--gif", action="store_true", help="Also render a placement-progress GIF (one extra rollout).")
     args = parser.parse_args(argv[1:])
 
-    # find_run_dir handles both layouts: a pre-seed run directory, or the newest
-    # <subdir>/seed<N> one. --run_dir names a run exactly.
+    # find_run_dir handles both layouts: a run root holding a manifest, or its newest seed<N>
+    # directory. --run_dir names a run exactly.
     run_dir = args.run_dir or find_run_dir(args.preset, args.benchmark_dir)
     args.run_dir = run_dir
     args.output_dir = args.output_dir or run_dir

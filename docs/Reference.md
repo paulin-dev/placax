@@ -248,6 +248,6 @@ experiment while its config claims otherwise.
   goes in the component's own kwargs, where it is hashed.
 - **One output directory holds one run.** Resume is keyed on the directory, so a second config
   pointed at an existing one is refused. Raising a budget continues the same run; a different
-  seed, reward, agent or design does not. Defaults are per run: `<benchmark_dir>/output/seed0`.
+  seed, reward, agent or design does not. Defaults are per run: `runs/<benchmark>-training/seed0`.
 - **`env_steps` is sample-matched, not compute-matched.** `gradient_steps` is reported separately.
 - `JAX_ENABLE_X64=1` is set deliberately (`placax/_device.py`) and roughly doubles memory.

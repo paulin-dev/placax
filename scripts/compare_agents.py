@@ -41,7 +41,7 @@ from placax_agents.experiment.build import build, build_benchmark
 from placax_agents.experiment.config import (
     AgentSpec, ExperimentConfig, Spec, assert_comparable,
 )
-from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset
+from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset, comparison_dir
 from placax_agents.experiment.run import (
     METRICS, best_orientations, run_experiment, score,
 )
@@ -130,7 +130,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "the die extent, which puts ~15%% of cells outside the placeable area.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where each run's manifest, log and checkpoints go; one subdirectory "
-                             "per agent and seed. Default: <benchmark_dir>/comparison.")
+                             "per agent and seed. Default: runs/<benchmark>-comparison "
+                             "(runs/suite-comparison/<benchmark> for several designs).")
     parser.add_argument("--eval_every", type=int, default=0,
                         help="Periodic mid-run eval (default: %(default)s, off - the final "
                              "placement is scored regardless). Note an eval rollout is charged "
@@ -434,6 +435,14 @@ def _write_results(path: pathlib.Path, by_design: dict[str, dict[str, list[dict]
     return path
 
 
+def _results_root(args) -> pathlib.Path:
+    """Where the results table goes: --output_dir, else a directory under runs/."""
+    if args.output_dir is not None:
+        return args.output_dir
+    single = len(args.benchmark_dirs) == 1
+    return comparison_dir(args.benchmark_dirs[0] if single else None)
+
+
 def _run_design(benchmark_dir, args, budget, agents, on_result=None
                 ) -> tuple[ExperimentConfig, dict, pathlib.Path]:
     """Every agent x seed on ONE design, sharing one loaded netlist and one asserted environment.
@@ -446,8 +455,8 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
     reference = _with_overrides(build_preset(args.preset, benchmark_dir, budget=budget), args)
     configs = build_comparison(reference, agents, args.seeds, args.population, args.level,
                                args.agent_kwargs, args.agent_environment)
-    output_root = (args.output_dir or (benchmark_dir / "comparison"))
-    if len(args.benchmark_dirs) > 1 and args.output_dir is not None:
+    output_root = _results_root(args)
+    if len(args.benchmark_dirs) > 1:
         output_root = output_root / benchmark_dir.name
 
     Log.info(f"{benchmark_dir.name}: {len(agents)} agents x {args.seeds} seed(s)")
@@ -528,7 +537,7 @@ def main() -> None:
     by_design: dict[str, dict[str, list[dict]]] = {}
     resolved: dict[str, ExperimentConfig] = {}
     roots = []
-    results_root = args.output_dir or (args.benchmark_dirs[0] / "comparison")
+    results_root = _results_root(args)
 
     def checkpoint_results(design: str, config: ExperimentConfig, results: dict) -> None:
         """Write the results file after every finished run, not only after the last one."""

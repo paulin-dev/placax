@@ -56,7 +56,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Load an ExperimentConfig JSON instead of building one from the flags.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where the manifest, log and checkpoints go (default: "
-                             "<benchmark_dir>/output).")
+                             "runs/<benchmark>-training/seed<N>).")
     return parser.parse_args(argv[1:])
 
 

@@ -58,6 +58,8 @@ cover/
 
 # Django stuff:
 *.log
+# ...except real tool logs kept as test fixtures (tests/fixtures/openroad/).
+!tests/fixtures/**/*.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -224,12 +226,6 @@ __marimo__/
 
 # Claude
 .claude/
-
-# Benchmark run outputs (checkpoints, training logs, generated placement images) - keeps
-# already-committed benchmark data (.nodes/.nets/.pl/.scl/.wts/.aux, netlist.pb.txt) tracked
-# as-is, since gitignore only affects untracked files, while stopping every training/eval
-# run's own output* directory from ever being added.
-benchmarks/*/output*/
 
 # DREAMPlace itself - cloned + built on first use by placax_tools/dreamplace/docker.py, a full
 # external repo (with its own git history and submodules) and compiled build output, never ours

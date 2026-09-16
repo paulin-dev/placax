@@ -459,6 +459,20 @@ def test_the_default_output_directory_is_per_run_not_per_preset(tmp_path) -> Non
     assert default_output_dir("maskplace", tmp_path, 42).name == "seed42"
 
 
+def test_every_default_output_lives_under_runs_not_under_the_benchmark() -> None:
+    # Outputs used to land inside benchmarks/<design>/output*, mixing inputs with results.
+    from placax_agents.experiment.presets import (
+        RUNS_DIR, comparison_dir, default_output_dir, find_run_dir,
+    )
+
+    bench = "benchmarks/adaptec1"
+    assert default_output_dir("maskplace", bench, 0) == RUNS_DIR / "adaptec1-maskplace" / "seed0"
+    assert default_output_dir("training", bench, 1) == RUNS_DIR / "adaptec1-training" / "seed1"
+    assert comparison_dir(bench) == RUNS_DIR / "adaptec1-comparison"
+    assert comparison_dir() == RUNS_DIR / "suite-comparison"
+    assert find_run_dir("maskplace", bench, runs_dir="/nowhere") == pathlib.Path("/nowhere/adaptec1-maskplace")
+
+
 # --------------------------------------------------------------------- the physical stack
 
 

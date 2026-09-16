@@ -1,0 +1,15 @@
+[INFO ODB-0227] LEF file: /tmp/orfs_probe/tiny/out/s.lef, created 1 layers, 5 library cells
+[INFO ODB-0127] Reading DEF file: /tmp/orfs_probe/tiny/out/s.def
+[INFO ODB-0128] Design: s
+[INFO ODB-0131]     Created 5 components and 7 component-terminals.
+[INFO ODB-0133]     Created 3 nets and 7 connections.
+[INFO ODB-0134] Finished DEF file: /tmp/orfs_probe/tiny/out/s.def
+PLACAX_METRIC tool_version 26Q3-2130-g90e29809c3
+PLACAX_METRIC design_area_um2 2096.0000401970547
+PLACAX_METRIC utilization 0.21833333333333335
+PLACAX_METRIC placement_legal 1
+PLACAX_METRIC hpwl_um 184.5
+[ERROR GRT-0701] Missing track structure for routing layers.
+[ERROR GRT-0701] Missing track structure for routing layers.
+PLACAX_NOTE route GRT-0701
+PLACAX_METRIC_DONE

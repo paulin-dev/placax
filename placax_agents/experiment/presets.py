@@ -173,12 +173,43 @@ def random_search(reference: ExperimentConfig, population: int = 16) -> Experime
 PRESETS = {"maskplace": maskplace, "training": training}
 """preset name -> builder(benchmark_dir, **overrides) -> ExperimentConfig."""
 
-OUTPUT_SUBDIRS = {"maskplace": "output_maskplace", "training": "output"}
-"""Where each preset's runs write by default, under the benchmark directory."""
+RUNS_DIR = pathlib.Path("runs")
+"""Where every script writes by default: training runs, comparisons, pipelines, validations.
+
+One root, outside `benchmarks/`. Outputs used to land inside the benchmark they were run on
+(`benchmarks/adaptec1/output_maskplace/...`), which mixed downloaded inputs with generated results
+and needed a second ignore rule. Relative, like the scripts' `benchmarks/` default, so it resolves
+against the directory the scripts run from."""
+
+OUTPUT_SUBDIRS = {"maskplace": "maskplace", "training": "training"}
+"""Each preset's suffix in its default run name, `<benchmark>-<suffix>`."""
 
 
-def default_output_dir(preset: str, benchmark_dir: pathlib.Path | str, seed: int) -> pathlib.Path:
-    """`<benchmark_dir>/<preset subdir>/seed<N>` - one directory per RUN, not per preset.
+def _runs(runs_dir: pathlib.Path | str | None) -> pathlib.Path:
+    # Read at call time, so a test can point RUNS_DIR somewhere else.
+    return pathlib.Path(RUNS_DIR if runs_dir is None else runs_dir)
+
+
+def run_root(
+    preset: str, benchmark_dir: pathlib.Path | str, runs_dir: pathlib.Path | str | None = None
+) -> pathlib.Path:
+    """`runs/<benchmark>-<preset>` - where one preset's runs on one design live."""
+    return _runs(runs_dir) / f"{pathlib.Path(benchmark_dir).name}-{OUTPUT_SUBDIRS[preset]}"
+
+
+def comparison_dir(
+    benchmark_dir: pathlib.Path | str | None = None, runs_dir: pathlib.Path | str | None = None
+) -> pathlib.Path:
+    """`runs/<benchmark>-comparison`, or `runs/suite-comparison` for a multi-design suite."""
+    name = pathlib.Path(benchmark_dir).name if benchmark_dir is not None else "suite"
+    return _runs(runs_dir) / f"{name}-comparison"
+
+
+def default_output_dir(
+    preset: str, benchmark_dir: pathlib.Path | str, seed: int,
+    runs_dir: pathlib.Path | str | None = None,
+) -> pathlib.Path:
+    """`runs/<benchmark>-<preset>/seed<N>` - one directory per RUN, not per preset.
 
     The seed is in the path because a different seed is a different run: it produces different
     weights, a different budget spend and a different `full_hash`. While the default was per
@@ -187,18 +218,20 @@ def default_output_dir(preset: str, benchmark_dir: pathlib.Path | str, seed: int
     overwrote its manifest. `run_experiment` now refuses that outright; this is what keeps the
     refusal from firing on the ordinary workflow.
     """
-    return pathlib.Path(benchmark_dir) / OUTPUT_SUBDIRS[preset] / f"seed{seed}"
+    return run_root(preset, benchmark_dir, runs_dir) / f"seed{seed}"
 
 
-def find_run_dir(preset: str, benchmark_dir: pathlib.Path | str) -> pathlib.Path:
-    """A run directory for `preset` under `benchmark_dir`, for the scripts that RELOAD one.
+def find_run_dir(
+    preset: str, benchmark_dir: pathlib.Path | str, runs_dir: pathlib.Path | str | None = None
+) -> pathlib.Path:
+    """A run directory for `preset` on `benchmark_dir`, for the scripts that RELOAD one.
 
-    Prefers the pre-seed layout (`<subdir>` holding a manifest directly) so runs produced before
-    `default_output_dir` existed keep loading, then the most recently written `seed*` directory.
-    Falls back to the bare subdirectory so a "not found" error names the place someone would look.
-    This is a convenience for the default; `--config`/`--checkpoint` name a run exactly.
+    Prefers a run root holding a manifest directly (`runs/adaptec1-maskplace`, as an explicit
+    `--output_dir` writes it), then the most recently written `seed*` directory under it. Falls
+    back to the bare root so a "not found" error names the place someone would look. This is a
+    convenience for the default; `--config`/`--checkpoint` name a run exactly.
     """
-    root = pathlib.Path(benchmark_dir) / OUTPUT_SUBDIRS[preset]
+    root = run_root(preset, benchmark_dir, runs_dir)
     if (root / "manifest.json").exists():
         return root
     seeded = sorted(

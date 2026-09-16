@@ -168,7 +168,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "paths) is then ignored, so the run is exactly the recorded one.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where the manifest, log and checkpoints go (default: "
-                             "<benchmark_dir>/output_maskplace).")
+                             "runs/<benchmark>-maskplace/seed<N>).")
     return parser.parse_args(argv[1:])
 
 

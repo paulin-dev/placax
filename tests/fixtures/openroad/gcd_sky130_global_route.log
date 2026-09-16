@@ -1,0 +1,66 @@
+[INFO ODB-0227] LEF file: /OpenROAD-flow-scripts/flow/platforms/sky130hd/lef/sky130_fd_sc_hd.tlef, created 13 layers, 25 vias
+[INFO ODB-0227] LEF file: /OpenROAD-flow-scripts/flow/platforms/sky130hd/lef/sky130_fd_sc_hd_merged.lef, created 441 library cells
+[INFO ODB-0127] Reading DEF file: /OpenROAD-flow-scripts/flow/tutorials/scripts/drt/gcd/4_cts.def
+[INFO ODB-0128] Design: gcd
+[INFO ODB-0130]     Created 54 pins.
+[INFO ODB-0131]     Created 9135 components and 36024 component-terminals.
+[INFO ODB-0132]     Created 2 special nets and 34794 connections.
+[INFO ODB-0133]     Created 406 nets and 1230 connections.
+[INFO ODB-0134] Finished DEF file: /OpenROAD-flow-scripts/flow/tutorials/scripts/drt/gcd/4_cts.def
+PLACAX_METRIC tool_version 26Q3-2130-g90e29809c3
+PLACAX_METRIC design_area_um2 4987.283030999379
+PLACAX_METRIC utilization 0.07439343038447167
+PLACAX_METRIC placement_legal 1
+PLACAX_METRIC hpwl_um 27629.352
+PLACAX_METRIC worst_slack 1.4972312702317336
+PLACAX_METRIC total_negative_slack 0.0
+[INFO GRT-0020] Min routing layer: met1
+[INFO GRT-0021] Max routing layer: met5
+[INFO GRT-0022] Global adjustment: 0%
+[INFO GRT-0023] Grid origin: (0, 0)
+[INFO GRT-0088] Layer li1     Track-Pitch = 0.4600  line-2-Via Pitch: 0.3400
+[INFO GRT-0088] Layer met1    Track-Pitch = 0.3400  line-2-Via Pitch: 0.3400
+[INFO GRT-0088] Layer met2    Track-Pitch = 0.4600  line-2-Via Pitch: 0.3500
+[INFO GRT-0088] Layer met3    Track-Pitch = 0.6800  line-2-Via Pitch: 0.6150
+[INFO GRT-0088] Layer met4    Track-Pitch = 0.9200  line-2-Via Pitch: 1.0400
+[INFO GRT-0088] Layer met5    Track-Pitch = 3.4000  line-2-Via Pitch: 3.1100
+[INFO GRT-0003] Macros: 0
+[INFO GRT-0004] Blockages: 685
+[INFO GRT-0019] Found 8 clock nets.
+[INFO GRT-0001] Minimum degree: 2
+[INFO GRT-0002] Maximum degree: 63
+
+[INFO GRT-0053] Routing resources analysis:
+          Routing      Original      Derated      Resource
+Layer     Direction    Resources     Resources    Reduction (%)
+---------------------------------------------------------------
+li1        Vertical            0             0          0.00%
+met1       Horizontal      26180         26180          0.00%
+met2       Vertical        20711         20711          0.00%
+met3       Horizontal      15336         15336          0.00%
+met4       Vertical        10184         10184          0.00%
+met5       Horizontal       2362          2362          0.00%
+---------------------------------------------------------------
+
+[INFO GRT-0197] Via related to pin nodes: 2442
+[INFO GRT-0198] Via related Steiner nodes: 108
+[INFO GRT-0199] Via filling finished.
+[INFO GRT-0111] Final number of vias: 3370
+[INFO GRT-0112] Final usage 3D: 14508
+
+[INFO GRT-0096] Final congestion report:
+Layer         Resource        Demand        Usage (%)    Max H / Max V / Total Congestion
+---------------------------------------------------------------------------------------
+li1                  0             0            0.00%             0 /  0 /  0
+met1             26180          2250            8.59%             0 /  0 /  0
+met2             20711          2050            9.90%             0 /  0 /  0
+met3             15336            46            0.30%             0 /  0 /  0
+met4             10184            52            0.51%             0 /  0 /  0
+met5              2362             0            0.00%             0 /  0 /  0
+---------------------------------------------------------------------------------------
+Total            74773          4398            5.88%             0 /  0 /  0
+
+[INFO GRT-0018] Total wirelength: 40206 um
+[INFO GRT-0014] Routed nets: 406
+[INFO GRT-0303] Global routing runtime = 00:00:00
+PLACAX_METRIC_DONE
