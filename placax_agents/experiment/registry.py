@@ -617,12 +617,14 @@ def _validator_openroad(
     wire_rc_layer: str = "metal3",
     clock_name: str = "core_clock",
     route: str | None = None,
+    clock_port: str = "clk",
     **kwargs,
 ):
     """OpenROAD, with everything that changes the measurement named here and therefore hashed.
 
-    Timing needs `liberty_path` and `clock_period_ns`; `route` decides whether routed wirelength
-    and DRC are measured at all. All four are properties of the EXPERIMENT - two PPA numbers taken
+    Timing needs `liberty_path` and `clock_period_ns`, and the clock goes on `clock_port` - the old
+    script declared every port a clock. `route` decides whether routed wirelength and DRC are
+    measured at all. All four are properties of the EXPERIMENT - two PPA numbers taken
     at different routing depths are not the same measurement - so they belong in the Spec and in
     the hash, while `openroad_binary` arrives through **kwargs as a property of this host.
     """
@@ -630,7 +632,8 @@ def _validator_openroad(
 
     return OpenROADValidator(
         liberty_path=liberty_path, clock_period_ns=clock_period_ns,
-        wire_rc_layer=wire_rc_layer, clock_name=clock_name, route=route, **kwargs
+        wire_rc_layer=wire_rc_layer, clock_name=clock_name, route=route, clock_port=clock_port,
+        **kwargs
     )
 
 

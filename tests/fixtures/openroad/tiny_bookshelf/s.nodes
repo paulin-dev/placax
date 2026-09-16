@@ -1,0 +1,9 @@
+UCLA nodes 1.0
+NumNodes : 5
+NumTerminals : 2
+
+  macro_a 40 20 terminal
+  macro_b 20 60 terminal
+  cell_x 2 12
+  cell_y 2 12
+  cell_z 4 12

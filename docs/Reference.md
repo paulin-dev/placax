@@ -112,6 +112,13 @@ Everything below is named in a config as `Spec("<key>", {...kwargs})` and is **h
 Plus two non-registry environment fields: `benchmark.canvas` (`die` or `core`) and
 `benchmark.macro_budget`. `agent.algorithm` for `ppo` also takes `value_loss` (`mse`, `huber`).
 
+`openroad` takes `route` (`None`, `global`, `detailed`), `liberty_path`, `clock_period_ns`,
+`clock_port`, `clock_name` and `wire_rc_layer` - all hashed, since each changes the measurement.
+`openroad_binary`, `use_docker` and `docker_image` arrive as machine parameters and are not. Its
+`PPAResult` carries `design_area`, `utilization_pct`, `placement_legal`, `hpwl`, `timing_slack`,
+`total_negative_slack`, `routed_wirelength`, `via_count`, `drc_violations`, `tool_version` and
+`notes` (what was asked for and could not run, with the tool's reason); unmeasured fields are None.
+
 **Which agent drives which action space.** `local_search` requires `perturbation`; `shac` requires
 `continuous`; `genetic` drives `discrete_grid` or `oriented_grid`; PPO drives whatever its POLICY
 declares - every shipped
@@ -183,7 +190,7 @@ One directory per run under `runs/`. A comparison writes one subdirectory per `(
 | `scripts/run_training.py` | trains the plain-CNN preset |
 | `scripts/run_maskplace.py` | trains the MaskPlace-equivalent preset |
 | `scripts/compare_agents.py` | several agents, one environment, one budget, one table (`--benchmark_dirs` for a suite; `--level=paradigm` plus `--agent_environment` to put a constructive agent and a perturbation one in one table) |
-| `scripts/run_pipeline.py` | a trained checkpoint to macro placement to DREAMPlace |
+| `scripts/run_pipeline.py` | a trained checkpoint to macro placement to DREAMPlace to OpenROAD (`--validator`) |
 | `scripts/validate_design.py` | the physical flow on a macro-placed DEF |
 | `scripts/place_once.py` | one greedy rollout from a checkpoint |
 | `scripts/visualize.py` | curves, placement images, observation channels, rollout GIF |

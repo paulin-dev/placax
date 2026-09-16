@@ -1,10 +1,9 @@
 """place_and_validate: the composition the design document described for a year without it existing.
 
 Every test here uses stand-in tools rather than DREAMPlace and OpenROAD, which is the point being
-tested - the composition must not know or care which tools it is driving. The real OpenROAD
-invocation is covered separately by tests/test_validator.py's script-building and output-parsing
-tests; neither OpenROAD nor a DEF/LEF design is available in this repo, so an end-to-end run
-against the real binary is NOT verified here.
+tested - the composition must not know or care which tools it is driving. The real OpenROAD is
+covered elsewhere: tests/test_validator.py parses logs captured from it, and
+tests/test_openroad_docker.py runs it on a converted Bookshelf design when its image is present.
 """
 import pathlib
 

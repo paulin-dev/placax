@@ -118,7 +118,10 @@ def write_lef(library: CellLibrary, rows: PlacementRows | None) -> str:
         "UNITS",
         f"  DATABASE MICRONS {DB_UNITS_PER_MICRON} ;",
         "END UNITS",
-        f"MANUFACTUREGRID {1.0 / DB_UNITS_PER_MICRON} ;",
+        # MANUFACTURINGGRID - not "MANUFACTUREGRID", which is what this line said until a real
+        # OpenROAD read it and discarded the entire LEF on it. This project's own LEF parser never
+        # looks at this line, which is exactly why a round trip through it could not catch that.
+        f"MANUFACTURINGGRID {1.0 / DB_UNITS_PER_MICRON} ;",
         "",
         # One routing layer, because a PIN needs a LAYER to sit on. Enough to read and place;
         # not a technology - see the module docstring.
@@ -274,6 +277,13 @@ def export_bookshelf_as_def(
     macro-only (and possibly truncated by a macro budget), and a DEF that dropped the standard
     cells would describe a die containing no logic. What the agent placed comes in through
     `placement`; everything else comes from the netlist on disk.
+
+    **Every terminal is FIXED unless `fixed` says otherwise**, and a terminal missing from
+    `placement` keeps its position from the design's own `.pl`. Bookshelf terminals are immovable
+    by definition. Before this, a run with a macro budget exported the macros it did not place as
+    UNPLACED, so a cell placer was free to move them; and the pipeline, which passes the agent's
+    macros as `fixed`, wrote the rest as PLACED, where real OpenROAD checks them as if they were
+    standard cells (415 DPL-0404 warnings and 29 padding failures on adaptec1).
     """
     from placax.netlist.rows import load_placement_rows
 
@@ -287,6 +297,19 @@ def export_bookshelf_as_def(
     from placax.netlist.bookshelf import parse_nodes
 
     macro_names = set(parse_nodes(benchmark_dir / f"{design}.nodes"))
+    unplaced_terminals = macro_names - set(placement)
+    pl_path = benchmark_dir / f"{design}.pl"
+    if unplaced_terminals and pl_path.exists():
+        from placax.netlist.bookshelf import parse_pl_positions
+
+        design_positions = parse_pl_positions(pl_path)
+        placement = {
+            **{name: design_positions[name][:2] for name in unplaced_terminals
+               if name in design_positions},
+            **placement,
+        }
+    if fixed is None:
+        fixed = macro_names
 
     library = CellLibrary(sizes, collect_pin_offsets(nets), macro_names)
     rows = load_placement_rows(benchmark_dir)

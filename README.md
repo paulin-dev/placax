@@ -440,10 +440,14 @@ Prints `RESULT=<largest value that worked>` - pass that as `--n_episodes` to the
 
 Loads an already-trained checkpoint (no training happens here) and runs the full production flow: the RL
 policy places every macro, then [DREAMPlace](https://github.com/limbo018/DREAMPlace) places every
-remaining standard cell around them. OpenROAD validation isn't wired up yet.
+remaining standard cell around them, and - with `--validator=openroad` - the finished design is
+converted to DEF/LEF and measured by a real [OpenROAD](https://github.com/The-OpenROAD-Project/OpenROAD).
 
 ```sh
-python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=benchmarks/adaptec1/output_maskplace/best_checkpoint.bin --use_docker
+python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 \
+    --config=runs/adaptec1-maskplace-m128/manifest.json \
+    --checkpoint=runs/adaptec1-maskplace-m128/best_checkpoint.bin \
+    --use_docker --gpu --validator=openroad
 ```
 
 - `--benchmark_dir`: path to a downloaded Bookshelf benchmark (only format supported so far); default `benchmarks/adaptec1`.
@@ -452,7 +456,9 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 - `--checkpoint`: bare-weights or full training-state checkpoint to load (auto-detected from its contents, not its filename); defaults to `<benchmark_dir>/<preset's own output subdir>/best_checkpoint.bin` if it exists, else `.../checkpoint.bin`.
 - `--macro_budget`: default `all` - every macro placed, the production default. Neither shipped preset's network has any architectural dependence on macro count, so a checkpoint trained with any budget (e.g. MaskPlace's own default of 128) still loads and places every macro with no shape mismatch and no retraining. Pass an integer instead to match a specific training budget, e.g. for a fast/partial preview.
 - `--output_dir`: where every output (placement PNGs, the DREAMPlace `.pl`/`.aux`/config, its result) is written; defaults to `<benchmark_dir>/<preset's own output subdir>/pipeline`.
-- `--use_docker`: run DREAMPlace via its official Docker image (`limbo018/dreamplace:cuda`) instead of a local checkout - no matching GCC/Boost/Bison/Flex/CMake/PyTorch toolchain needed on the host. Clones and builds DREAMPlace into `--dreamplace_root` automatically on first use (a few minutes, one time only).
+- `--use_docker`: run the external tools from their official Docker images instead of local installs - no matching toolchain needed on the host. DREAMPlace comes from `limbo018/dreamplace:cuda` (cloned and built into `--dreamplace_root` automatically on first use, a few minutes, one time only); OpenROAD from the pinned `openroad/orfs` image named in `placax_tools/openroad/docker.py` (pull it once with `docker pull`; it is never pulled implicitly).
+- `--validator`: measure real PPA once the cells are placed, e.g. `openroad` or `openroad:route=global`. Written *into* the run's config - so into the manifest and the hash beside the result - rather than applied on the side.
+- `--openroad_binary`: the OpenROAD executable when not using Docker; default `openroad`. A property of the machine, never hashed.
 - `--dreamplace_root`: path to a DREAMPlace checkout. Defaults to `placax_tools/dreamplace/DREAMPlace` with `--use_docker` (auto-cloned/built there); if omitted with no `--use_docker` either, the pipeline stops after macro placement and just writes the Bookshelf files DREAMPlace would need.
 - `--gpu`: run DREAMPlace on GPU.
 - `--target_density`: DREAMPlace's target placement density; default `1.0`.
@@ -461,7 +467,7 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 --checkpoint=
 - `--viz_resolution`: bin resolution for `full_placement.png`'s cell-density raster; default `1024`.
 - `--nets_sample_fraction` / `--nets_seed`: randomly keep only this fraction of macro-to-macro nets in `macros_with_nets.png` (MaskPlace's own convention for a denser netlist); default `1.0` (every net).
 
-Writes `macros_placed.png` and `macros_with_nets.png` (macro-only, always) plus, once DREAMPlace succeeds, `full_placement.png` (every macro and every cell) and the placed design itself at `<output_dir>/<design_name>/<design_name>.gp.pl`. Prints two HPWL numbers: `real_hpwl` (macro-to-macro nets only, the RL reward's own scope) and `full_hpwl` (every net, macros and cells, from the actual final placement) - both are geometric (half-perimeter) proxies, not a routed wirelength; that needs OpenROAD.
+Writes `macros_placed.png` and `macros_with_nets.png` (macro-only, always) plus, once DREAMPlace succeeds, `full_placement.png` (every macro and every cell) and the placed design itself at `<output_dir>/<design_name>/<design_name>.gp.pl`. Prints two HPWL numbers: `real_hpwl` (macro-to-macro nets only, the RL reward's own scope) and `full_hpwl` (every net, macros and cells, from the actual final placement) - both are geometric (half-perimeter) proxies. With `--validator`, the converted design lands in `<output_dir>/validate/` (DEF, derived LEF, the Tcl script and OpenROAD's full log) and the measurement in `<output_dir>/ppa.json`, carrying the run's `full_hash` and OpenROAD's own version string.
 
 Run `python -m scripts.run_pipeline --help` for the full flag list.
 
@@ -503,18 +509,42 @@ any run.
 long time none of the designs that ship here could be pushed through the physical flow at all -
 the box was configured, hashed, documented and structurally unreachable.
 `placax/netlist/def_export.py` is the conversion: it writes the **whole** netlist as DEF/LEF, with
-the agent's macros `FIXED` and the standard cells `UNPLACED` for the cell placer, and derives the
+every macro `FIXED` (a macro budget's unplaced ones where the design put them) and the standard cells `UNPLACED` for the cell placer, and derives the
 cell library Bookshelf does not carry. On adaptec1 that is 211,447 instances and 216,932 nets in
 5.6s, and the library collapses to **520 cell types** because only that many distinct
 (size + pin-offset) geometries exist. `scripts/run_pipeline.py` closes the loop end to end: RL
 macros, DREAMPlace cells, conversion, validator, `ppa.json`.
 
-**Still not verified against a real binary.** OpenROAD is not a dependency and has never been run
-against these files - what is verified is that the design round-trips through this project's own
-DEF/LEF parsers with its geometry, placement and connectivity intact, which catches a converter's
-real failure modes (a pin offset measured from the wrong corner, a unit scale applied twice, a
-macro dropped) but says nothing about whether OpenROAD accepts the file. And the generated LEF is
-deliberately **not a technology**: one routing layer, a site matching the design's own rows, no via
-rules and no timing library. That supports reading, placing, area and utilization; a routed
-wirelength or a DRC count taken against it would be a number about that file rather than about a
-chip.
+**Verified against a real OpenROAD** - the pinned ORFS image, run through Docker exactly like
+DREAMPlace (`placax_tools/openroad/docker.py`, `--use_docker`). On the image's own sky130 `gcd`
+design the validator's full-design HPWL agrees with OpenROAD's detailed placer (27,629.35 vs
+27,629.4 um), and a detailed route reports 31,290 um, 3,218 vias and 0 DRC. On adaptec1, the whole
+pipeline (128 RL macros, DREAMPlace for the rest, conversion, OpenROAD) writes:
+
+| metric | adaptec1, `runs/adaptec1-maskplace-m128/pipeline/ppa.json` |
+|---|---|
+| full-design HPWL | 91,853,659 um - identical to this project's own computation |
+| design area / utilization | 101,380,283 um^2 / 88.78 % |
+| placement legal | False - 5,728 one-site gaps, and nothing else |
+| slack, routed wirelength, DRC | not measured, with the reason in `notes` |
+
+Read the legality line carefully. The one-site-gap rule (never leave exactly one empty site
+between two cells) belongs to advanced nodes. ISPD 2005 never had it, and DREAMPlace's legalizer
+doesn't enforce it, so this is the benchmark meeting a stricter rulebook, not an overlap. The
+verdict stays OpenROAD's, and `placement_violations` says which rules it was about.
+
+The generated LEF is deliberately **not a technology**: one routing layer, a site matching the
+design's own rows, no via rules and no timing library. That supports reading, legality, area,
+utilization and HPWL. Routing stops at `GRT-0701 Missing track structure`, and timing needs a
+liberty the benchmark doesn't have. Those come back as None with the tool's reason, never as a
+number about that file rather than about a chip. Routed wirelength, DRC and slack are real on a
+design built in a real PDK, which the image carries:
+
+```sh
+python -m scripts.validate_design --use_docker --skip_cell_placement \
+    --def_path=/OpenROAD-flow-scripts/flow/tutorials/scripts/drt/gcd/4_cts.def \
+    --lef=/OpenROAD-flow-scripts/flow/platforms/sky130hd/lef/sky130_fd_sc_hd.tlef \
+    --lef=/OpenROAD-flow-scripts/flow/platforms/sky130hd/lef/sky130_fd_sc_hd_merged.lef \
+    --liberty=/OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib \
+    --clock_period_ns=10 --wire_rc_layer=met2 --route=detailed
+```

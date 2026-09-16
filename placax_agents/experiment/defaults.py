@@ -50,7 +50,7 @@ them."""
 
 MACHINE_PARAMS = frozenset({
     "dreamplace_root", "openroad_binary", "python_executable", "use_docker", "gpu",
-    "extra_mounts", "extra_config",
+    "extra_mounts", "extra_config", "docker_image",
 })
 """Where a tool lives and how this host runs it - never part of an experiment's identity.
 

@@ -22,12 +22,13 @@ could only be pointed at a DEF someone had produced by hand, because nothing in 
 converted a placement into one - the flow was configured and hashed but structurally unreachable
 from a run.
 
-**Still not verified end to end.** No DEF/LEF design ships with this repo and OpenROAD is not a
-dependency, so the real binaries have never been driven through this path - the composition, the
-export, the TCL generation and the output parsing all have tests, but the numbers themselves are
-unproven. The Bookshelf benchmarks under `benchmarks/` still cannot reach the validator, since
-OpenROAD reads no Bookshelf; their placements export to `.pl`/`.aux` for DREAMPlace instead.
-That is stated here rather than left for a reader to discover.
+**Driven end to end through a real OpenROAD** (the pinned ORFS image - see
+`placax_tools/openroad/docker.py`). On a real sky130 design the validator's full-design HPWL agrees
+with OpenROAD's own detailed placer to 0.05 um; on a converted Bookshelf design it agrees with a
+hand calculation exactly. Bookshelf benchmarks reach it through `netlist/def_export.py`, which
+converts the whole netlist. What a converted design can NOT give is a routed wirelength or a
+timing number: its derived technology has one layer and no timing library, so those come back None
+with the tool's reason in `notes` - a Bookshelf benchmark carries no process to measure against.
 """
 import dataclasses
 import json
@@ -63,6 +64,24 @@ class PhysicalResult:
     every HPWL in this project is a proxy FOR, and DRC is where a placement with excellent
     wirelength is found to be unroutable - so a PPA record that cannot carry them cannot answer
     the question the proxy was standing in for."""
+
+    hpwl: float | None = None
+    """Full-design half-perimeter wirelength in microns, measured by the validator - every signal
+    net, standard cells included. What `real_hpwl` in a training log is a macro-only proxy for."""
+
+    placement_legal: bool | None = None
+    """The validator's own placement checker's verdict on the measured design."""
+
+    placement_violations: dict[str, int] = dataclasses.field(default_factory=dict)
+    """The checker's failed rules with their counts - what `placement_legal=False` was about."""
+
+    total_negative_slack: float | None = None
+    tool_version: str | None = None
+    """The validator's self-reported version. Numbers change between releases, so a PPA figure
+    without this cannot be reproduced."""
+
+    notes: list[str] = dataclasses.field(default_factory=list)
+    """Measurements that were asked for and could not run, each with the tool's reason."""
 
     legalizer: str | None = None
     max_displacement: float = 0.0
@@ -135,6 +154,12 @@ def evaluate_physical(
         routed_wirelength=ppa.routed_wirelength,
         via_count=ppa.via_count,
         drc_violations=ppa.drc_violations,
+        hpwl=ppa.hpwl,
+        placement_legal=ppa.placement_legal,
+        placement_violations=dict(ppa.placement_violations),
+        total_negative_slack=ppa.total_negative_slack,
+        tool_version=ppa.tool_version,
+        notes=list(ppa.notes),
     )
 
 

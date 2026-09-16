@@ -6,6 +6,7 @@ That last step is why placax/netlist/def_export.py exists. OpenROAD reads no Boo
 benchmarks that ship here could not reach a validator at all: the box was configured, hashed and
 documented, and no design in the repository could be pushed through it."""
 import argparse
+import dataclasses
 import json
 import os
 import pathlib
@@ -17,8 +18,11 @@ from placax.core import reset
 from placax.log import Log
 from placax.extras.mst import hpwl_wirelength
 from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
+from placax.netlist.def_export import export_bookshelf_as_def
 from placax_agents.experiment.build import build
+from placax_agents.experiment.config import Spec
 from placax_agents.experiment.export import write_placement
+from placax_agents.experiment.physical import evaluate_physical, write_ppa
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, find_run_dir
 from placax_agents.experiment.run import write_manifest
 from scripts.presets import config_for
@@ -74,11 +78,21 @@ def _parse_args(argv: list[str]):
     )
     parser.add_argument(
         "--use_docker", action="store_true",
-        help="Run DREAMPlace via its official Docker image (limbo018/dreamplace:cuda) instead of a "
-             "local checkout - no matching GCC/Boost/Bison/Flex/CMake/PyTorch toolchain needed on the "
-             "host. Clones + builds DREAMPlace into --dreamplace_root automatically on first use.",
+        help="Run the external tools from their official Docker images instead of local installs: "
+             "DREAMPlace from limbo018/dreamplace:cuda (cloned + built into --dreamplace_root on "
+             "first use) and OpenROAD from the pinned openroad/orfs image. Neither toolchain has to "
+             "exist on the host.",
     )
     parser.add_argument("--gpu", action="store_true", help="Run DREAMPlace on GPU.")
+    parser.add_argument("--validator", default=None,
+                        help="Measure real PPA with this validator, as 'name' or "
+                             "'name:key=value,...' - e.g. 'openroad' or 'openroad:route=global'. "
+                             "Written into the run's config (so into its manifest and hash) rather "
+                             "than applied on the side, which is what makes the resulting ppa.json "
+                             "attributable. Overrides whatever validator the config names.")
+    parser.add_argument("--openroad_binary", default="openroad",
+                        help="OpenROAD executable when not using Docker (default: %(default)s). A "
+                             "property of THIS MACHINE, so deliberately not part of the config.")
     parser.add_argument("--target_density", type=float, default=1.0)
     parser.add_argument(
         "--python_executable", type=str, default="python",
@@ -186,6 +200,55 @@ def _build_cell_placer(
     )
 
 
+def _measure_ppa(built, benchmark_dir, output_dir, full_placement, machine):
+    """Converts the finished design, runs the configured validator on it, writes ppa.json.
+
+    Returns the PhysicalResult, or None when the validator could not run - in which case the
+    converted design is left on disk and the reason is logged, because a crashed measurement after
+    a successful cell placement should not throw away the placement.
+    """
+    validate_dir = output_dir / "validate"
+    # Every terminal goes out FIXED (the converter's default) - the agent's macros and the ones a
+    # macro budget left where the design put them - and DREAMPlace's cells PLACED.
+    def_path, lef_path = export_bookshelf_as_def(benchmark_dir, validate_dir, full_placement)
+    Log.info(f"converted the placed design to {def_path} (+ {lef_path.name})")
+    try:
+        ppa = evaluate_physical(
+            built, def_path, [lef_path], validate_dir,
+            # DREAMPlace already placed the cells; placing them again would measure a different
+            # placement from the one this pipeline just produced.
+            skip_cell_placement=True,
+            machine=machine,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", None) or exc
+        Log.error(f"validation failed: {detail}\nThe converted design is still at {def_path}.")
+        return None
+    ppa_path = write_ppa(output_dir, ppa)
+    Log.info(f"PPA -> {ppa_path}  (run {ppa.full_hash})")
+    return ppa
+
+
+def _print_ppa(ppa, full_hpwl: float, output_dir: pathlib.Path) -> None:
+    """The measured numbers, with a dash for anything that did not run - never a guess."""
+    def show(value, unit=""):
+        return "-" if value is None else f"{value:,.2f}{unit}"
+
+    print()
+    print(f"real PPA ({ppa.validator}, {ppa.tool_version}) -> {output_dir / 'ppa.json'}")
+    print(f"  design area        {show(ppa.design_area, ' um^2')}")
+    print(f"  utilization        {show(ppa.utilization_pct, ' %')}")
+    print(f"  placement legal    {'-' if ppa.placement_legal is None else ppa.placement_legal}")
+    for rule, count in ppa.placement_violations.items():
+        print(f"    {rule} check failed on {count:,}")
+    print(f"  full-design HPWL   {show(ppa.hpwl, ' um')}   (this script's own: {full_hpwl:,.2f})")
+    print(f"  worst slack        {show(ppa.timing_slack, ' ns')}")
+    print(f"  routed wirelength  {show(ppa.routed_wirelength, ' um')}")
+    print(f"  DRC violations     {'-' if ppa.drc_violations is None else ppa.drc_violations}")
+    for note in ppa.notes:
+        print(f"  not measured: {note}")
+
+
 def main() -> None:
     Log.configure()
     args = _parse_args(sys.argv)
@@ -217,6 +280,14 @@ def main() -> None:
     # error class ExperimentConfig removed upstream, and it survived down here far too long.
     default_subdir = OUTPUT_SUBDIRS[preset]
     config = config_for(config_path, preset, benchmark_dir, macro_budget)
+    if args.validator is not None:
+        # Into the config, not beside it: the physical stack is part of the environment, so a PPA
+        # number is attributable only if the validator that produced it is in the manifest.
+        config = dataclasses.replace(config, environment=dataclasses.replace(
+            config.environment, physical=dataclasses.replace(
+                config.environment.physical, validator=Spec.parse(args.validator)),
+        ))
+        Log.info(f"validator {args.validator!r} written into this run's config")
 
     checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, preset, checkpoint_arg)
     if not checkpoint_path.exists():
@@ -284,8 +355,7 @@ def main() -> None:
         print()
         print(f"macro placement done - pass --dreamplace_root=<path to a DREAMPlace checkout> (or "
               f"--use_docker) to also place standard cells from {new_aux_path}.")
-        print("OpenROAD validation is not run by this script yet (placax_tools/openroad/validator.py "
-              "is ready for it once this design has real LEF/DEF).")
+        print("real PPA needs the standard cells placed first, so validation is skipped too.")
         return
 
     # 6. Hand off to a CellPlacer to place every remaining standard cell around the now-fixed
@@ -334,6 +404,22 @@ def main() -> None:
     full_hpwl = hpwl_wirelength(full_centers, full_nets)
     Log.info(f"full-design HPWL ({len(full_nets)} nets, macros + cells) = {full_hpwl:.2f}")
 
+    # 9. Real PPA, when this run's config names a validator. DREAMPlace has placed every cell, so
+    # the design is complete and there is something to measure. OpenROAD reads no Bookshelf, so the
+    # finished design is converted first - every macro FIXED, DREAMPlace's cells PLACED,
+    # which is the distinction a legalizer reads - and measured with the cell library the
+    # conversion derived.
+    ppa = None
+    if built.config.environment.physical.validator is not None:
+        ppa = _measure_ppa(
+            built, benchmark_dir, output_dir,
+            {name: (float(all_positions[name][0]), float(all_positions[name][1])) for name in names},
+            machine={"openroad_binary": args.openroad_binary, "use_docker": use_docker},
+        )
+    else:
+        Log.info("no validator in this run's config, so no PPA was measured - pass "
+                 "--validator=openroad (or name one in EnvironmentSpec.physical) to close the flow.")
+
     print()
     print("pipeline complete")
     print(f"  real_hpwl(macros only, {benchmark.params.n_macros} macros, {len(benchmark.nets)} macro-macro nets) "
@@ -341,7 +427,8 @@ def main() -> None:
     print(f"  full_hpwl(macros + cells, {len(names)} nodes, {len(full_nets)} nets) = {full_hpwl:.2f}")
     print(f"full placement ({len(names)} nodes: {int(macro_mask.sum())} macros, "
           f"{int((~macro_mask).sum())} cells) written to {result_pl}")
-    print("(routed wirelength / DRC / timing need OpenROAD - not run by this script yet)")
+    if ppa is not None:
+        _print_ppa(ppa, full_hpwl, output_dir)
 
 
 if __name__ == "__main__":

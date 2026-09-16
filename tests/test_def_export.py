@@ -4,8 +4,9 @@ The physical box was configured, hashed, documented and tested, and no design th
 reach it: OpenROAD reads DEF/LEF, every benchmark here is Bookshelf or protobuf, and nothing
 converted between them. `evaluate_placement` raised.
 
-There is no OpenROAD on this machine, so what can be verified here is self-consistency rather than
-tool acceptance - and that distinction is the point of the round trip. The exporter writes the
+What is verified HERE is self-consistency rather than tool acceptance (that is
+tests/test_openroad_docker.py, against the real OpenROAD) - and self-consistency is the point of
+the round trip. The exporter writes the
 design; `netlist/lef.py` and `netlist/def_reader.py` read it back; the geometry, the placement and
 the connectivity that come back have to be the ones that went in. That catches the errors that
 actually happen in a converter - a pin offset measured from the wrong corner, a unit scale applied
@@ -297,3 +298,29 @@ def test_a_real_benchmark_converts_and_reads_back(tmp_path) -> None:
     # The library really does collapse - a per-instance one would have 211,447 entries here.
     assert len(cells) < 1000, f"{len(cells)} cell types is not a library"
     assert len(parse_def_nets(text)) > 200_000
+
+
+# --------------------------------------------------------------- what may move
+
+
+def test_every_terminal_is_fixed_and_placed_cells_are_not(design, tmp_path) -> None:
+    # After a cell placer has run, everything is placed; only the terminals are immovable. Real
+    # OpenROAD checks a PLACED macro as if it were a standard cell.
+    everything = {**PLACEMENT, "cell_x": (0.0, 0.0), "cell_y": (2.0, 0.0), "cell_z": (30.0, 0.0)}
+    def_path, _lef = export_bookshelf_as_def(design, tmp_path / "out", everything)
+    status = dict(re.findall(r"- (\w+) \S+ \+ (FIXED|PLACED)", def_path.read_text()))
+    assert status == {"macro_a": "FIXED", "macro_b": "FIXED",
+                      "cell_x": "PLACED", "cell_y": "PLACED", "cell_z": "PLACED"}
+
+
+def test_a_terminal_the_agent_did_not_place_stays_where_the_design_put_it(design, tmp_path) -> None:
+    # A macro budget leaves terminals to the design. Exporting them UNPLACED handed them to the
+    # cell placer to move.
+    (design / "s.pl").write_text(
+        "UCLA pl 1.0\n\nmacro_a 10 24 : N /FIXED\nmacro_b 70 36 : N /FIXED\n"
+    )
+    def_path, _lef = export_bookshelf_as_def(design, tmp_path / "out", {"macro_a": (11.0, 24.0)})
+    components = parse_components(def_path.read_text())
+    assert components["macro_a"][1:] == (11.0 * DB_UNITS_PER_MICRON, 24.0 * DB_UNITS_PER_MICRON)
+    assert components["macro_b"][1:] == (70.0 * DB_UNITS_PER_MICRON, 36.0 * DB_UNITS_PER_MICRON)
+    assert "- macro_b PLACAX_CELL_1 + FIXED" in def_path.read_text()

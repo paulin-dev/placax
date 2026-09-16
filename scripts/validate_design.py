@@ -50,8 +50,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Path to a DREAMPlace checkout. Required unless --use_docker or "
                              "--skip_cell_placement.")
     parser.add_argument("--use_docker", action="store_true",
-                        help="Run DREAMPlace via its official Docker image instead of a local "
-                             "checkout.")
+                        help="Run DREAMPlace and OpenROAD from their official Docker images "
+                             "instead of local installs. Paths that do not exist on this host are "
+                             "then taken to be inside the OpenROAD image - e.g. its PDKs under "
+                             "/OpenROAD-flow-scripts/flow/platforms.")
     parser.add_argument("--gpu", action="store_true", help="Run DREAMPlace on GPU.")
     parser.add_argument("--target_density", type=float, default=1.0)
     parser.add_argument("--liberty", type=pathlib.Path, default=None,
@@ -61,6 +63,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         help="Clock period in ns, for timing analysis. See --liberty.")
     parser.add_argument("--openroad_binary", default="openroad",
                         help="OpenROAD executable (default: %(default)s).")
+    parser.add_argument("--route", choices=("global", "detailed"), default=None,
+                        help="Route before measuring: 'global' adds routed wirelength and vias, "
+                             "'detailed' adds DRC violations too (minutes, not seconds).")
+    parser.add_argument("--wire_rc_layer", default="metal3",
+                        help="Layer whose RC estimates wire parasitics for timing.")
+    parser.add_argument("--clock_port", default="clk",
+                        help="The design's clock input - the one port the clock goes on.")
     parser.add_argument("--config", type=pathlib.Path, default=None,
                         help="A run's manifest.json (or a bare ExperimentConfig JSON). Takes the cell "
                              "placer and validator from its EnvironmentSpec.physical instead of "
@@ -78,7 +87,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parsed
 
 
-CONFIG_OWNED_FLAGS = ("target_density", "liberty", "clock_period_ns")
+CONFIG_OWNED_FLAGS = (
+    "target_density", "liberty", "clock_period_ns", "route", "wire_rc_layer", "clock_port",
+)
 """Flags that describe the EXPERIMENT, not this machine, and so belong in the config.
 
 With --config these used to be read and then ignored, silently: someone following this script's
@@ -99,8 +110,8 @@ def _reject_config_owned_flags(args, parser_defaults: dict) -> None:
         f"--{' and --'.join(given)} describe the EXPERIMENT, not this machine, so with --config "
         f"they belong in the config rather than on the command line - otherwise ppa.json would "
         f"carry a run's full_hash beside a number its config cannot account for. Put them in "
-        f"EnvironmentSpec.physical, e.g. Spec('openroad', {{'liberty': ..., "
-        f"'clock_period_ns': ...}}) and Spec('dreamplace', {{'target_density': ...}}), and re-run "
+        f"EnvironmentSpec.physical, e.g. Spec('openroad', {{'liberty_path': ..., "
+        f"'clock_period_ns': ..., 'route': ...}}) and Spec('dreamplace', {{'target_density': ...}}), and re-run "
         f"without {settings}. --dreamplace_root, --use_docker, --gpu and --openroad_binary stay "
         f"here: where a tool is installed is this machine's business and is deliberately not "
         f"hashed."
@@ -129,9 +140,7 @@ def _run_from_config(args, output_dir: pathlib.Path, parser_defaults: dict) -> N
 
     print()
     print(f"placed design: {result.def_path}")
-    print(f"  design area:  {_or_dash(result.design_area, 'u^2')}")
-    print(f"  utilization:  {_or_dash(result.utilization_pct, '%')}")
-    print(f"  timing slack: {_or_dash(result.timing_slack, 'ns')}")
+    _print_metrics(result)
     print(f"  cell placer:  {result.cell_placer or '- (skipped)'}")
     print(f"  validator:    {result.validator}")
     print(f"  run:          {result.full_hash}")
@@ -143,14 +152,15 @@ def main() -> None:
     Log.configure()
     args = _parse_args(sys.argv)
 
-    if not args.def_path.exists():
+    # With Docker, a path absent here may name a file inside the image (its PDKs, its designs).
+    if not args.def_path.exists() and not args.use_docker:
         Log.error(f"'{args.def_path}' not found.")
         sys.exit(1)
     if not args.lef_paths:
         Log.error("at least one --lef is required: OpenROAD cannot read a DEF without its LEFs.")
         sys.exit(1)
     missing = [p for p in args.lef_paths if not p.exists()]
-    if missing:
+    if missing and not args.use_docker:
         Log.error(f"LEF file(s) not found: {', '.join(str(p) for p in missing)}")
         sys.exit(1)
 
@@ -166,7 +176,8 @@ def main() -> None:
     )
     validator = OpenROADValidator(
         liberty_path=args.liberty, clock_period_ns=args.clock_period_ns,
-        openroad_binary=args.openroad_binary,
+        openroad_binary=args.openroad_binary, use_docker=args.use_docker, route=args.route,
+        wire_rc_layer=args.wire_rc_layer, clock_port=args.clock_port,
     )
     if args.liberty is None or args.clock_period_ns is None:
         Log.info("no --liberty/--clock_period_ns: reporting area and utilization only, no timing")
@@ -192,10 +203,27 @@ def main() -> None:
 
     print()
     print(f"placed design: {placed_def}")
-    print(f"  design area:  {_or_dash(ppa.design_area, 'u^2')}")
-    print(f"  utilization:  {_or_dash(ppa.utilization_pct, '%')}")
-    print(f"  timing slack: {_or_dash(ppa.timing_slack, 'ns')}")
+    _print_metrics(ppa)
     print(f"reports: {output_dir}")
+
+
+def _print_metrics(ppa) -> None:
+    """Everything the validator measured - a PPAResult or a PhysicalResult, same field names."""
+    legal = "-" if ppa.placement_legal is None else ppa.placement_legal
+    print(f"  tool:         {ppa.tool_version or '-'}")
+    print(f"  design area:  {_or_dash(ppa.design_area, 'um^2')}")
+    print(f"  utilization:  {_or_dash(ppa.utilization_pct, '%')}")
+    print(f"  legal:        {legal}")
+    for rule, count in dict(ppa.placement_violations).items():
+        print(f"    {rule} check failed on {count:,}")
+    print(f"  hpwl:         {_or_dash(ppa.hpwl, 'um')}")
+    print(f"  timing slack: {_or_dash(ppa.timing_slack, 'ns')}")
+    print(f"  tns:          {_or_dash(ppa.total_negative_slack, 'ns')}")
+    print(f"  routed wl:    {_or_dash(ppa.routed_wirelength, 'um')}")
+    print(f"  vias:         {'-' if ppa.via_count is None else ppa.via_count}")
+    print(f"  drc:          {'-' if ppa.drc_violations is None else ppa.drc_violations}")
+    for note in ppa.notes:
+        print(f"  not measured: {note}")
 
 
 def _or_dash(value: float | None, unit: str) -> str:
