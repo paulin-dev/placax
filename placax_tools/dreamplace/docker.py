@@ -26,6 +26,31 @@ def is_built(repo_dir: pathlib.Path) -> bool:
     return (repo_dir / INSTALLED_PLACER).exists()
 
 
+CUDA_ARCHITECTURES = "6.0;6.1;7.0;7.5;8.0"
+"""GPU architectures to compile for - everything the image's CUDA 11.0 can target.
+
+Named explicitly because DREAMPlace's own default adds 8.6 for any CUDA 11, and CUDA 11.0 - the
+one in its official image - rejects it ("Unsupported gpu architecture 'compute_86'"), so a GPU
+build in that image fails as shipped. Ampere 8.6 cards (RTX 30xx) run the 8.0 kernels."""
+
+INSTALLED_CONFIGURE = "install/dreamplace/configure.py"
+"""DREAMPlace's record of how it was compiled - including whether its CUDA kernels were."""
+
+
+def is_built_with_cuda(repo_dir: pathlib.Path) -> bool:
+    """Whether the build has CUDA kernels.
+
+    DREAMPlace compiles them only when PyTorch can SEE a GPU at build time
+    (cmake/TorchExtension.cmake asks `torch.cuda.is_available()`), so a build run in a container
+    started without `--gpus` is CPU-only for good - and a later `gpu=True` run dies with "CANNOT
+    enable GPU without CUDA compiled". That is how the first build on this machine came out.
+    """
+    configure = repo_dir / INSTALLED_CONFIGURE
+    if not configure.exists():
+        return False
+    return '"CUDA_FOUND" : "TRUE"' in configure.read_text()
+
+
 def has_pydeps(repo_dir: pathlib.Path) -> bool:
     return (repo_dir / PYDEPS_DIR).exists()
 
@@ -60,9 +85,15 @@ def build_command(repo_dir: pathlib.Path, gpu: bool = False) -> list[str]:
     """Builds DREAMPlace INSIDE the container (using ITS gcc/boost/bison/flex/cmake/torch, sidestepping
     whatever the host does or doesn't have), writing compiled output to <repo_dir>/install on the host via
     the bind mount - a one-time cost; every later run_placer_command call reuses it."""
+    # A stale CMakeCache keeps TORCH_ENABLE_CUDA=0 (it is written with FORCE), so a GPU rebuild
+    # over a CPU one starts from a clean build directory. The compiled output is replaced either
+    # way: a CUDA build still runs on the CPU, so it is a superset.
+    architectures = f' -DCMAKE_CUDA_ARCHITECTURES="{CUDA_ARCHITECTURES}"' if gpu else ""
     build_script = (
-        "mkdir -p build && cd build && "
-        "cmake .. -DCMAKE_INSTALL_PREFIX=/DREAMPlace/install -DPython_EXECUTABLE=$(which python) && "
+        ("rm -rf build && " if gpu else "")
+        + "mkdir -p build && cd build && "
+        "cmake .. -DCMAKE_INSTALL_PREFIX=/DREAMPlace/install -DPython_EXECUTABLE=$(which python)"
+        + architectures + " && "
         "make -j$(nproc) && make install"
     )
     return _docker_run_argv(repo_dir, gpu, ["bash", "-c", build_script])

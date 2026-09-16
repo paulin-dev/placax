@@ -102,7 +102,7 @@ Everything below is named in a config as `Spec("<key>", {...kwargs})` and is **h
 | `action_space` | `ACTION_SPACES` | `discrete_grid`, `oriented_grid`, `perturbation`, `continuous` |
 | `initial_placement` | `INITS` | `empty`, `greedy_wiremask_prefix` |
 | `legalization` | `LEGALIZERS` | `row_snap` |
-| `physical.cell_placer` | `CELL_PLACERS` | `dreamplace` |
+| `physical.cell_placer` | `CELL_PLACERS` | `dreamplace` (Bookshelf), `openroad` (DEF in a real PDK) |
 | `physical.validator` | `VALIDATORS` | `openroad` |
 | `agent.policy` | `POLICIES` | `cnn`, `mlp`, `wiremask_cnn`, `resnet_coarse_fine`, `oriented_cnn`, `continuous` |
 | `agent.optimizer` | `OPTIMIZERS` | `adam`, `maskplace_split` |
@@ -112,11 +112,17 @@ Everything below is named in a config as `Spec("<key>", {...kwargs})` and is **h
 Plus two non-registry environment fields: `benchmark.canvas` (`die` or `core`) and
 `benchmark.macro_budget`. `agent.algorithm` for `ppo` also takes `value_loss` (`mse`, `huber`).
 
-`openroad` takes `route` (`None`, `global`, `detailed`), `liberty_path`, `clock_period_ns`,
-`clock_port`, `clock_name` and `wire_rc_layer` - all hashed, since each changes the measurement.
+`openroad` takes `route` (`None`, `global`, `detailed`), `legalize` (default on: OpenROAD's
+detailed placement as the final legalization step), `liberty_path` (one path or a list),
+`clock_period_ns`, `clock_port`, `clock_name`, `wire_rc_layer` and `routing_layers` - all hashed,
+since each changes the measurement. The `openroad` cell placer takes `density`,
+`density_lb_addon`, `pin_hor_layers`, `pin_ver_layers`, `io_constraints`, `routing_layers` and
+`seed`.
 `openroad_binary`, `use_docker` and `docker_image` arrive as machine parameters and are not. Its
 `PPAResult` carries `design_area`, `utilization_pct`, `placement_legal`, `hpwl`, `timing_slack`,
-`total_negative_slack`, `routed_wirelength`, `via_count`, `drc_violations`, `tool_version` and
+`total_negative_slack`, `routed_wirelength`, `via_count`, `drc_violations`,
+`placement_violations` (which checks failed, with counts), `legalized`,
+`hpwl_before_legalization`, the `legalization_*_displacement` figures, `tool_version` and
 `notes` (what was asked for and could not run, with the tool's reason); unmeasured fields are None.
 
 **Which agent drives which action space.** `local_search` requires `perturbation`; `shac` requires
@@ -192,6 +198,7 @@ One directory per run under `runs/`. A comparison writes one subdirectory per `(
 | `scripts/compare_agents.py` | several agents, one environment, one budget, one table (`--benchmark_dirs` for a suite; `--level=paradigm` plus `--agent_environment` to put a constructive agent and a perturbation one in one table) |
 | `scripts/run_pipeline.py` | a trained checkpoint to macro placement to DREAMPlace to OpenROAD (`--validator`) |
 | `scripts/validate_design.py` | the physical flow on a macro-placed DEF |
+| `scripts/make_orfs_benchmark.py` | an ORFS design synthesized and floorplanned into a DEF benchmark, with its `physical.json` |
 | `scripts/place_once.py` | one greedy rollout from a checkpoint |
 | `scripts/visualize.py` | curves, placement images, observation channels, rollout GIF |
 | `scripts/subprocess_search.py` | largest `--n_episodes`/`--n_envs` this machine fits |
@@ -230,9 +237,9 @@ experiment while its config claims otherwise.
 - **A wirelength without its legality is not a result.** Overlapping macros have shorter wires;
   the mask has a relaxation valve that fires rather than deadlock. Every score reports overlap.
 - **GPU runs are not bit-exact.** Report across seeds. `PLACAX_DETERMINISTIC=1` forces CPU.
-- **`canvas` and `legalization` default to the historical behaviour** (`die`, none), which places
-  macros off the design's real rows. `canvas="core"` + `legalization="row_snap"` is the
-  physically realizable pair.
+- **`canvas` defaults to `core`** wherever the design has rows (`die` otherwise, and for old
+  manifests without the field). `legalization` still defaults to none, so macros sit on the core
+  but not on a row until `legalization="row_snap"` snaps them at export.
 - **`shac` needs `continuous` + `differentiable`, and no action mask.** Its placements are NOT
   legal by construction the way masked ones are - they are only as legal as `density_weight` made
   them, so a SHAC row that is not 100% legal has not produced a result. Size that weight with

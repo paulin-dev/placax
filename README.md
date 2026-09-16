@@ -238,6 +238,21 @@ it inherits the shared evaluation, checkpointing, budgeting and logging automati
 `placax_agents/agents/environment_bound.py` that stops it running under different rules from
 whatever it is being compared against.
 
+**Real PPA per agent.** HPWL is a proxy, and ChiPBench's finding is that rankings by it do not
+survive a real flow. `--validator` finishes every row's placement with the same cell placer and
+measures it with the same validator, both written into the shared environment:
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/adaptec1 --env_steps=500000 \
+    --agents=greedy_wiremask,random_search,ppo --seeds=3 --validator=openroad --use_docker
+```
+
+A second table follows the first, **in the proxy's order**, so whether the real numbers agree
+with that ranking is visible at a glance. Each row carries its `full_hpwl` and the key `ppa.json`
+fields in `results.json`, with the full record beside each run (`<run>/physical/ppa.json`). A
+run whose physical flow fails is counted in a `failed` column instead of stopping the comparison.
+It costs a few minutes per run on adaptec1 (DREAMPlace plus OpenROAD), which is why it is opt-in.
+
 ### Across several designs
 
 `--benchmark_dirs=benchmarks/adaptec1,benchmarks/bigblue1` runs the same protocol as a suite. Two
@@ -355,8 +370,8 @@ placement row, and ~15% of the canvas lay outside the placeable core area entire
 canvas was the die extent anchored at the origin while the rows span 459..11151.
 
 Two hashed axes address it. `BenchmarkSpec.canvas="core"` scales and anchors the grid to the row
-region (`die` remains the default, since it is what every existing result used, and it is
-MaskPlace's own). `EnvironmentSpec.legalization="row_snap"` snaps macros onto real rows and sites
+region, and is the default wherever a design has rows (`die`, MaskPlace's own, is chosen for a
+protobuf netlist that has none, and any manifest written before the field existed loads as `die`). `EnvironmentSpec.legalization="row_snap"` snaps macros onto real rows and sites
 at export time, and reports how far it had to move them. The two are coupled, which is why they
 were measured together:
 
@@ -460,7 +475,7 @@ python -m scripts.run_pipeline --benchmark_dir=benchmarks/adaptec1 \
 - `--validator`: measure real PPA once the cells are placed, e.g. `openroad` or `openroad:route=global`. Written *into* the run's config - so into the manifest and the hash beside the result - rather than applied on the side.
 - `--openroad_binary`: the OpenROAD executable when not using Docker; default `openroad`. A property of the machine, never hashed.
 - `--dreamplace_root`: path to a DREAMPlace checkout. Defaults to `placax_tools/dreamplace/DREAMPlace` with `--use_docker` (auto-cloned/built there); if omitted with no `--use_docker` either, the pipeline stops after macro placement and just writes the Bookshelf files DREAMPlace would need.
-- `--gpu`: run DREAMPlace on GPU.
+- `--gpu`: run DREAMPlace on GPU (adaptec1: 55 s instead of 85 s). With `--use_docker`, a checkout built without CUDA is rebuilt with the GPU visible on first use - DREAMPlace only compiles its CUDA kernels when PyTorch can see a GPU at build time, and its default architecture list needs `CUDA_ARCHITECTURES` pinned to build in its own CUDA 11.0 image.
 - `--target_density`: DREAMPlace's target placement density; default `1.0`.
 - `--python_executable`: local-checkout mode only - the Python interpreter DREAMPlace itself should run under (often a separate env from this one); ignored with `--use_docker`.
 - `--dreamplace_extra_config`: a JSON object string overriding/adding any DREAMPlace config field, e.g. `--dreamplace_extra_config='{"num_bins_x": 1024, "random_seed": 42}'`.
@@ -518,20 +533,31 @@ macros, DREAMPlace cells, conversion, validator, `ppa.json`.
 **Verified against a real OpenROAD** - the pinned ORFS image, run through Docker exactly like
 DREAMPlace (`placax_tools/openroad/docker.py`, `--use_docker`). On the image's own sky130 `gcd`
 design the validator's full-design HPWL agrees with OpenROAD's detailed placer (27,629.35 vs
-27,629.4 um), and a detailed route reports 31,290 um, 3,218 vias and 0 DRC. On adaptec1, the whole
-pipeline (128 RL macros, DREAMPlace for the rest, conversion, OpenROAD) writes:
+27,629.4 um), and a detailed route reports 31,290 um, 3,218 vias and 0 DRC.
+On adaptec1 the whole pipeline - 128 RL macros on the core canvas, DREAMPlace on the GPU for the
+rest, conversion, OpenROAD - runs in under three minutes and writes
+`runs/adaptec1-maskplace-core-5ep/pipeline/ppa.json` (a 5-episode smoke checkpoint, so the
+wirelength itself means little):
 
-| metric | adaptec1, `runs/adaptec1-maskplace-m128/pipeline/ppa.json` |
+| metric | value |
 |---|---|
-| full-design HPWL | 91,853,659 um - identical to this project's own computation |
+| placement legal | **True**, after OpenROAD's own final legalization |
+| final legalization | cells moved 21 um on average, 1,349 um at most; HPWL 99.68M -> 105.49M um |
 | design area / utilization | 101,380,283 um^2 / 88.78 % |
-| placement legal | False - 5,728 one-site gaps, and nothing else |
 | slack, routed wirelength, DRC | not measured, with the reason in `notes` |
 
-Read the legality line carefully. The one-site-gap rule (never leave exactly one empty site
-between two cells) belongs to advanced nodes. ISPD 2005 never had it, and DREAMPlace's legalizer
-doesn't enforce it, so this is the benchmark meeting a stricter rulebook, not an overlap. The
-verdict stays OpenROAD's, and `placement_violations` says which rules it was about.
+**The final legalization step.** DREAMPlace's legal placement still failed OpenROAD's check on
+thousands of *one-site gaps* - a rule from advanced nodes that this OpenROAD always enforces (its
+`-disallow_one_site_gaps` flag is deprecated) and that ISPD 2005 never had. So the validator runs
+OpenROAD's own detailed placement first (`legalize`, on by default), moving only unfixed cells,
+and records what that cost: `legalization_*_displacement`, `hpwl_before_legalization`, and the
+measured design itself as `validate/legalized.def`. It uses the diamond legalizer with a wide
+search window (`legalizer`, `legalize_window`): OpenROAD's default negotiation legalizer was
+stopped after 40 minutes on 211k cells, and its default window left two cells boxed in between
+macros. The same run before this step reported `placement legal: False` with 5,728 one-site gaps;
+a macro the `die` canvas let sit below the first row shows up as a padding failure, which the
+`core` canvas now prevents. When legalization fails, `notes` says the rest was measured on a
+partly legalized design.
 
 The generated LEF is deliberately **not a technology**: one routing layer, a site matching the
 design's own rows, no via rules and no timing library. That supports reading, legality, area,
@@ -548,3 +574,53 @@ python -m scripts.validate_design --use_docker --skip_cell_placement \
     --liberty=/OpenROAD-flow-scripts/flow/platforms/sky130hd/lib/sky130_fd_sc_hd__tt_025C_1v80.lib \
     --clock_period_ns=10 --wire_rc_layer=met2 --route=detailed
 ```
+
+### Benchmarks in a real PDK
+
+The ISPD benchmarks have no process data, and `benchmarks/ariane133` is Circuit Training's
+*clustered* netlist: its standard cells are grouped into ~800 soft blocks with no cell types, so
+nothing can be routed or timed from it. `scripts/make_orfs_benchmark.py` builds the other kind:
+OpenROAD-flow-scripts synthesizes a design's RTL and floorplans it in its own PDK, and that
+floorplan (every instance still unplaced) becomes a DEF benchmark.
+
+```sh
+python -m scripts.make_orfs_benchmark --design=nangate45/ariane133   # ~30 min, once (Yosys alone ~18)
+```
+
+It writes `benchmarks/ariane133-orfs/`, which is git-ignored because the script can always
+rebuild it:
+- the floorplan DEF,
+- the Nangate45 LEFs, which the DEF loader reads to take the `CLASS BLOCK` masters (132 SRAMs) as
+  the macros,
+- `physical.json`, the physical stack ORFS itself would use,
+- `provenance.json`, recording which image and design config produced it.
+
+The stack uses the `openroad` cell placer (pins on metal5/6 with the design's IO constraints,
+global placement, detailed placement) and the `openroad` validator (Nangate45 plus SRAM liberty
+files, a 3.0 ns clock on `clk_i`, routing on metal2-metal10). Pass it to any script with
+`--physical`:
+
+```sh
+python -m scripts.compare_agents --benchmark_dir=benchmarks/ariane133-orfs --env_steps=132 \
+    --agents=greedy_wiremask --physical=benchmarks/ariane133-orfs/physical.json --use_docker
+```
+
+Measured end to end in 7.5 minutes: `greedy_wiremask` places the 132 SRAMs, OpenROAD places the
+~158k standard cells around them, legalizes and routes:
+
+| metric (`runs/ariane133-orfs-comparison/greedy_wiremask-seed0/physical/ppa.json`) | value |
+|---|---|
+| placement legal | True (final legalization moved cells at most 4.1 um) |
+| full-design HPWL | 5,894,352 um (this project's own count: 5,896,598, 0.04% apart) |
+| routed wirelength (global route) / vias | 8,271,512 um / 1,394,207 |
+| worst slack / TNS at 3.0 ns | -1.846 ns / -6,302 ns |
+| design area / utilization | 712,121 um^2 / 50.2 % |
+
+Getting there turned up a real reader bug. OpenROAD wraps a high-fanout net over several lines,
+and the DEF reader went line by line, so it silently dropped every wrapped net. On this design
+that was 43% of the macro-to-macro nets an agent trains on (434, not 245), and the full-design
+HPWL came out at 57% of the tool's.
+
+Liberty files and IO constraints are referenced by their paths *inside* the pinned image. Those
+paths are the same on every machine, whereas a host path would put one machine's directory layout
+into every experiment hash. So this flow needs `--use_docker`.

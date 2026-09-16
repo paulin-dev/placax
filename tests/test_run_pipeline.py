@@ -3,10 +3,8 @@ import pytest
 
 from placax import _device  # noqa: F401  must precede jax imports
 from placax_agents.ops.checkpoint import save_checkpoint
-from placax_tools.cell_placer import CellPlacer
-from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 from scripts.presets import PRESETS
-from scripts.run_pipeline import _build_cell_placer, _parse_args, _resolve_checkpoint
+from scripts.run_pipeline import _parse_args, _resolve_checkpoint
 
 import jax.numpy as jnp
 
@@ -93,18 +91,50 @@ def test_pipeline_output_goes_beside_the_run_that_trained_the_checkpoint(runs) -
     assert _default_output_dir(elsewhere, "maskplace", bench) == runs / "adaptec1-maskplace" / "pipeline"
 
 
-def test_build_cell_placer_returns_a_cell_placer() -> None:
-    placer = _build_cell_placer(
-        pathlib.Path("/opt/dreamplace"), gpu=False, target_density=1.0, python_executable="python",
-        use_docker=False, extra_mounts=(),
-    )
-    assert isinstance(placer, CellPlacer)
-    assert isinstance(placer, DREAMPlaceCellPlacer)
+def test_the_tools_this_pipeline_runs_are_written_into_its_config() -> None:
+    from placax_agents.experiment.presets import maskplace
+    from scripts.run_pipeline import _with_physical_stack
+
+    config = _with_physical_stack(maskplace("benchmarks/adaptec1"), "openroad:route=global",
+                                  target_density=0.9, place_cells=True)
+    physical = config.environment.physical
+    assert physical.cell_placer.name == "dreamplace"
+    assert physical.cell_placer.kwargs == {"target_density": 0.9}
+    assert physical.validator.name == "openroad" and physical.validator.kwargs == {"route": "global"}
+    # Nothing placed, nothing named.
+    bare = _with_physical_stack(maskplace("benchmarks/adaptec1"), None, 1.0, place_cells=False)
+    assert bare.environment.physical.cell_placer is None
 
 
-def test_build_cell_placer_forwards_extra_config() -> None:
-    placer = _build_cell_placer(
-        pathlib.Path("/opt/dreamplace"), gpu=False, target_density=1.0, python_executable="python",
-        use_docker=False, extra_mounts=(), extra_config={"num_bins_x": 128},
-    )
-    assert placer.extra_config == {"num_bins_x": 128}
+def test_the_machine_carries_every_tools_host_settings(tmp_path) -> None:
+    from scripts.run_pipeline import _machine
+
+    args = _parse_args(["x", "--use_docker", "--openroad_binary=/o",
+                        '--dreamplace_extra_config={"num_bins_x": 128}'])
+    machine = _machine(args, tmp_path / "bench", tmp_path / "out")
+    assert machine["use_docker"] is True and machine["openroad_binary"] == "/o"
+    assert machine["extra_config"] == {"num_bins_x": 128}
+    (tmp_path / "bench").mkdir()
+    machine = _machine(args, tmp_path / "bench", tmp_path / "out")
+    assert set(machine["extra_mounts"]) == {tmp_path / "bench", tmp_path / "out"}
+    # Never their common parent: for a benchmark and an output on different trees that is `/`.
+    machine = _machine(args, tmp_path / "bench", pathlib.Path("/tmp") / tmp_path.name / "o")
+    assert pathlib.Path("/") not in machine["extra_mounts"]
+    assert machine["dreamplace_root"] is not None   # --use_docker supplies the default checkout
+
+
+def test_a_physical_file_replaces_the_stack_and_a_validator_flag_still_wins(tmp_path) -> None:
+    import json
+
+    from placax_agents.experiment.presets import maskplace
+    from scripts.run_pipeline import _with_physical_stack
+
+    (tmp_path / "physical.json").write_text(json.dumps({
+        "cell_placer": {"name": "openroad", "kwargs": {"density": 0.3}},
+        "validator": {"name": "openroad", "kwargs": {"route": "global"}},
+    }))
+    config = _with_physical_stack(maskplace("benchmarks/adaptec1"), "openroad:route=detailed",
+                                  1.0, place_cells=False, physical_path=tmp_path / "physical.json")
+    physical = config.environment.physical
+    assert physical.cell_placer.name == "openroad"          # not replaced by DREAMPlace
+    assert physical.validator.kwargs == {"route": "detailed"}

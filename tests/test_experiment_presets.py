@@ -292,3 +292,69 @@ def test_buffered_loop_stays_quiet_when_the_buffer_is_large_enough(tmp_path, cap
     with caplog.at_level(logging.WARNING):
         build(smaller_batches)
     assert "SKIPPED" not in caplog.text
+
+
+# ------------------------------------------------------------------ canvas and shapes
+
+def test_presets_default_to_the_core_canvas_where_the_design_has_rows(tmp_path) -> None:
+    from tests.real_benchmarks import ADAPTEC1
+
+    if not ADAPTEC1.exists():
+        pytest.skip("adaptec1 is not checked out")
+    assert maskplace(ADAPTEC1).environment.benchmark.canvas == "core"
+    assert training(ADAPTEC1).environment.benchmark.canvas == "core"
+    assert maskplace(ADAPTEC1, canvas="die").environment.benchmark.canvas == "die"
+
+
+def test_a_design_without_rows_gets_the_die_canvas_in_its_config() -> None:
+    from tests.real_benchmarks import ARIANE133_PROTOBUF
+
+    if not ARIANE133_PROTOBUF.exists():
+        pytest.skip("ariane133 is not checked out")
+    # A protobuf netlist carries no rows, so `core` cannot be honoured - and the fallback is
+    # recorded in the config rather than taken quietly by the loader.
+    assert maskplace(ARIANE133_PROTOBUF.parent).environment.benchmark.canvas == "die"
+
+
+def test_a_manifest_from_before_the_canvas_field_still_loads_as_die() -> None:
+    from placax_agents.experiment.config import BenchmarkSpec
+
+    assert BenchmarkSpec.from_dict({"benchmark_dir": "benchmarks/adaptec1"}).canvas == "die"
+    assert BenchmarkSpec(benchmark_dir="benchmarks/adaptec1").canvas == "core"
+
+
+def test_every_shape_deciding_policy_argument_is_recorded_in_the_config() -> None:
+    from placax_agents.experiment.config import Spec
+
+    identity = Spec("resnet_coarse_fine").identity("policy")
+    for name in ("max_episode_macros", "fine_features", "fine_layers", "coarse_seed_features",
+                 "resnet_feature_key"):
+        assert name in identity["kwargs"], name
+    for policy in ("cnn", "wiremask_cnn", "oriented_cnn"):
+        assert "kernel_size" in Spec(policy).identity("policy")["kwargs"]
+
+
+def test_changing_the_critic_table_changes_the_run_hash() -> None:
+    import dataclasses
+
+    from placax_agents.experiment.config import Spec
+
+    config = maskplace("benchmarks/adaptec1")
+    policy = config.agent.policy
+    legacy = dataclasses.replace(config, agent=dataclasses.replace(config.agent, policy=Spec(
+        policy.name, {**policy.kwargs, "max_episode_macros": 2048})))
+    assert legacy.full_hash() != config.full_hash()
+    assert legacy.environment_hash() == config.environment_hash()
+
+
+def test_a_critic_table_smaller_than_the_design_is_refused(tmp_path) -> None:
+    from placax_agents.experiment.registry import _policy_resnet_coarse_fine
+
+    class _Params:
+        n_macros = 30
+
+    class _Benchmark:
+        params = _Params()
+
+    with pytest.raises(ValueError, match="max_episode_macros=10"):
+        _policy_resnet_coarse_fine(_Benchmark(), max_episode_macros=10)

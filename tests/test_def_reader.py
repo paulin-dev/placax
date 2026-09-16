@@ -117,3 +117,111 @@ def test_a_lef_whose_last_macro_ends_at_eof_still_parses(tmp_path) -> None:
     lef = tmp_path / "t.lef"
     lef.write_text("MACRO A\n  SIZE 2 BY 3 ;\nEND A")   # no trailing newline
     assert parse_lef_sizes(lef) == {"A": (2.0, 3.0)}
+
+
+# ------------------------------------------------------------------ a fresh floorplan
+
+FLOORPLAN_DEF = """VERSION 5.8 ;
+DESIGN fp ;
+UNITS DISTANCE MICRONS 1000 ;
+DIEAREA ( 0 0 ) ( 100000 100000 ) ;
+COMPONENTS 4 ;
+    - ram0 RAM ;
+    - ram1 RAM + SOURCE TIMING + UNPLACED ;
+    - inv0 INV + UNPLACED ;
+    - inv1 INV + PLACED ( 1000 1000 ) N ;
+END COMPONENTS
+NETS 3 ;
+    - a ( ram0 Q ) ( inv0 A ) ( ram1 D ) + USE SIGNAL ;
+    - b ( ram0 Q ) ( inv0 A ) + USE SIGNAL ;
+    - c ( inv0 Y ) ( inv1 A ) + USE SIGNAL ;
+END NETS
+END DESIGN
+"""
+
+FLOORPLAN_LEF = """MACRO RAM
+  CLASS BLOCK ;
+  SIZE 20 BY 10 ;
+  PIN Q
+    PORT
+      LAYER metal2 ;
+        RECT 0 0 1 1 ;
+    END
+  END Q
+  PIN D
+    PORT
+      LAYER metal2 ;
+        RECT 19 9 20 10 ;
+    END
+  END D
+END RAM
+MACRO INV
+  CLASS CORE ;
+  SIZE 1 BY 2 ;
+  PIN A
+    PORT
+      LAYER metal1 ;
+        RECT 0 0 0.5 0.5 ;
+    END
+  END A
+  PIN Y
+    PORT
+      LAYER metal1 ;
+        RECT 0.5 1.5 1 2 ;
+    END
+  END Y
+END INV
+"""
+
+
+def test_a_floorplan_with_nothing_placed_loads_its_blocks_as_the_macros(tmp_path) -> None:
+    # Everything straight out of a floorplanner is UNPLACED. The macros are the BLOCK masters,
+    # and the nets are what connects them - a standard cell is neither.
+    (tmp_path / "fp.def").write_text(FLOORPLAN_DEF)
+    (tmp_path / "cells.lef").write_text(FLOORPLAN_LEF)
+    macro_sizes, nets = load_def(tmp_path / "fp.def", [tmp_path / "cells.lef"])
+    assert macro_sizes == {"ram0": (20.0, 10.0), "ram1": (20.0, 10.0)}
+    assert len(nets) == 1   # only net a joins two macros
+    assert sorted(inst for inst, _x, _y in nets[0]) == ["ram0", "ram1"]
+    pins = {inst: (x, y) for inst, x, y in nets[0]}
+    assert pins["ram0"] == (-9.5, -4.5) and pins["ram1"] == (9.5, 4.5)
+
+
+def test_lef_classes_are_read_per_master(tmp_path) -> None:
+    from placax.netlist.lef import parse_lef_classes
+
+    (tmp_path / "cells.lef").write_text(FLOORPLAN_LEF)
+    assert parse_lef_classes(tmp_path / "cells.lef") == {"RAM": "BLOCK", "INV": "CORE"}
+
+
+def test_a_net_wrapped_over_several_lines_is_still_one_net() -> None:
+    # OpenROAD wraps high-fanout nets; a line-based reader dropped every one of them.
+    text = (
+        "NETS 3 ;\n"
+        "    - wide ( u1 A ) ( u2 A )\n      ( u3 A ) ( u4 A ) + USE SIGNAL ;\n"
+        "    - clk ( u1 CK ) ( u2 CK ) + USE CLOCK ;\n"
+        "    - plain ( u3 Y ) ( u4 A ) ;\n"
+        "END NETS\n"
+    )
+    nets = parse_nets("\n" + text)
+    assert [sorted(inst for inst, _ in net) for net in nets] == [
+        ["u1", "u2", "u3", "u4"], ["u3", "u4"],
+    ]
+
+
+def test_a_placed_designs_io_pins_count_toward_its_wirelength(tmp_path) -> None:
+    from placax.netlist.def_reader import load_placed_design, parse_pins
+
+    text = FLOORPLAN_DEF.replace(
+        "END COMPONENTS\n",
+        "END COMPONENTS\nPINS 1 ;\n    - clk + NET a + DIRECTION INPUT + USE SIGNAL\n"
+        "      + PORT\n        + LAYER metal5 ( -100 -100 ) ( 100 100 )\n"
+        "        + PLACED ( 0 50000 ) N ;\nEND PINS\n",
+    ).replace("( ram0 Q ) ( inv0 A )", "( PIN clk ) ( ram0 Q ) ( inv0 A )").replace(
+        "- ram0 RAM ;", "- ram0 RAM + FIXED ( 10000 10000 ) N ;")
+    assert parse_pins(text) == {"clk": (0.0, 50000.0)}
+    (tmp_path / "fp.def").write_text(text)
+    (tmp_path / "cells.lef").write_text(FLOORPLAN_LEF)
+    positions, sizes, nets = load_placed_design(tmp_path / "fp.def", [tmp_path / "cells.lef"])
+    assert positions["PIN:clk"] == (0.0, 50.0) and sizes["PIN:clk"] == (0.0, 0.0)
+    assert any("PIN:clk" in {inst for inst, _x, _y in net} for net in nets)

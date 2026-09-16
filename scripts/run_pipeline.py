@@ -8,7 +8,6 @@ documented, and no design in the repository could be pushed through it."""
 import argparse
 import dataclasses
 import json
-import os
 import pathlib
 import subprocess
 import sys
@@ -16,13 +15,10 @@ import sys
 from placax import _device  # noqa: F401  must precede jax imports
 from placax.core import reset
 from placax.log import Log
-from placax.extras.mst import hpwl_wirelength
-from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
-from placax.netlist.def_export import export_bookshelf_as_def
 from placax_agents.experiment.build import build
-from placax_agents.experiment.config import Spec
+from placax_agents.experiment.config import PhysicalSpec, Spec
 from placax_agents.experiment.export import write_placement
-from placax_agents.experiment.physical import evaluate_physical, write_ppa
+from placax_agents.experiment.physical import place_cells_and_measure
 from placax_agents.experiment import presets as run_layout
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, find_run_dir
 from placax_agents.experiment.run import write_manifest
@@ -30,8 +26,6 @@ from scripts.presets import config_for
 from placax_agents.ops.evaluate import evaluate
 from placax_agents.ops.inference import is_bare_checkpoint, load_policy_variables
 from placax_agents.policy.scale import to_grid_units
-from placax_tools.cell_placer import CellPlacer
-from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
 from placax_viz.placement import save_full_placement_image, save_placement_image, save_placement_with_nets_image
 
 import numpy as np
@@ -93,6 +87,10 @@ def _parse_args(argv: list[str]):
                              "Written into the run's config (so into its manifest and hash) rather "
                              "than applied on the side, which is what makes the resulting ppa.json "
                              "attributable. Overrides whatever validator the config names.")
+    parser.add_argument("--physical", type=pathlib.Path, default=None,
+                        help="A physical stack as JSON ({cell_placer, validator}), written into the "
+                             "run's config - e.g. benchmarks/ariane133-orfs/physical.json from "
+                             "scripts/make_orfs_benchmark.py.")
     parser.add_argument("--openroad_binary", default="openroad",
                         help="OpenROAD executable when not using Docker (default: %(default)s). A "
                              "property of THIS MACHINE, so deliberately not part of the config.")
@@ -161,46 +159,51 @@ def _resolve_checkpoint(
     return checkpoint_path, is_bare_checkpoint(checkpoint_path)
 
 
-def _build_cell_placer(
-    dreamplace_root: pathlib.Path,
-    gpu: bool,
-    target_density: float,
-    python_executable: str,
-    use_docker: bool,
-    extra_mounts: tuple[pathlib.Path, ...],
-    extra_config: dict | None = None,
-    config=None,
-) -> CellPlacer:
-    """The CellPlacer this run uses: the one its CONFIG names, or DREAMPlace from the flags.
+def _with_physical_stack(config, validator: str | None, target_density: float, place_cells: bool,
+                         physical_path: pathlib.Path | None = None):
+    """`config` with the tools this pipeline is about to run written into it.
 
-    A config that names a cell placer in `EnvironmentSpec.physical` has that choice hashed and
-    written into its manifest, and this script writes a manifest beside its outputs - so it has to
-    honor the recorded choice rather than construct DREAMPlace regardless, which would put one
-    tool's numbers under another tool's name. `build_physical` makes the same split the rest of the
-    physical flow makes: WHICH tool comes from the config, WHERE it is installed comes from this
-    machine's flags, and only the second belongs on a command line.
-
-    Falls back to DREAMPlace when the config names none, which is every shipped preset - a proxy
-    run has no physical stack, and this pipeline still has to place cells.
+    Both go INTO the config rather than beside it - they are part of the environment, so the
+    manifest written next to the outputs has to name them. `physical_path` replaces the whole
+    stack with a design's own (`scripts/make_orfs_benchmark.py` writes one); `validator` then
+    still overrides its validator. A cell placer the config already names is kept; otherwise
+    DREAMPlace, the one this pipeline has always used.
     """
-    machine = {
-        "dreamplace_root": dreamplace_root, "gpu": gpu, "use_docker": use_docker,
-        "python_executable": python_executable, "extra_mounts": extra_mounts,
-        "extra_config": extra_config, "target_density": target_density,
-    }
-    if config is not None and config.environment.physical.cell_placer is not None:
-        from placax_agents.experiment.build import build_physical
-
-        Log.info(
-            f"cell placer {config.environment.physical.cell_placer.name!r}, from this run's config"
+    physical = config.environment.physical
+    if physical_path is not None:
+        physical = PhysicalSpec.from_dict(json.loads(pathlib.Path(physical_path).read_text()))
+        Log.info(f"physical stack from {physical_path}")
+    if validator is not None:
+        physical = dataclasses.replace(physical, validator=Spec.parse(validator))
+        Log.info(f"validator {validator!r} written into this run's config")
+    if place_cells and physical.cell_placer is None:
+        physical = dataclasses.replace(
+            physical, cell_placer=Spec("dreamplace", {"target_density": target_density})
         )
-        placer, _validator = build_physical(config, machine)
-        return placer
-    return DREAMPlaceCellPlacer(
-        dreamplace_root=dreamplace_root, gpu=gpu, target_density=target_density,
-        python_executable=python_executable, use_docker=use_docker, extra_mounts=extra_mounts,
-        extra_config=extra_config,
+    elif place_cells:
+        Log.info(f"cell placer {physical.cell_placer.name!r}, from this run's config")
+    return dataclasses.replace(
+        config, environment=dataclasses.replace(config.environment, physical=physical)
     )
+
+
+def _machine(args, benchmark_dir: pathlib.Path, output_dir: pathlib.Path) -> dict:
+    """Where this host's tools live and how to run them - never part of the config.
+
+    Docker mode: the DREAMPlace container sees dreamplace_root plus the benchmark (nodes/nets/
+    wts/scl) and the output (pl/aux/config/result), each at its own host path, so the absolute
+    paths written into the .aux resolve unchanged inside the container. Two mounts, not their
+    common parent: for an output outside the repository that parent is `/`, which Docker refuses.
+    """
+    from placax_tools.openroad.docker import host_mounts
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "dreamplace_root": args.dreamplace_root, "gpu": args.gpu, "use_docker": args.use_docker,
+        "python_executable": args.python_executable,
+        "extra_mounts": tuple(host_mounts([benchmark_dir, output_dir])),
+        "extra_config": args.dreamplace_extra_config, "openroad_binary": args.openroad_binary,
+    }
 
 
 def _default_output_dir(checkpoint_path: pathlib.Path, preset: str,
@@ -217,35 +220,6 @@ def _default_output_dir(checkpoint_path: pathlib.Path, preset: str,
     return run_layout.run_root(preset, benchmark_dir) / "pipeline"
 
 
-def _measure_ppa(built, benchmark_dir, output_dir, full_placement, machine):
-    """Converts the finished design, runs the configured validator on it, writes ppa.json.
-
-    Returns the PhysicalResult, or None when the validator could not run - in which case the
-    converted design is left on disk and the reason is logged, because a crashed measurement after
-    a successful cell placement should not throw away the placement.
-    """
-    validate_dir = output_dir / "validate"
-    # Every terminal goes out FIXED (the converter's default) - the agent's macros and the ones a
-    # macro budget left where the design put them - and DREAMPlace's cells PLACED.
-    def_path, lef_path = export_bookshelf_as_def(benchmark_dir, validate_dir, full_placement)
-    Log.info(f"converted the placed design to {def_path} (+ {lef_path.name})")
-    try:
-        ppa = evaluate_physical(
-            built, def_path, [lef_path], validate_dir,
-            # DREAMPlace already placed the cells; placing them again would measure a different
-            # placement from the one this pipeline just produced.
-            skip_cell_placement=True,
-            machine=machine,
-        )
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        detail = getattr(exc, "stderr", None) or exc
-        Log.error(f"validation failed: {detail}\nThe converted design is still at {def_path}.")
-        return None
-    ppa_path = write_ppa(output_dir, ppa)
-    Log.info(f"PPA -> {ppa_path}  (run {ppa.full_hash})")
-    return ppa
-
-
 def _print_ppa(ppa, full_hpwl: float, output_dir: pathlib.Path) -> None:
     """The measured numbers, with a dash for anything that did not run - never a guess."""
     def show(value, unit=""):
@@ -255,10 +229,19 @@ def _print_ppa(ppa, full_hpwl: float, output_dir: pathlib.Path) -> None:
     print(f"real PPA ({ppa.validator}, {ppa.tool_version}) -> {output_dir / 'ppa.json'}")
     print(f"  design area        {show(ppa.design_area, ' um^2')}")
     print(f"  utilization        {show(ppa.utilization_pct, ' %')}")
+    if ppa.legalized is not None:
+        print(f"  final legalization {'OpenROAD detailed placement' if ppa.legalized else 'FAILED'}"
+              f" - moved cells up to {show(ppa.legalization_max_displacement, ' um')} "
+              f"(mean {show(ppa.legalization_mean_displacement, ' um')}), HPWL "
+              f"{show(ppa.hpwl_before_legalization, '')} -> {show(ppa.hpwl, '')}")
     print(f"  placement legal    {'-' if ppa.placement_legal is None else ppa.placement_legal}")
     for rule, count in ppa.placement_violations.items():
         print(f"    {rule} check failed on {count:,}")
-    print(f"  full-design HPWL   {show(ppa.hpwl, ' um')}   (this script's own: {full_hpwl:,.2f})")
+    own = f"this script's own, on the same design: {full_hpwl:,.2f}"
+    if ppa.legalized is not None:
+        own = (f"before legalization OpenROAD measured {show(ppa.hpwl_before_legalization, '')}, "
+               f"this script {full_hpwl:,.2f}")
+    print(f"  full-design HPWL   {show(ppa.hpwl, ' um')}   ({own})")
     print(f"  worst slack        {show(ppa.timing_slack, ' ns')}")
     print(f"  routed wirelength  {show(ppa.routed_wirelength, ' um')}")
     print(f"  DRC violations     {'-' if ppa.drc_violations is None else ppa.drc_violations}")
@@ -272,9 +255,7 @@ def main() -> None:
     benchmark_dir = args.benchmark_dir
     preset, checkpoint_arg = args.preset, args.checkpoint
     macro_budget, output_dir_arg = args.macro_budget, args.output_dir
-    dreamplace_root, use_docker, gpu = args.dreamplace_root, args.use_docker, args.gpu
-    target_density, python_executable = args.target_density, args.python_executable
-    dreamplace_extra_config = args.dreamplace_extra_config
+    dreamplace_root = args.dreamplace_root
     viz_resolution = args.viz_resolution
     nets_sample_fraction, nets_seed = args.nets_sample_fraction, args.nets_seed
     config_path = args.config
@@ -285,25 +266,21 @@ def main() -> None:
     benchmark_dir = benchmark_dir.resolve()
     if output_dir_arg is not None:
         output_dir_arg = output_dir_arg.resolve()
-    aux_candidates = list(benchmark_dir.glob("*.aux"))
-    if not aux_candidates:
-        Log.error(f"'{benchmark_dir}' has no .aux file - this pipeline only handles Bookshelf benchmarks for now.")
+    if not list(benchmark_dir.glob("*.aux")) and not list(benchmark_dir.glob("*.def")):
+        Log.error(f"'{benchmark_dir}' is neither a Bookshelf (.aux) nor a DEF design - the full "
+                  f"flow needs the standard cells, which a clustered protobuf does not carry.")
         sys.exit(1)
-    design_name = aux_candidates[0].stem
 
     # Rebuild the environment from a CONFIG where one was given, so this pipeline runs the
     # checkpoint in the environment it was trained in rather than in whatever a preset name
     # happens to resolve to today. Hand-matching a --preset string to a checkpoint is exactly the
     # error class ExperimentConfig removed upstream, and it survived down here far too long.
     config = config_for(config_path, preset, benchmark_dir, macro_budget)
-    if args.validator is not None:
-        # Into the config, not beside it: the physical stack is part of the environment, so a PPA
-        # number is attributable only if the validator that produced it is in the manifest.
-        config = dataclasses.replace(config, environment=dataclasses.replace(
-            config.environment, physical=dataclasses.replace(
-                config.environment.physical, validator=Spec.parse(args.validator)),
-        ))
-        Log.info(f"validator {args.validator!r} written into this run's config")
+    config = _with_physical_stack(
+        config, args.validator, args.target_density,
+        place_cells=args.dreamplace_root is not None, physical_path=args.physical,
+    )
+    cell_placer = config.environment.physical.cell_placer
 
     checkpoint_path, bare = _resolve_checkpoint(benchmark_dir, preset, checkpoint_arg)
     if not checkpoint_path.exists():
@@ -359,93 +336,56 @@ def main() -> None:
     )
     Log.info(f"wrote {nets_png}")
 
-    # 5. Write the macro placement into the design's own format. DREAMPlace runs as an external
-    # subprocess reading files from disk (docs/JAX_Placement_Environment_Spec.md section 5.7's
-    # deliberate choice), so this is required, not optional. The writing itself lives in
-    # placax_agents.experiment.export, shared with the physical evaluation, so the file measured
-    # by a PPA run and the file written here can never be two different notions of "the placement".
-    exported = write_placement(built, positions, output_dir)
-    new_aux_path = exported.path
-
-    if dreamplace_root is None:
+    # 5. Without a cell placer there is nothing more to do than write the macros out.
+    if cell_placer is None or (cell_placer.name == "dreamplace" and dreamplace_root is None):
+        exported = write_placement(built, positions, output_dir)
         print()
         print(f"macro placement done - pass --dreamplace_root=<path to a DREAMPlace checkout> (or "
-              f"--use_docker) to also place standard cells from {new_aux_path}.")
+              f"--use_docker) to also place standard cells from {exported.path}.")
         print("real PPA needs the standard cells placed first, so validation is skipped too.")
         return
 
-    # 6. Hand off to a CellPlacer to place every remaining standard cell around the now-fixed
-    # macros - the one this run's config names, or DREAMPlace when it names none. The call site
-    # depends only on CellPlacer.place_bookshelf()'s generic contract (placax_tools/cell_placer.py),
-    # so a different Bookshelf-capable placer is a registry entry and a config change.
-    # Docker mode: the container only sees dreamplace_root (mounted at /DREAMPlace) plus whatever we
-    # explicitly mount below - benchmark_dir (nodes/nets/wts/scl) and output_dir (pl/aux/config/result),
-    # each at their own identical host path, so the absolute paths already written into new_aux_path
-    # and the DREAMPlace config resolve unchanged inside the container too.
-    common_mount_root = pathlib.Path(os.path.commonpath([benchmark_dir.resolve(), output_dir.resolve()]))
-    cell_placer = _build_cell_placer(
-        dreamplace_root, gpu, target_density, python_executable, use_docker, (common_mount_root,),
-        extra_config=dreamplace_extra_config, config=built.config,
-    )
+    # 6-8. The configured physical stack on this placement: the macros written out, every
+    # standard cell placed around them, the full-design HPWL, and - with a validator - the
+    # converted design measured into ppa.json. The same function a comparison runs per agent
+    # (experiment.physical.place_cells_and_measure), so the two can never finish a placement
+    # two different ways.
     try:
-        result_pl = cell_placer.place_bookshelf(new_aux_path, output_dir)
+        design = place_cells_and_measure(
+            built, positions, output_dir, _machine(args, benchmark_dir, output_dir), orientations,
+        )
     except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        Log.error(f"DREAMPlace cell placement failed ({exc}); macro-only outputs above are still valid.")
+        detail = getattr(exc, "stderr", None) or exc
+        Log.error(f"the physical flow failed: {detail}\nMacro-only outputs above are still valid.")
         sys.exit(1)
-    Log.info(f"DREAMPlace wrote {result_pl}")
+    Log.info(f"cell placer wrote {design.result_pl}")
+    Log.info(f"full-design HPWL = {design.full_hpwl:.2f}")
+    if design.ppa is None:
+        Log.info("no validator in this run's config, so no PPA was measured - pass "
+                 "--validator=openroad (or name one in EnvironmentSpec.physical) to close the flow.")
 
-    # 7. Render the full result: every macro AND every cell, from DREAMPlace's own output file.
-    all_sizes = parse_all_node_sizes(benchmark_dir / f"{design_name}.nodes")
-    all_positions = parse_pl_positions(result_pl)
-    names = [name for name in all_positions if name in all_sizes]
-    pos = np.array([all_positions[name][:2] for name in names])
-    sz = np.array([all_sizes[name] for name in names])
-    die_width = float((pos[:, 0] + sz[:, 0]).max())
-    die_height = float((pos[:, 1] + sz[:, 1]).max())
-    macro_mask = np.array([name in benchmark.name_to_idx for name in names])
-
+    # 9. Render the full result: every macro AND every cell.
+    names = list(design.positions)
+    pos = np.array([design.positions[name] for name in names])
+    sz = np.array([design.sizes[name] for name in names])
+    macro_mask = np.array([name in design.macro_names for name in names])
     full_png = output_dir / "full_placement.png"
     save_full_placement_image(
-        pos[macro_mask], sz[macro_mask], pos[~macro_mask], sz[~macro_mask], die_width, die_height, full_png,
+        pos[macro_mask], sz[macro_mask], pos[~macro_mask], sz[~macro_mask],
+        float((pos[:, 0] + sz[:, 0]).max()), float((pos[:, 1] + sz[:, 1]).max()), full_png,
         resolution=viz_resolution,
     )
     Log.info(f"wrote {full_png}")
-
-    # 8. Full-design HPWL (macros AND cells) from the actual final placement - distinct from real_hpwl
-    # above, which only ever covers macro-to-macro nets (the RL reward's own scope). Plain Python
-    # (hpwl_wirelength), not the JAX/padded-array hpwl() used in training - that form pads every net to
-    # the netlist's max degree, which blows up in memory on a full netlist's high-fanout nets (clock/reset).
-    full_centers = {name: (pos[i, 0] + sz[i, 0] / 2.0, pos[i, 1] + sz[i, 1] / 2.0) for i, name in enumerate(names)}
-    full_nets = parse_nets(benchmark_dir / f"{design_name}.nets", set(all_sizes))
-    full_hpwl = hpwl_wirelength(full_centers, full_nets)
-    Log.info(f"full-design HPWL ({len(full_nets)} nets, macros + cells) = {full_hpwl:.2f}")
-
-    # 9. Real PPA, when this run's config names a validator. DREAMPlace has placed every cell, so
-    # the design is complete and there is something to measure. OpenROAD reads no Bookshelf, so the
-    # finished design is converted first - every macro FIXED, DREAMPlace's cells PLACED,
-    # which is the distinction a legalizer reads - and measured with the cell library the
-    # conversion derived.
-    ppa = None
-    if built.config.environment.physical.validator is not None:
-        ppa = _measure_ppa(
-            built, benchmark_dir, output_dir,
-            {name: (float(all_positions[name][0]), float(all_positions[name][1])) for name in names},
-            machine={"openroad_binary": args.openroad_binary, "use_docker": use_docker},
-        )
-    else:
-        Log.info("no validator in this run's config, so no PPA was measured - pass "
-                 "--validator=openroad (or name one in EnvironmentSpec.physical) to close the flow.")
 
     print()
     print("pipeline complete")
     print(f"  real_hpwl(macros only, {benchmark.params.n_macros} macros, {len(benchmark.nets)} macro-macro nets) "
           f"= {float(hpwl_value):.2f}")
-    print(f"  full_hpwl(macros + cells, {len(names)} nodes, {len(full_nets)} nets) = {full_hpwl:.2f}")
+    print(f"  full_hpwl(macros + cells, {len(names)} nodes) = {design.full_hpwl:.2f}")
     print(f"full placement ({len(names)} nodes: {int(macro_mask.sum())} macros, "
-          f"{int((~macro_mask).sum())} cells) written to {result_pl}")
-    if ppa is not None:
-        _print_ppa(ppa, full_hpwl, output_dir)
-
+          f"{int((~macro_mask).sum())} cells) written to {design.result_pl}")
+    if design.ppa is not None:
+        _print_ppa(design.ppa, design.full_hpwl, output_dir)
 
 if __name__ == "__main__":
     main()

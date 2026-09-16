@@ -2,7 +2,7 @@ import pathlib
 
 from placax_tools.dreamplace.docker import (
     DREAMPLACE_IMAGE, MISSING_PYTHON_DEPS, build_command, clone_command, has_pydeps, install_pydeps_command,
-    is_built, is_cloned, run_placer_command,
+    is_built, is_built_with_cuda, is_cloned, run_placer_command,
 )
 
 
@@ -23,6 +23,41 @@ def test_build_command_mounts_repo_and_sets_install_prefix() -> None:
 def test_build_command_gpu_flag() -> None:
     argv = build_command(pathlib.Path("/tmp/DREAMPlace"), gpu=True)
     assert "--gpus" in argv and "all" in argv
+    # CUDA is decided at configure time and cached with FORCE: a GPU build starts clean.
+    assert argv[-1].startswith("rm -rf build && ")
+    # The image's CUDA 11.0 rejects DREAMPlace's default 8.6 target.
+    assert '-DCMAKE_CUDA_ARCHITECTURES="6.0;6.1;7.0;7.5;8.0"' in argv[-1]
+    assert "rm -rf" not in build_command(pathlib.Path("/tmp/DREAMPlace"))[-1]
+
+
+def test_a_cpu_only_build_is_told_apart_from_a_cuda_one(tmp_path) -> None:
+    configure = tmp_path / "install" / "dreamplace" / "configure.py"
+    configure.parent.mkdir(parents=True)
+    assert not is_built_with_cuda(tmp_path)
+    configure.write_text('compile_configurations = {\n        "CUDA_FOUND" : "", \n}\n')
+    assert not is_built_with_cuda(tmp_path)
+    configure.write_text('compile_configurations = {\n        "CUDA_FOUND" : "TRUE", \n}\n')
+    assert is_built_with_cuda(tmp_path)
+
+
+def test_a_gpu_run_rebuilds_a_cpu_only_checkout(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "install" / "pydeps").mkdir(parents=True)
+    (tmp_path / "install" / "dreamplace").mkdir()
+    (tmp_path / "install" / "dreamplace" / "Placer.py").write_text("")
+    (tmp_path / "install" / "dreamplace" / "configure.py").write_text('"CUDA_FOUND" : "",')
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, check: calls.append(argv))
+
+    DREAMPlaceCellPlacer(tmp_path, gpu=True, use_docker=True)._run_dreamplace(tmp_path / "c.json")
+    assert any("cmake" in argv[-1] for argv in calls if argv[:2] == ["docker", "run"])
+    calls.clear()
+    DREAMPlaceCellPlacer(tmp_path, gpu=False, use_docker=True)._run_dreamplace(tmp_path / "c.json")
+    assert not any("cmake" in str(argv[-1]) for argv in calls), "a CPU run never rebuilds"
 
 
 def test_run_placer_command_runs_the_installed_placer_on_the_given_config() -> None:

@@ -16,16 +16,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 TINY = pathlib.Path(__file__).parent / "fixtures" / "openroad" / "tiny_bookshelf"
-MACROS = {"macro_a", "macro_b"}
 LEGAL = {
     "macro_a": (10.0, 24.0), "macro_b": (60.0, 12.0),
     "cell_x": (0.0, 0.0), "cell_y": (2.0, 0.0), "cell_z": (30.0, 0.0),
 }
 
 
-def _validate(tmp_path, placement):
-    def_path, lef_path = export_bookshelf_as_def(TINY, tmp_path / "design", placement, fixed=MACROS)
-    return OpenROADValidator(route="global", use_docker=True).validate(
+def _validate(tmp_path, placement, legalize=True):
+    def_path, lef_path = export_bookshelf_as_def(TINY, tmp_path / "design", placement)
+    return OpenROADValidator(route="global", use_docker=True, legalize=legalize).validate(
         def_path, [lef_path], tmp_path / "out"
     )
 
@@ -36,6 +35,7 @@ def test_a_converted_bookshelf_design_is_measured_by_real_openroad(tmp_path) -> 
     assert result.design_area == pytest.approx(2096.0, abs=1e-3)   # 40*20 + 20*60 + 2*12 + 2*12 + 4*12
     assert result.utilization_pct == pytest.approx(2096.0 / (100 * 96) * 100, abs=1e-3)
     assert result.placement_legal is True
+    assert result.legalized is True and result.legalization_max_displacement == 0.0
     assert result.hpwl == pytest.approx(184.5)
     # The derived technology has one layer and no tracks: routing is reported as not measured.
     assert result.routed_wirelength is None
@@ -43,11 +43,27 @@ def test_a_converted_bookshelf_design_is_measured_by_real_openroad(tmp_path) -> 
     assert (tmp_path / "out" / "openroad.log").exists()
 
 
+OVERLAPPING = {**LEGAL, "cell_y": (1.0, 0.0)}   # on top of cell_x
+
+
 def test_real_openroad_catches_an_overlap_the_export_let_through(tmp_path) -> None:
-    result = _validate(tmp_path, {**LEGAL, "cell_y": (1.0, 0.0)})   # on top of cell_x
+    result = _validate(tmp_path, OVERLAPPING, legalize=False)
     assert result.placement_legal is False
+    assert result.legalized is None
     assert any(note.startswith("check_placement") for note in result.notes)
     assert result.hpwl is not None   # the rest of the measurement still came back
+
+
+def test_openroads_detailed_placement_legalizes_it_and_says_what_that_cost(tmp_path) -> None:
+    result = _validate(tmp_path, OVERLAPPING)
+    assert result.legalized is True
+    assert result.placement_legal is True
+    # Cells moved - by how much is the legalizer's business (diamond: 2 um here, negotiation: 4).
+    assert 0.0 < result.legalization_max_displacement <= 4.0
+    assert result.hpwl_before_legalization == pytest.approx(184.5)
+    assert result.hpwl != result.hpwl_before_legalization
+    legalized = (tmp_path / "out" / "legalized.def").read_text()
+    assert "macro_a PLACAX_CELL_0 + FIXED ( 10000 24000 )" in legalized
 
 
 def test_validate_design_measures_a_real_sky130_design_inside_the_image(tmp_path) -> None:

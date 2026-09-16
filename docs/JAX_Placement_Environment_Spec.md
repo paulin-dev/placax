@@ -267,6 +267,8 @@ placax_tools/                    # Cell placer / validator wrappers (Section 5.4
     pipeline.py                     place_and_validate()/validate_only() — names neither tool
     dreamplace/cell_placer.py       DREAMPlaceCellPlacer (+ docker.py)
     openroad/validator.py           OpenROADValidator (+ docker.py: the pinned ORFS image)
+    openroad/cell_placer.py         OpenROADCellPlacer - pins, global + detailed placement
+    openroad/runner.py              one Tcl script through OpenROAD, locally or in Docker
 
 placax_viz/                      # Plotting/rendering, optional (`placax[viz]`)
     placement.py, masks.py, curves.py, rollout.py, animation.py
@@ -279,6 +281,7 @@ scripts/                         # Tier 3 — what changes per experiment (liste
     compare_agents.py               several agents, one environment, one budget, one table
     run_pipeline.py                 a trained checkpoint -> macros -> DREAMPlace -> OpenROAD
     validate_design.py              the physical flow on a macro-placed DEF (real PPA)
+    make_orfs_benchmark.py          an ORFS design (real PDK) -> a DEF benchmark + its physical stack
     place_once.py                   one greedy rollout from a checkpoint, nothing else
     visualize.py                    placement/mask/curve renders from a checkpoint
     presets.py                      thin adapter: preset name -> a built experiment

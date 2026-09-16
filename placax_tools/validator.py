@@ -51,6 +51,19 @@ class PPAResult:
     OpenROAD's one-site-gap rule, so a DREAMPlace result that is legal by the benchmark's own
     rules still fails it. The verdict stays the tool's; this says what it was about."""
 
+    legalized: bool | None = None
+    """Whether the validator's own detailed placement ran as the final legalization step - None
+    when it was not asked to, False when it was and failed (the reason is in `notes`)."""
+
+    hpwl_before_legalization: float | None = None
+    """Full-design HPWL as handed over, before that step; `hpwl` is after it."""
+
+    legalization_max_displacement: float | None = None
+    legalization_mean_displacement: float | None = None
+    legalization_total_displacement: float | None = None
+    """How far the final legalization moved cells, in microns. What makes the step honest: a
+    legalizer that moved cells far has measured a different placement from the one handed in."""
+
     total_negative_slack: float | None = None
     """Sum of negative slack over all endpoints, in the liberty's time unit. None when timing did
     not run; 0.0 when it ran and nothing failed."""

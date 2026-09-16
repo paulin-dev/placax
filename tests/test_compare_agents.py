@@ -304,3 +304,72 @@ def test_an_ordinary_comparison_is_not_lectured() -> None:
     }
     assert "MOVE MACROS DIFFERENTLY" not in _format_table(results, Budget(env_steps=400),
                                                           "environment")
+
+
+# ------------------------------------------------------------------ real PPA
+
+def test_the_physical_stack_is_shared_by_every_agent_in_the_comparison() -> None:
+    args = _parse_args([
+        "compare_agents", "--env_steps=400", "--agents=greedy_wiremask,random_search",
+        "--validator=openroad:route=global", "--dreamplace_root=/opt/dp",
+    ])
+    reference = _with_overrides(build_preset("training", "b", budget=Budget(env_steps=400)), args)
+    physical = reference.environment.physical
+    assert physical.cell_placer == Spec("dreamplace")
+    assert physical.validator == Spec("openroad", {"route": "global"})
+    configs = build_comparison(reference, ["greedy_wiremask", "random_search"], seeds=1,
+                               population=2)
+    assert all(c.environment.physical == physical for c in configs)
+
+
+def test_real_ppa_needs_somewhere_to_place_the_cells() -> None:
+    with pytest.raises(SystemExit, match="--use_docker or --dreamplace_root"):
+        _parse_args(["compare_agents", "--env_steps=400", "--validator=openroad"])
+    args = _parse_args(["compare_agents", "--env_steps=400", "--validator=openroad",
+                        "--use_docker"])
+    assert args.dreamplace_root.name == "DREAMPlace"
+
+
+def test_the_ppa_table_keeps_the_proxys_order_and_marks_what_was_not_measured() -> None:
+    def with_ppa(hpwl, full, legal, violations, error=False):
+        run = _run(hpwl, env_steps=400)
+        if error:
+            run["ppa_error"] = "CalledProcessError: boom"
+            return run
+        run["full_hpwl"] = full
+        run["ppa"] = {"hpwl": full, "placement_legal": legal,
+                      "placement_violations": {"One site gap": violations},
+                      "routed_wirelength": None, "drc_violations": None, "timing_slack": None}
+        return run
+
+    table = _format_table(
+        {"ppo": [with_ppa(900.0, 90_000_000, False, 5000)],
+         "greedy_wiremask": [with_ppa(1000.0, 80_000_000, True, 0)],
+         "random_search": [with_ppa(2000.0, 0, False, 0, error=True)]},
+        BUDGET, "environment",
+    )
+    ppa = table[table.index("real PPA"):]
+    # Proxy order (ppo best on macro HPWL), even though greedy is better after the real flow.
+    assert ppa.index("ppo") < ppa.index("greedy_wiremask") < ppa.index("random_search")
+    assert "90,000,000" in ppa and "80,000,000" in ppa
+    assert "5,000" in ppa
+    random_row = next(line for line in ppa.splitlines() if line.startswith("random_search"))
+    assert random_row.split()[-1] == "1"            # one failed physical run, counted
+    assert "never zero" in ppa
+
+
+def test_a_proxy_only_comparison_prints_no_ppa_table() -> None:
+    table = _format_table({"ppo": [_run(900.0, env_steps=400)]}, BUDGET, "environment")
+    assert "real PPA" not in table
+
+
+def test_a_designs_own_physical_stack_can_be_named_as_a_file(tmp_path) -> None:
+    stack = {"cell_placer": {"name": "openroad", "kwargs": {"density": 0.3}},
+             "validator": {"name": "openroad", "kwargs": {"route": "global"}}}
+    (tmp_path / "physical.json").write_text(json.dumps(stack))
+    # No DREAMPlace involved, so nothing about where it is installed is required.
+    args = _parse_args(["compare_agents", "--env_steps=400",
+                        f"--physical={tmp_path / 'physical.json'}"])
+    reference = _with_overrides(build_preset("training", "b", budget=Budget(env_steps=400)), args)
+    assert reference.environment.physical.cell_placer == Spec("openroad", {"density": 0.3})
+    assert reference.environment.physical.validator == Spec("openroad", {"route": "global"})

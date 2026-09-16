@@ -75,6 +75,13 @@ class PhysicalResult:
     placement_violations: dict[str, int] = dataclasses.field(default_factory=dict)
     """The checker's failed rules with their counts - what `placement_legal=False` was about."""
 
+    legalized: bool | None = None
+    hpwl_before_legalization: float | None = None
+    legalization_max_displacement: float | None = None
+    legalization_mean_displacement: float | None = None
+    """The validator's own final legalization (OpenROAD's detailed placement), and what it cost.
+    `hpwl` is measured after it."""
+
     total_negative_slack: float | None = None
     tool_version: str | None = None
     """The validator's self-reported version. Numbers change between releases, so a PPA figure
@@ -143,10 +150,18 @@ def evaluate_physical(
         placed = place_and_validate(def_path, lef_paths, output_dir, cell_placer, validator)
         ppa, placed_def = placed.ppa, placed.def_path
 
+    return _physical_result(
+        config, ppa, placed_def,
+        None if skip_cell_placement else physical.cell_placer.name,
+    )
+
+
+def _physical_result(config, ppa, placed_def, cell_placer_name) -> PhysicalResult:
+    """A validator's PPAResult as this run's record."""
     return PhysicalResult(
         full_hash=config.full_hash(),
-        cell_placer=None if skip_cell_placement else physical.cell_placer.name,
-        validator=physical.validator.name,
+        cell_placer=cell_placer_name,
+        validator=config.environment.physical.validator.name,
         def_path=str(placed_def),
         design_area=ppa.design_area,
         utilization_pct=ppa.utilization_pct,
@@ -157,6 +172,10 @@ def evaluate_physical(
         hpwl=ppa.hpwl,
         placement_legal=ppa.placement_legal,
         placement_violations=dict(ppa.placement_violations),
+        legalized=ppa.legalized,
+        hpwl_before_legalization=ppa.hpwl_before_legalization,
+        legalization_max_displacement=ppa.legalization_max_displacement,
+        legalization_mean_displacement=ppa.legalization_mean_displacement,
         total_negative_slack=ppa.total_negative_slack,
         tool_version=ppa.tool_version,
         notes=list(ppa.notes),
@@ -216,3 +235,163 @@ def write_ppa(output_dir: pathlib.Path, result: PhysicalResult) -> pathlib.Path:
     path = output_dir / PPA_NAME
     path.write_text(json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n")
     return path
+
+
+@dataclass(frozen=True)
+class FullDesign:
+    """A Bookshelf design with every node placed, and what was measured on it."""
+
+    result_pl: pathlib.Path
+    """The cell placer's output: every macro and every standard cell."""
+
+    positions: dict
+    """{node: (x, y)} lower-left corners, every node the design has."""
+
+    sizes: dict
+    """{node: (width, height)}, every node."""
+
+    macro_names: frozenset
+    """The nodes the agent placed - the rest are the cell placer's."""
+
+    full_hpwl: float
+    """Half-perimeter wirelength over every net, from this project's own computation."""
+
+    ppa: PhysicalResult | None
+    """The validator's measurement, or None when the config names no validator."""
+
+
+def place_cells_and_measure(
+    built: BuiltExperiment,
+    positions,
+    output_dir: pathlib.Path,
+    machine: dict | None = None,
+    orientations=None,
+) -> FullDesign:
+    """An agent's macro placement, finished and measured: the configured physical stack on it.
+
+    What `scripts/run_pipeline.py` does after its rollout, as a function, so that a comparison
+    can put every agent through the identical flow. Bookshelf only, because DREAMPlace's
+    Bookshelf mode is the reliable one for these designs:
+
+      1. the macros are written as a `.pl`/`.aux` (the configured legalizer applies),
+      2. the configured cell placer places every standard cell around them,
+      3. the full-design HPWL is computed here, independently of any tool,
+      4. with a validator configured, the finished design is converted to DEF/LEF (every macro
+         FIXED, every cell PLACED) and measured, and `ppa.json` is written to `output_dir`.
+
+    The cell placer comes from `EnvironmentSpec.physical`, never from a default: a PPA record
+    naming no cell placer next to cells somebody placed would not be attributable.
+    """
+    from placax.extras.mst import hpwl_wirelength
+    from placax.netlist import detect_format
+    from placax.netlist.bookshelf import parse_all_node_sizes, parse_nets, parse_pl_positions
+    from placax.netlist.def_export import export_bookshelf_as_def
+
+    config = built.config
+    physical = config.environment.physical
+    benchmark_dir = config.environment.benchmark.path.resolve()
+    design_format = detect_format(benchmark_dir)
+    if design_format not in (NetlistFormat.BOOKSHELF, NetlistFormat.DEF):
+        raise NotImplementedError(
+            f"{benchmark_dir} is {design_format.value}; the full flow needs a design with its "
+            f"standard cells - Bookshelf or DEF/LEF. A protobuf netlist is clustered and has none."
+        )
+    if physical.cell_placer is None:
+        raise ValueError(
+            f"experiment {config.name!r} names no cell placer, so its standard cells have nowhere "
+            f"to come from. Add one to EnvironmentSpec.physical, e.g. Spec('dreamplace')."
+        )
+    output_dir = pathlib.Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # A tool already set on `built` is used as-is, as in evaluate_physical.
+    cell_placer = built.cell_placer or build_physical(config, machine)[0]
+
+    if design_format is NetlistFormat.DEF:
+        return _place_and_measure_def(
+            built, positions, output_dir, machine, orientations, cell_placer, benchmark_dir
+        )
+
+    exported = write_placement(built, positions, output_dir, orientations)
+    result_pl = cell_placer.place_bookshelf(exported.path, output_dir)
+
+    design = exported.path.stem
+    sizes = parse_all_node_sizes(benchmark_dir / f"{design}.nodes")
+    placed = parse_pl_positions(result_pl)
+    placement = {name: (x, y) for name, (x, y, _fixed) in placed.items() if name in sizes}
+    centers = {
+        name: (x + sizes[name][0] / 2.0, y + sizes[name][1] / 2.0)
+        for name, (x, y) in placement.items()
+    }
+    full_hpwl = hpwl_wirelength(centers, parse_nets(benchmark_dir / f"{design}.nets", set(sizes)))
+
+    ppa = None
+    if physical.validator is not None:
+        validate_dir = output_dir / "validate"
+        def_path, lef_path = export_bookshelf_as_def(benchmark_dir, validate_dir, placement)
+        ppa = evaluate_physical(
+            built, def_path, [lef_path], validate_dir, skip_cell_placement=True, machine=machine,
+        )
+        # The cells WERE placed - by the configured placer, in Bookshelf mode, before conversion.
+        ppa = dataclasses.replace(
+            ppa, cell_placer=physical.cell_placer.name, legalizer=exported.legalizer,
+            max_displacement=exported.max_displacement, off_rows_after=exported.off_rows_after,
+        )
+        write_ppa(output_dir, ppa)
+
+    return FullDesign(
+        result_pl=result_pl, positions=placement, sizes=sizes,
+        macro_names=frozenset(built.benchmark.name_to_idx), full_hpwl=float(full_hpwl), ppa=ppa,
+    )
+
+
+def design_lefs(benchmark_dir: pathlib.Path) -> list[pathlib.Path]:
+    """A DEF benchmark's LEFs in the order a tool must read them: technology first.
+
+    The technology LEF defines the layers every other LEF refers to, and OpenROAD refuses a cell
+    LEF read before it. It is recognised by its content - LAYER definitions and no MACRO - not by
+    its name.
+    """
+    def is_technology(path: pathlib.Path) -> bool:
+        text = path.read_text(errors="ignore")
+        return "\nLAYER " in text and "\nMACRO " not in text
+
+    lefs = sorted(benchmark_dir.glob("*.lef"))
+    return sorted(lefs, key=lambda path: (not is_technology(path), path.name))
+
+
+def _place_and_measure_def(built, positions, output_dir, machine, orientations, cell_placer,
+                           benchmark_dir) -> FullDesign:
+    """The DEF half of `place_cells_and_measure`: the design's own LEFs, its own placer."""
+    from placax.extras.mst import hpwl_wirelength
+    from placax.netlist.def_reader import load_placed_design
+    from placax_tools.pipeline import validate_only
+
+    physical = built.config.environment.physical
+    lefs = design_lefs(benchmark_dir)
+    exported = write_placement(built, positions, output_dir / "placement", orientations)
+    placed_def = cell_placer.place(exported.path, lefs, output_dir / "cells")
+
+    placement, sizes, nets = load_placed_design(placed_def, lefs)
+    centers = {
+        name: (x + sizes[name][0] / 2.0, y + sizes[name][1] / 2.0)
+        for name, (x, y) in placement.items() if name in sizes
+    }
+    full_hpwl = hpwl_wirelength(centers, [
+        [pin for pin in net if pin[0] in centers] for net in nets
+    ])
+
+    ppa = None
+    if physical.validator is not None:
+        validator = built.validator or build_physical(built.config, machine)[1]
+        measured = validate_only(placed_def, lefs, output_dir / "validate", validator)
+        ppa = _physical_result(built.config, measured, placed_def, physical.cell_placer.name)
+        ppa = dataclasses.replace(
+            ppa, legalizer=exported.legalizer, max_displacement=exported.max_displacement,
+            off_rows_after=exported.off_rows_after,
+        )
+        write_ppa(output_dir, ppa)
+
+    return FullDesign(
+        result_pl=placed_def, positions=placement, sizes=sizes,
+        macro_names=frozenset(built.benchmark.name_to_idx), full_hpwl=float(full_hpwl), ppa=ppa,
+    )

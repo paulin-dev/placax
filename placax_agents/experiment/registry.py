@@ -444,8 +444,17 @@ def _resnet_backbone(pretrained: bool = True):
     return build_pretrained_resnet_backbone()
 
 
-def _policy_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
-    return CNNActorCritic(features=features, num_conv_layers=num_conv_layers)
+# Every argument that decides a parameter's SHAPE is a factory argument, and therefore recorded
+# and hashed. A shape left as a module default can change in code without the config noticing - and
+# a checkpoint trained before the change then fails to load with a shape error nothing explains.
+# That happened: MaskPlace's critic table went from 2048 rows to 1400, and a good checkpoint could
+# no longer be replayed from any config.
+
+
+def _policy_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2, kernel_size: int = 3):
+    return CNNActorCritic(
+        features=features, num_conv_layers=num_conv_layers, kernel_size=(kernel_size, kernel_size)
+    )
 
 
 def _policy_mlp(benchmark, features: int = 256, num_layers: int = 2):
@@ -464,7 +473,8 @@ def _policy_mlp(benchmark, features: int = 256, num_layers: int = 2):
     )
 
 
-def _policy_wiremask_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2):
+def _policy_wiremask_cnn(_benchmark, features: int = 16, num_conv_layers: int = 2,
+                         kernel_size: int = 3):
     """The plain CNN plus a wiremask input channel. Requires the `wiremask` state representation.
 
     Shipped and documented since v4 but unregistered until now, which meant an architecture the
@@ -473,20 +483,46 @@ def _policy_wiremask_cnn(_benchmark, features: int = 16, num_conv_layers: int = 
     """
     from placax_agents.policy.architectures.wiremask_cnn import WiremaskCNNActorCritic
 
-    return WiremaskCNNActorCritic(features=features, num_conv_layers=num_conv_layers)
-
-
-def _policy_resnet_coarse_fine(benchmark, critic_style: str = "step_embedding", pretrained: bool = True):
-    """MaskPlace's own network shape: fine + coarse-ResNet branches, step-embedding critic."""
-    from placax_agents.policy.architectures.resnet_cnn import ResNetCoarseFineActorCritic
-
-    return ResNetCoarseFineActorCritic(
-        resnet_backbone=_resnet_backbone(pretrained), params=benchmark.params,
-        cell_size=benchmark.cell_size, critic_style=critic_style,
+    return WiremaskCNNActorCritic(
+        features=features, num_conv_layers=num_conv_layers, kernel_size=(kernel_size, kernel_size)
     )
 
 
-def _policy_oriented_cnn(benchmark, features: int = 16, num_conv_layers: int = 2):
+def _policy_resnet_coarse_fine(
+    benchmark,
+    critic_style: str = "step_embedding",
+    pretrained: bool = True,
+    max_episode_macros: int = 1400,
+    fine_features: int = 8,
+    fine_layers: int = 2,
+    coarse_seed_features: int = 16,
+    resnet_feature_key: str = "block4_1",
+):
+    """MaskPlace's own network shape: fine + coarse-ResNet branches, step-embedding critic.
+
+    `max_episode_macros` sizes the critic's step table (MaskPlace's nn.Embedding(1400, 64)).
+    Checkpoints from before 2026-09 used 2048; pass that to replay one.
+    """
+    from placax_agents.policy.architectures.resnet_cnn import ResNetCoarseFineActorCritic
+
+    if critic_style == "step_embedding" and max_episode_macros < benchmark.params.n_macros:
+        # JAX clamps an out-of-range embedding index instead of raising, so every step past the
+        # table would silently share its last row.
+        raise ValueError(
+            f"max_episode_macros={max_episode_macros} is smaller than this design's "
+            f"{benchmark.params.n_macros} macros; the step-embedding critic needs one row per step"
+        )
+    return ResNetCoarseFineActorCritic(
+        resnet_backbone=_resnet_backbone(pretrained), params=benchmark.params,
+        cell_size=benchmark.cell_size, critic_style=critic_style,
+        max_episode_macros=max_episode_macros, fine_features=fine_features,
+        fine_layers=fine_layers, coarse_seed_features=coarse_seed_features,
+        resnet_feature_key=resnet_feature_key,
+    )
+
+
+def _policy_oriented_cnn(benchmark, features: int = 16, num_conv_layers: int = 2,
+                         kernel_size: int = 3):
     """The plain CNN plus a head that chooses each macro's quarter turn - PPO's `oriented_grid` arm.
 
     The architecture that makes orientation learnable rather than only searchable: it emits
@@ -499,7 +535,7 @@ def _policy_oriented_cnn(benchmark, features: int = 16, num_conv_layers: int = 2
 
     return OrientedCNNActorCritic(
         features=features, num_conv_layers=num_conv_layers,
-        size_scale=float(benchmark.sizes_array.max()),
+        kernel_size=(kernel_size, kernel_size), size_scale=float(benchmark.sizes_array.max()),
     )
 
 
@@ -618,6 +654,10 @@ def _validator_openroad(
     clock_name: str = "core_clock",
     route: str | None = None,
     clock_port: str = "clk",
+    legalize: bool = True,
+    routing_layers: str | None = None,
+    legalizer: str = "diamond",
+    legalize_window: str | None = "5000 1000",
     **kwargs,
 ):
     """OpenROAD, with everything that changes the measurement named here and therefore hashed.
@@ -633,11 +673,60 @@ def _validator_openroad(
     return OpenROADValidator(
         liberty_path=liberty_path, clock_period_ns=clock_period_ns,
         wire_rc_layer=wire_rc_layer, clock_name=clock_name, route=route, clock_port=clock_port,
-        **kwargs
+        legalize=legalize, routing_layers=routing_layers, legalizer=legalizer,
+        legalize_window=legalize_window, **kwargs
     )
 
 
-CELL_PLACERS = {"dreamplace": _cell_placer_dreamplace}
+def _cell_placer_openroad(
+    density: float = 0.7,
+    pin_hor_layers: str | None = None,
+    pin_ver_layers: str | None = None,
+    routing_layers: str | None = None,
+    seed: int | None = None,
+    io_constraints: str | None = None,
+    density_lb_addon: float | None = None,
+    **kwargs,
+):
+    """OpenROAD's global + detailed placer - the cell placer for DEF designs in a real PDK.
+
+    Everything that moves a cell is named here and hashed; the binary and Docker settings arrive
+    through **kwargs as this machine's. See placax_tools/openroad/cell_placer.py.
+    """
+    from placax_tools.openroad.cell_placer import OpenROADCellPlacer
+
+    return OpenROADCellPlacer(
+        density=density, pin_hor_layers=pin_hor_layers, pin_ver_layers=pin_ver_layers,
+        routing_layers=routing_layers, seed=seed, io_constraints=io_constraints,
+        density_lb_addon=density_lb_addon, **kwargs,
+    )
+
+
+def _openroad_cell_placer_class():
+    from placax_tools.openroad.cell_placer import OpenROADCellPlacer
+
+    return OpenROADCellPlacer
+
+
+def _dreamplace_class():
+    from placax_tools.dreamplace.cell_placer import DREAMPlaceCellPlacer
+
+    return DREAMPlaceCellPlacer
+
+
+def _openroad_class():
+    from placax_tools.openroad.validator import OpenROADValidator
+
+    return OpenROADValidator
+
+
+# What each builder's **kwargs forward to, so `build_physical` hands a tool only its own machine
+# settings. A builder without this receives every machine key.
+_cell_placer_dreamplace.forwards_to = _dreamplace_class
+_validator_openroad.forwards_to = _openroad_class
+_cell_placer_openroad.forwards_to = _openroad_cell_placer_class
+
+CELL_PLACERS = {"dreamplace": _cell_placer_dreamplace, "openroad": _cell_placer_openroad}
 VALIDATORS = {"openroad": _validator_openroad}
 
 # ---------------------------------------------------------------------------

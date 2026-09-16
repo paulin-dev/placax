@@ -67,6 +67,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--route", choices=("global", "detailed"), default=None,
                         help="Route before measuring: 'global' adds routed wirelength and vias, "
                              "'detailed' adds DRC violations too (minutes, not seconds).")
+    parser.add_argument("--no_legalize", action="store_true",
+                        help="Measure the design exactly as given, without OpenROAD's own "
+                             "detailed placement as the final legalization step.")
     parser.add_argument("--wire_rc_layer", default="metal3",
                         help="Layer whose RC estimates wire parasitics for timing.")
     parser.add_argument("--clock_port", default="clk",
@@ -90,6 +93,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 CONFIG_OWNED_FLAGS = (
     "target_density", "liberty", "clock_period_ns", "route", "wire_rc_layer", "clock_port",
+    "no_legalize",
 )
 """Flags that describe the EXPERIMENT, not this machine, and so belong in the config.
 
@@ -180,6 +184,7 @@ def main() -> None:
         liberty_path=args.liberty, clock_period_ns=args.clock_period_ns,
         openroad_binary=args.openroad_binary, use_docker=args.use_docker, route=args.route,
         wire_rc_layer=args.wire_rc_layer, clock_port=args.clock_port,
+        legalize=not args.no_legalize,
     )
     if args.liberty is None or args.clock_period_ns is None:
         Log.info("no --liberty/--clock_period_ns: reporting area and utilization only, no timing")
@@ -215,6 +220,10 @@ def _print_metrics(ppa) -> None:
     print(f"  tool:         {ppa.tool_version or '-'}")
     print(f"  design area:  {_or_dash(ppa.design_area, 'um^2')}")
     print(f"  utilization:  {_or_dash(ppa.utilization_pct, '%')}")
+    if ppa.legalized is not None:
+        print(f"  legalized:    {ppa.legalized} (max move "
+              f"{_or_dash(ppa.legalization_max_displacement, 'um')}, HPWL before "
+              f"{_or_dash(ppa.hpwl_before_legalization, 'um')})")
     print(f"  legal:        {legal}")
     for rule, count in dict(ppa.placement_violations).items():
         print(f"    {rule} check failed on {count:,}")

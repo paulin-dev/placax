@@ -1,5 +1,6 @@
 """DREAMPlace-specific CellPlacer."""
 import json
+import logging
 import pathlib
 import subprocess
 
@@ -147,7 +148,11 @@ class DREAMPlaceCellPlacer(CellPlacer):
             if not dreamplace_docker.is_cloned(self.dreamplace_root):
                 self.dreamplace_root.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(dreamplace_docker.clone_command(self.dreamplace_root), check=True)
-            if not dreamplace_docker.is_built(self.dreamplace_root):
+            needs_cuda = self.gpu and not dreamplace_docker.is_built_with_cuda(self.dreamplace_root)
+            if not dreamplace_docker.is_built(self.dreamplace_root) or needs_cuda:
+                if needs_cuda and dreamplace_docker.is_built(self.dreamplace_root):
+                    logging.getLogger(__name__).warning("DREAMPlace was built without CUDA; rebuilding it with the GPU visible "
+                             "(one time, several minutes)")
                 subprocess.run(dreamplace_docker.build_command(self.dreamplace_root, gpu=self.gpu), check=True)
             if not dreamplace_docker.has_pydeps(self.dreamplace_root):
                 subprocess.run(

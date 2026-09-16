@@ -144,14 +144,18 @@ class BenchmarkSpec:
     macro_budget: int | None = None
     order: Spec = field(default_factory=lambda: Spec("alphabetical"))
     netlist_digest: str | None = None
-    canvas: str = "die"
-    """What the grid is scaled and anchored to: the die extent (default, and MaskPlace's own), or
-    the design's placeable core area.
+    canvas: str = "core"
+    """What the grid is scaled and anchored to: the design's placeable core area (default), or the
+    die extent (MaskPlace's own).
 
-    Hashed, and defaulted to the historical behaviour rather than to the correct one, because it
-    moves cell_size and therefore every reward and every HPWL. On adaptec1 the die canvas puts 15%
-    of its cells outside the placement rows, where a macro cannot legally sit - see
-    `Benchmark._canvas`. Runs that predate this field were all `die`, and say so."""
+    Hashed, because it moves cell_size and therefore every reward and every HPWL. `core` is the
+    default because `die` lets an agent choose cells where no macro can legally sit: on adaptec1
+    the die canvas puts 15% of its cells outside the placement rows, and a real OpenROAD run found
+    9 of an agent's 128 macros partly below the first row. A design with no rows (protobuf) needs
+    `die` - `presets.default_canvas` picks that for it, in the config, where it is recorded.
+
+    Loading a manifest that has no `canvas` key still gives `die`: those runs predate the field,
+    and every one of them ran on the die canvas."""
 
     @property
     def path(self) -> pathlib.Path:

@@ -35,13 +35,22 @@ Anything that did not run is None, never a plausible-looking stand-in for a numb
 """
 import pathlib
 import re
-import subprocess
 
+from placax_tools.openroad.runner import openroad_command, resolve_path, run_openroad
 from placax_tools.validator import PPAResult, Validator
 
 ROUTE_MODES = (None, "global", "detailed")
 """How far to route before measuring. `global` gives routed wirelength and via count; `detailed`
 additionally gives DRC violations, at far more runtime - 83s for a 9k-instance sky130 design here."""
+
+LEGALIZER_FLAGS = {"diamond": " -use_diamond_legalizer", "negotiation": ""}
+"""OpenROAD's two detailed-placement legalizers, as the flag that selects each."""
+
+DEFAULT_LEGALIZE_WINDOW = "5000 1000"
+"""How far final legalization may move a cell: sites horizontally, rows vertically."""
+
+LEGALIZED_DEF_NAME = "legalized.def"
+"""The design as OpenROAD measured it, after its own detailed placement."""
 
 METRIC_PREFIX = "PLACAX_METRIC"
 NOTE_PREFIX = "PLACAX_NOTE"
@@ -56,18 +65,50 @@ def _tcl_quote(path) -> str:
     return "{" + str(path) + "}"
 
 
+def liberty_files(liberty_path) -> list:
+    """`liberty_path` as a list: None, one path, or several (a design with macros has one each)."""
+    if liberty_path is None:
+        return []
+    if isinstance(liberty_path, (list, tuple)):
+        return list(liberty_path)
+    return [liberty_path]
+
+
 def build_openroad_script(
     def_path: pathlib.Path,
     lef_paths: list[pathlib.Path],
-    liberty_path: pathlib.Path | None = None,
+    liberty_path=None,
     clock_period_ns: float | None = None,
     wire_rc_layer: str = "metal3",
     clock_name: str = "core_clock",
     route: str | None = None,
     clock_port: str = "clk",
     drc_report: pathlib.Path | None = None,
+    legalize: bool = True,
+    legalized_def: pathlib.Path | None = None,
+    routing_layers: str | None = None,
+    legalizer: str = "diamond",
+    legalize_window: str | None = DEFAULT_LEGALIZE_WINDOW,
 ) -> str:
-    """The Tcl that loads a placed design and prints what it measured, one metric per line."""
+    """The Tcl that loads a placed design and prints what it measured, one metric per line.
+
+    `legalize` runs OpenROAD's own detailed placement first, as the final legalization step, so
+    the design is measured against the tool's full rule set rather than the cell placer's. It moves
+    only unfixed instances - the standard cells; every macro is FIXED - and how far it moved them
+    is reported. `legalized_def` keeps the design that was actually measured.
+
+    `legalizer` picks OpenROAD's algorithm. `diamond` is the default because it is the one that
+    finishes at benchmark scale: on adaptec1 (211k cells at 89% utilization) it legalized every
+    cell in 105s, while the tool's own default, `negotiation`, was stopped after 40 minutes.
+
+    `legalize_window` is how far a cell may be moved, as "<sites> <rows>" (OpenROAD's
+    `-max_displacement`). The tool's own window (500 sites, 100 rows) left two adaptec1 cells
+    boxed in between macros with nowhere to go; the wider default legalized all of them.
+    """
+    if legalizer not in LEGALIZER_FLAGS:
+        raise ValueError(
+            f"unknown legalizer {legalizer!r}; choose one of {', '.join(sorted(LEGALIZER_FLAGS))}"
+        )
     if route not in ROUTE_MODES:
         raise ValueError(
             f"unknown route mode {route!r}; choose one of "
@@ -78,6 +119,39 @@ def build_openroad_script(
 
     lines = [f"read_lef {_tcl_quote(path)}" for path in lef_paths]
     lines.append(f"read_def {_tcl_quote(def_path)}")
+    # Full-design HPWL from the database: every signal net with at least two terminals, from the
+    # pins' real positions. Power and ground are skipped - a supply net's bounding box is the die,
+    # and it is not wirelength anyone placed.
+    lines += [
+        "proc placax_hpwl {} {",
+        "  set block [ord::get_db_block]",
+        "  set total 0",
+        "  foreach net [$block getNets] {",
+        "    if {[$net getSigType] in {POWER GROUND}} { continue }",
+        "    if {[llength [$net getITerms]] + [llength [$net getBTerms]] < 2} { continue }",
+        "    set bb [$net getTermBBox]",
+        "    set total [expr {$total + [$bb dx] + [$bb dy]}]",
+        "  }",
+        "  return [expr {double($total) / [$block getDbUnitsPerMicron]}]",
+        "}",
+    ]
+    window = f" -max_displacement {{{legalize_window}}}" if legalize_window else ""
+    if legalize:
+        # One-site gaps are always disallowed by this OpenROAD (the flag that used to enable the
+        # rule is deprecated), and a Bookshelf cell placer knows nothing of it - on adaptec1 that
+        # was thousands of check failures on an otherwise legal placement.
+        lines += [
+            f'{metric} hpwl_before_legalization_um [placax_hpwl]"',
+            f"if {{[catch {{detailed_placement{LEGALIZER_FLAGS[legalizer]}{window}}}"
+            f" placax_err]}} {{",
+            f'  {metric} legalized 0"',
+            f'  {note} legalize [string map {{"\n" " "}} $placax_err]"',
+            "} else {",
+            f'  {metric} legalized 1"',
+        ]
+        if legalized_def is not None:
+            lines.append(f"  write_def {_tcl_quote(legalized_def)}")
+        lines.append("}")
     lines += [
         f'{metric} tool_version [ord::openroad_version]"',
         # rsz reports area in square metres; everything here is in microns.
@@ -90,28 +164,17 @@ def build_openroad_script(
         "} else {",
         f'  {metric} placement_legal 1"',
         "}",
-        # Full-design HPWL from the database: every signal net with at least two terminals, from
-        # the pins' real positions. Power and ground are skipped - a supply net's bounding box is
-        # the die, and it is not wirelength anyone placed.
-        "set placax_block [ord::get_db_block]",
-        "set placax_hpwl 0",
-        "foreach placax_net [$placax_block getNets] {",
-        "  if {[$placax_net getSigType] in {POWER GROUND}} { continue }",
-        "  if {[llength [$placax_net getITerms]] + [llength [$placax_net getBTerms]] < 2} "
-        "{ continue }",
-        "  set placax_bb [$placax_net getTermBBox]",
-        "  set placax_hpwl [expr {$placax_hpwl + [$placax_bb dx] + [$placax_bb dy]}]",
-        "}",
-        f'{metric} hpwl_um [expr {{double($placax_hpwl) / [$placax_block getDbUnitsPerMicron]}}]"',
+        f'{metric} hpwl_um [placax_hpwl]"',
     ]
 
     # Timing only with both a library and a clock period - never a guessed one. The clock goes on
     # the design's clock PORT: the previous script put it on `[get_ports *]`, which declares every
     # input a clock and times a circuit that does not exist.
-    if liberty_path is not None and clock_period_ns is not None:
+    liberties = liberty_files(liberty_path)
+    if liberties and clock_period_ns is not None:
+        lines += ["if {[catch {"]
+        lines += [f"  read_liberty {_tcl_quote(path)}" for path in liberties]
         lines += [
-            "if {[catch {",
-            f"  read_liberty {_tcl_quote(liberty_path)}",
             f"  set placax_clock [get_ports -quiet {clock_port}]",
             "  if {[llength $placax_clock] == 0} {",
             f'    error "no port named {clock_port} to put the clock on"',
@@ -131,9 +194,10 @@ def build_openroad_script(
         if route == "detailed":
             report = drc_report if drc_report is not None else "drc.rpt"
             detailed = f"\n  detailed_route -output_drc {_tcl_quote(report)}"
+        layers = f"  set_routing_layers -signal {routing_layers}\n" if routing_layers else ""
         lines += [
             "if {[catch {",
-            "  global_route -verbose" + detailed,
+            layers + "  global_route -verbose" + detailed,
             "} placax_err]} {",
             f'  {note} route [string map {{"\\n" " "}} $placax_err]"',
             "}",
@@ -189,6 +253,13 @@ def placement_violations(raw_output: str) -> tuple[tuple[str, int], ...]:
     return tuple((name, int(count)) for name, count in _PLACEMENT_CHECK_RE.findall(raw_output))
 
 
+_DISPLACEMENT_RE = {
+    kind: re.compile(rf"^{kind} displacement\s+([\d.eE+-]+)\s*u", re.MULTILINE)
+    for kind in ("total", "average", "max")
+}
+"""`detailed_placement`'s "Placement Analysis" table, e.g. `max displacement   4.0 u`."""
+
+
 _MESSAGE_ID_RE = re.compile(r"\b([A-Z]{2,4}-\d{4})\b")
 
 
@@ -239,6 +310,16 @@ def parse_openroad_output(raw_output: str, drc_report_text: str | None = None) -
         last_iteration = _last(_DRC_ITERATION_RE, raw_output)
         drc = int(last_iteration) if last_iteration is not None else None
 
+    legalized = metrics.get("legalized")
+    if legalized == "0":
+        # A failed detailed placement has still moved the cells it could: what follows was
+        # measured on that half-legalized design, and the record must not read as the original.
+        notes += ("legalize incomplete: area, legality and hpwl describe the partly legalized "
+                  "design; hpwl_before_legalization is the placement as handed over",)
+    displacement = {
+        kind: _float(_last(pattern, raw_output)) for kind, pattern in _DISPLACEMENT_RE.items()
+    } if legalized == "1" else {}
+
     # A detailed route's numbers supersede the global route's: they describe real wires.
     wirelength = detailed_length if detailed_length is not None else global_length
     vias = detailed_vias if detailed_vias is not None else global_vias
@@ -254,6 +335,11 @@ def parse_openroad_output(raw_output: str, drc_report_text: str | None = None) -
         hpwl=_float(metrics.get("hpwl_um")),
         placement_legal=None if legal is None else legal == "1",
         placement_violations=placement_violations(raw_output),
+        legalized=None if legalized is None else legalized == "1",
+        hpwl_before_legalization=_float(metrics.get("hpwl_before_legalization_um")),
+        legalization_max_displacement=displacement.get("max"),
+        legalization_mean_displacement=displacement.get("average"),
+        legalization_total_displacement=displacement.get("total"),
         total_negative_slack=tns,
         tool_version=metrics.get("tool_version") or None,
         notes=notes,
@@ -274,6 +360,10 @@ class OpenROADValidator(Validator):
         clock_port: str = "clk",
         use_docker: bool = False,
         docker_image: str | None = None,
+        legalize: bool = True,
+        routing_layers: str | None = None,
+        legalizer: str = "diamond",
+        legalize_window: str | None = DEFAULT_LEGALIZE_WINDOW,
     ):
         self.liberty_path = liberty_path
         self.clock_period_ns = clock_period_ns
@@ -284,6 +374,11 @@ class OpenROADValidator(Validator):
         # Part of the experiment, not of this machine: routing changes the result, so it belongs
         # in the validator Spec's kwargs and therefore in the environment hash.
         self.route = route
+        # Also the experiment's: detailed placement moves cells, so it changes what is measured.
+        self.legalize = legalize
+        self.routing_layers = routing_layers
+        self.legalizer = legalizer
+        self.legalize_window = legalize_window
         # Where OpenROAD comes from is this machine's business - but WHICH OpenROAD it is still
         # changes the numbers, which is why the reported tool version travels with every result.
         self.use_docker = use_docker
@@ -298,7 +393,10 @@ class OpenROADValidator(Validator):
             build_openroad_script(
                 def_path, lef_paths, self.liberty_path, self.clock_period_ns,
                 self.wire_rc_layer, self.clock_name, self.route, self.clock_port,
-                drc_report=self._drc_report(output_dir),
+                drc_report=self._drc_report(output_dir), legalize=self.legalize,
+                legalized_def=output_dir / LEGALIZED_DEF_NAME if self.legalize else None,
+                routing_layers=self.routing_layers, legalizer=self.legalizer,
+                legalize_window=self.legalize_window,
             )
         )
         return script_path
@@ -308,27 +406,14 @@ class OpenROADValidator(Validator):
         return output_dir / "drc.rpt"
 
     def _command(self, script_path: pathlib.Path, def_path, lef_paths) -> list[str]:
-        if not self.use_docker:
-            return [self.openroad_binary, "-no_splash", "-exit", str(script_path)]
-        from placax_tools.openroad.docker import OPENROAD_IMAGE, host_mounts, run_openroad_command
-
-        mounts = host_mounts([script_path, def_path, self.liberty_path, *lef_paths])
-        return run_openroad_command(script_path, mounts, self.docker_image or OPENROAD_IMAGE)
+        return openroad_command(
+            script_path, [def_path, *liberty_files(self.liberty_path), *lef_paths],
+            self.openroad_binary, self.use_docker, self.docker_image,
+        )
 
     def _run_openroad(self, command: list[str], output_dir: pathlib.Path) -> str:
         """Runs OpenROAD, keeps its full log beside the results, returns it."""
-        result = subprocess.run(command, capture_output=True, text=True)
-        log = result.stdout + (("\n" + result.stderr) if result.stderr else "")
-        (output_dir / "openroad.log").write_text(log)
-        if result.returncode != 0:
-            # An uncaught Tcl error exits 1 - reading the design failed, which nothing downstream
-            # can recover from. Surfaced with the tool's own last lines rather than a bare code.
-            tail = "\n".join(log.strip().splitlines()[-15:])
-            raise subprocess.CalledProcessError(
-                result.returncode, command, output=log,
-                stderr=f"OpenROAD failed; last lines of {output_dir / 'openroad.log'}:\n{tail}",
-            )
-        return log
+        return run_openroad(command, output_dir / "openroad.log")
 
     def validate(
         self, def_path: pathlib.Path, lef_paths: list[pathlib.Path], output_dir: pathlib.Path
@@ -349,8 +434,4 @@ class OpenROADValidator(Validator):
             drc_text = ""   # the router finished and wrote nothing: that is a clean route
         return parse_openroad_output(raw_output, drc_text)
 
-    @staticmethod
-    def _resolve(path) -> pathlib.Path:
-        """A host path made absolute; an in-image path (one that does not exist here) left alone."""
-        path = pathlib.Path(path)
-        return path.resolve() if path.exists() else path
+    _resolve = staticmethod(resolve_path)

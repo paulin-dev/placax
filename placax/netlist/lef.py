@@ -25,6 +25,19 @@ def parse_lef_sizes(lef_path: pathlib.Path) -> SizeMap:
     }
 
 
+_CLASS_IN_BLOCK_RE = re.compile(r"^\s*CLASS\s+(\S+)", re.MULTILINE)
+
+
+def parse_lef_classes(lef_path: pathlib.Path) -> dict[str, str]:
+    """Returns {macro_name: CLASS} - `BLOCK` for a hard macro, `CORE` for a standard cell, ..."""
+    classes = {}
+    for macro_name, block in _MACRO_BLOCK_RE.findall(lef_path.read_text()):
+        match = _CLASS_IN_BLOCK_RE.search(block)
+        if match:
+            classes[macro_name] = match.group(1)
+    return classes
+
+
 def _parse_macro_pins(macro_block: str, width: float, height: float) -> dict[str, tuple[float, float]]:
     """Returns {pin_name: (x_offset, y_offset)} for one MACRO block."""
     pins = {}

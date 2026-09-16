@@ -6,8 +6,8 @@ placement it measured, so the last box of the architecture sat outside the repro
 envelope the rest of the project is built around.
 
 These tests use stand-in tools, like tests/test_pipeline.py does and for the same reason - the
-point is that the composition doesn't know which tools it is driving. Neither OpenROAD nor a
-DEF/LEF design ships here, so an end-to-end run against the real binaries is still NOT verified.
+point is that the composition doesn't know which tools it is driving. The real binaries are
+exercised by tests/test_openroad_docker.py, and end to end by scripts/run_pipeline.py.
 """
 import dataclasses
 import json
@@ -249,3 +249,117 @@ def test_the_exported_placement_is_the_one_that_was_scored(design) -> None:
     for name, idx in built.benchmark.name_to_idx.items():
         assert f"{name}\t{int(round(idx * cell))}\t{int(round(idx * cell))}\t" in placed_text
     assert measured["real_hpwl"] > 0  # the scored placement is the exported one, not a rerun
+
+
+class StandInBookshelfPlacer(StandInCellPlacer):
+    """Places nothing new: copies the macro .pl through, as a design with no cells would come back."""
+
+    def __init__(self):
+        super().__init__()
+        self.auxes = []
+
+    def place_bookshelf(self, aux_path, output_dir):
+        self.auxes.append(aux_path)
+        result = output_dir / "result" / "s.gp.pl"
+        result.parent.mkdir(parents=True, exist_ok=True)
+        result.write_text((aux_path.parent / "s.pl").read_text())
+        return result
+
+
+def test_one_function_finishes_and_measures_any_agents_placement(design) -> None:
+    """What run_pipeline did inline, as the function a comparison calls once per agent."""
+    import jax.numpy as jnp
+
+    from placax_agents.experiment.physical import place_cells_and_measure
+
+    config, _def_path, _lef_paths, output_dir = design
+    built = build(config)
+    placer, validator = StandInBookshelfPlacer(), StandInValidator()
+    built = dataclasses.replace(built, cell_placer=placer, validator=validator)
+    _add_bookshelf_placement_files(config.environment.benchmark.path)
+    positions = jnp.array([[0, 0], [3, 0], [0, 3]])
+
+    finished = place_cells_and_measure(built, positions, output_dir)
+
+    assert placer.auxes, "the cell placer received the agent's macros"
+    assert set(finished.positions) == {"a", "b", "c"}
+    assert finished.macro_names == {"a", "b", "c"}
+    assert finished.full_hpwl > 0
+    # The validator measured the CONVERTED finished design, and the record names both tools.
+    assert validator.validated == [output_dir.resolve() / "validate" / "s.def"]
+    assert finished.ppa.cell_placer == "dreamplace" and finished.ppa.validator == "openroad"
+    assert finished.ppa.full_hash == built.config.full_hash()
+    assert json.loads((output_dir / PPA_NAME).read_text())["design_area"] == 1234.5
+
+
+def test_finishing_a_placement_needs_a_named_cell_placer(design) -> None:
+    import jax.numpy as jnp
+
+    from placax_agents.experiment.physical import place_cells_and_measure
+
+    config, _def_path, _lef_paths, output_dir = design
+    config = dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment, physical=PhysicalSpec(None, Spec("openroad")),
+    ))
+    with pytest.raises(ValueError, match="names no cell placer"):
+        place_cells_and_measure(build(config), jnp.zeros((3, 2)), output_dir)
+
+
+def test_each_tool_gets_only_its_own_machine_settings(design) -> None:
+    # One machine dict describes the whole host. Handing all of it to both tools made any config
+    # naming both fail on the other tool's keys.
+    from placax_agents.experiment.build import build_physical
+
+    config, *_ = design
+    machine = {"dreamplace_root": "/dp", "use_docker": True, "gpu": True, "openroad_binary": "/or"}
+    placer, validator = build_physical(config, machine)
+    assert placer.gpu is True and placer.use_docker is True
+    assert validator.openroad_binary == "/or" and validator.use_docker is True
+
+
+class StandInDefPlacer(StandInCellPlacer):
+    """Places the one standard cell at a fixed spot, as a real placer writes its result."""
+
+    def place(self, def_path, lef_paths, output_dir):
+        self.lefs.extend(lef_paths)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        placed = output_dir / "placed.def"
+        placed.write_text(def_path.read_text().replace(
+            "- inv0 INV + UNPLACED ;", "- inv0 INV + PLACED ( 50000 50000 ) N ;"))
+        return placed
+
+
+def test_a_def_design_goes_through_its_own_placer_and_its_own_lefs(tmp_path) -> None:
+    """A floorplanned DEF (every instance UNPLACED) through the same function as Bookshelf."""
+    import jax.numpy as jnp
+
+    from placax_agents.experiment.physical import design_lefs, place_cells_and_measure
+    from tests.test_def_reader import FLOORPLAN_DEF, FLOORPLAN_LEF
+
+    bench = tmp_path / "fp"
+    bench.mkdir()
+    (bench / "fp.def").write_text(FLOORPLAN_DEF)
+    (bench / "cells.lef").write_text(FLOORPLAN_LEF)
+    (bench / "a_tech.lef").write_text("VERSION 5.8 ;\nLAYER metal1\n  TYPE ROUTING ;\nEND metal1\n")
+    assert [path.name for path in design_lefs(bench)] == ["a_tech.lef", "cells.lef"]
+    assert design_lefs(bench)[0].name == "a_tech.lef"
+
+    config = training(bench, budget=Budget(iterations=1))
+    config = dataclasses.replace(config, environment=dataclasses.replace(
+        config.environment,
+        benchmark=dataclasses.replace(config.environment.benchmark, grid=8),
+        physical=PhysicalSpec(Spec("openroad"), Spec("openroad")),
+    ))
+    built = build(config)
+    assert set(built.benchmark.name_to_idx) == {"ram0", "ram1"}
+    placer, validator = StandInDefPlacer(), StandInValidator()
+    built = dataclasses.replace(built, cell_placer=placer, validator=validator)
+
+    finished = place_cells_and_measure(built, jnp.array([[0, 0], [4, 4]]), tmp_path / "out")
+
+    exported = (tmp_path / "out" / "placement" / "fp.def").read_text()
+    assert "- ram0 RAM + FIXED" in exported and "- inv0 INV + UNPLACED ;" in exported
+    assert [lef.name for lef in placer.lefs] == ["a_tech.lef", "cells.lef"]
+    assert set(finished.positions) == {"ram0", "ram1", "inv0", "inv1"}
+    assert finished.full_hpwl > 0
+    assert finished.ppa.cell_placer == "openroad" and finished.ppa.design_area == 1234.5

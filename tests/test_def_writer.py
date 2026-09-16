@@ -45,3 +45,15 @@ def test_write_placed_def_at_real_scale() -> None:
     # real floorplan structure (ROW statements) must survive untouched -
     # a downstream cell placer needs this, placax itself never reads it
     assert original.count("\nROW") == new_def.count("\nROW")
+
+
+def test_an_unplaced_macro_is_written_fixed_where_the_agent_put_it() -> None:
+    from tests.test_def_reader import FLOORPLAN_DEF
+
+    new_def = write_placed_def(FLOORPLAN_DEF, {"ram0": (5000, 6000), "ram1": (7000, 8000, "FN")})
+    assert "- ram0 RAM + FIXED ( 5000 6000 ) N ;" in new_def
+    # The two forms OpenROAD writes an unplaced instance in; an attribute survives.
+    assert "- ram1 RAM + SOURCE TIMING + FIXED ( 7000 8000 ) FN ;" in new_def
+    # Nobody else changes: the cells stay for the cell placer.
+    assert "- inv0 INV + UNPLACED ;" in new_def
+    assert "- inv1 INV + PLACED ( 1000 1000 ) N ;" in new_def

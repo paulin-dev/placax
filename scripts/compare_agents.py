@@ -39,7 +39,7 @@ from placax.reproducibility import describe_determinism, fingerprint
 from placax_agents.experiment.budget import Budget
 from placax_agents.experiment.build import build, build_benchmark
 from placax_agents.experiment.config import (
-    AgentSpec, ExperimentConfig, Spec, assert_comparable,
+    AgentSpec, ExperimentConfig, PhysicalSpec, Spec, assert_comparable,
 )
 from placax_agents.experiment.presets import OUTPUT_SUBDIRS, build_preset, comparison_dir
 from placax_agents.experiment.run import (
@@ -47,6 +47,9 @@ from placax_agents.experiment.run import (
 )
 
 DEFAULT_AGENTS = ("greedy_wiremask", "random_search", "ppo")
+
+DEFAULT_DREAMPLACE_ROOT = pathlib.Path("placax_tools/dreamplace/DREAMPlace")
+"""Where --use_docker clones and builds DREAMPlace, as scripts/run_pipeline.py does."""
 
 RESULTS_NAME = "results.json"
 """The table as data, written beside the per-run manifests."""
@@ -125,9 +128,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              '{"temperature": 0.5}}\'. The agent is the thing under test, so '
                              "these differ per row by design; everything else is shared.")
     parser.add_argument("--canvas", default=None, choices=("die", "core"),
-                        help="Override the preset's canvas anchor. 'core' scales and anchors the "
-                             "grid to the design's placement rows; 'die' (the preset default) is "
-                             "the die extent, which puts ~15%% of cells outside the placeable area.")
+                        help="Override the preset's canvas anchor. 'core' (the preset default "
+                             "wherever the design has placement rows) scales and anchors the grid "
+                             "to them; 'die' is the die extent, MaskPlace's own, which puts ~15%% "
+                             "of cells outside the placeable area.")
     parser.add_argument("--output_dir", type=pathlib.Path, default=None,
                         help="Where each run's manifest, log and checkpoints go; one subdirectory "
                              "per agent and seed. Default: runs/<benchmark>-comparison "
@@ -146,7 +150,43 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                              "constructive agent and a perturbation one in one table - they move "
                              "macros differently, so their action space and warm start differ "
                              "and the budget stops being work-matched. The table says so.")
+    physical = parser.add_argument_group(
+        "real PPA", "Finish every agent's placement with the SAME cell placer and measure it with "
+                    "the SAME validator - written into the shared environment, so the table's "
+                    "PPA columns are as comparable as its HPWL one.")
+    physical.add_argument("--validator", default=None,
+                          help="e.g. 'openroad' or 'openroad:route=global'. Off by default: the "
+                               "physical flow costs minutes per run.")
+    physical.add_argument("--physical", type=pathlib.Path, default=None,
+                          help="A whole physical stack as JSON ({cell_placer, validator}) - e.g. "
+                               "the one scripts/make_orfs_benchmark.py writes beside a design.")
+    physical.add_argument("--cell_placer", default="dreamplace",
+                          help="Places the standard cells before validation (default: "
+                               "%(default)s). Ignored without --validator.")
+    physical.add_argument("--use_docker", action="store_true",
+                          help="Run DREAMPlace and OpenROAD from their Docker images.")
+    physical.add_argument("--dreamplace_root", type=pathlib.Path, default=None,
+                          help="A DREAMPlace checkout (default with --use_docker: "
+                               "placax_tools/dreamplace/DREAMPlace).")
+    physical.add_argument("--gpu", action="store_true", help="Run DREAMPlace on GPU.")
+    physical.add_argument("--openroad_binary", default="openroad",
+                          help="OpenROAD executable when not using Docker.")
     parsed = parser.parse_args(argv[1:])
+    if parsed.dreamplace_root is None and parsed.use_docker:
+        parsed.dreamplace_root = DEFAULT_DREAMPLACE_ROOT
+    if parsed.dreamplace_root is not None:
+        parsed.dreamplace_root = parsed.dreamplace_root.resolve()
+    if parsed.physical is not None:
+        parsed.physical_spec = PhysicalSpec.from_dict(json.loads(parsed.physical.read_text()))
+    elif parsed.validator is not None:
+        parsed.physical_spec = PhysicalSpec(Spec.parse(parsed.cell_placer),
+                                            Spec.parse(parsed.validator))
+    else:
+        parsed.physical_spec = None
+    placer = parsed.physical_spec.cell_placer if parsed.physical_spec else None
+    if placer is not None and placer.name == "dreamplace" and parsed.dreamplace_root is None:
+        raise SystemExit("--validator needs placed standard cells: pass --use_docker or "
+                         "--dreamplace_root.")
     parsed.agent_kwargs = json.loads(parsed.agent_kwargs) if parsed.agent_kwargs else {}
     parsed.agent_environment = (
         json.loads(parsed.agent_environment) if parsed.agent_environment else {}
@@ -190,11 +230,53 @@ def _with_overrides(config: ExperimentConfig, args: argparse.Namespace) -> Exper
     environment = {name: Spec.parse(getattr(args, name))
                    for name in ("reward", "action_space", "initial_placement")
                    if getattr(args, name) is not None}
+    if getattr(args, "physical_spec", None) is not None:
+        # The physical stack is ENVIRONMENT: every agent's placement is finished by the same
+        # placer and measured by the same validator, and the manifest of every run says which.
+        environment["physical"] = args.physical_spec
     if not overrides and not environment:
         return config
     return dataclasses.replace(config, environment=dataclasses.replace(
         config.environment, benchmark=dataclasses.replace(benchmark, **overrides), **environment
     ))
+
+
+PPA_FIELDS = (
+    "hpwl", "placement_legal", "placement_violations", "design_area", "utilization_pct",
+    "timing_slack", "total_negative_slack", "routed_wirelength", "via_count", "drc_violations",
+    "tool_version", "notes",
+)
+"""What each row carries from its ppa.json - the full record stays beside the run."""
+
+
+def _measure_physical(built, state, run_dir: pathlib.Path, args) -> dict:
+    """One run's placement, finished and measured by the shared physical stack.
+
+    A failure is recorded on the row rather than raised: a comparison that dies on the ninth
+    agent's OpenROAD run throws away eight finished ones, which is exactly what the incremental
+    results file exists to prevent.
+    """
+    from placax_agents.experiment.physical import place_cells_and_measure
+    from placax_tools.openroad.docker import host_mounts
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    machine = {
+        "dreamplace_root": args.dreamplace_root, "use_docker": args.use_docker, "gpu": args.gpu,
+        "openroad_binary": args.openroad_binary,
+        "extra_mounts": tuple(host_mounts([built.config.environment.benchmark.path, run_dir])),
+    }
+    try:
+        design = place_cells_and_measure(
+            built, built.agent.best_positions(state), run_dir / "physical", machine,
+            best_orientations(built.agent, state),
+        )
+    except Exception as exc:  # noqa: BLE001 - recorded on the row, see above
+        Log.error(f"  physical flow failed: {exc}")
+        return {"ppa_error": f"{type(exc).__name__}: {exc}"}
+    ppa = design.ppa.to_dict() if design.ppa is not None else {}
+    return {"full_hpwl": design.full_hpwl,
+            "ppa": {name: ppa.get(name) for name in PPA_FIELDS}}
 
 
 def _budget(args: argparse.Namespace) -> Budget:
@@ -312,7 +394,47 @@ def _format_table(results: dict[str, list[dict]], budget: Budget, level: str) ->
     lines.append("'legal' counts seeds whose placement had no overlap, nothing out of bounds and "
                  "every macro placed; 'overlap' is the worst seed's overlapping macro area.")
     lines.extend(_paradigm_note(results))
+    lines.extend(_ppa_table(results))
     return "\n".join(lines)
+
+
+def _ppa_table(results: dict[str, list[dict]]) -> list[str]:
+    """The same agents after the real flow, in the order the proxy ranked them.
+
+    Kept in the PROXY's order on purpose: whether the real numbers agree with that ranking is
+    the question this table answers, and re-sorting would hide the answer.
+    """
+    if not any("ppa" in run or "ppa_error" in run for runs in results.values() for run in runs):
+        return []
+
+    def mean(values):
+        values = [v for v in values if v is not None]
+        return statistics.fmean(values) if values else None
+
+    def show(value, spec):
+        return "-" if value is None else format(value, spec)
+
+    header = (f"{'agent':<22s}{'full HPWL':>16s}{'tool HPWL':>16s}{'legal':>8s}"
+              f"{'violations':>12s}{'routed WL':>14s}{'DRC':>7s}{'slack':>9s}{'failed':>8s}")
+    lines = ["", "real PPA - every row finished by the same cell placer, measured by the same "
+                 "validator", header, "-" * len(header)]
+    order = sorted(results.items(), key=lambda kv: statistics.fmean(r["real_hpwl"] for r in kv[1]))
+    for name, runs in order:
+        ppas = [run["ppa"] for run in runs if "ppa" in run]
+        failed = sum(1 for run in runs if "ppa_error" in run)
+        legal = sum(1 for ppa in ppas if ppa.get("placement_legal"))
+        violations = mean(sum((ppa.get("placement_violations") or {}).values()) for ppa in ppas)
+        lines.append(
+            f"{name:<22s}{show(mean(r.get('full_hpwl') for r in runs), ',.0f'):>16s}"
+            f"{show(mean(p.get('hpwl') for p in ppas), ',.0f'):>16s}"
+            f"{legal:>4d}/{len(ppas):<3d}{show(violations, ',.0f'):>12s}"
+            f"{show(mean(p.get('routed_wirelength') for p in ppas), ',.0f'):>14s}"
+            f"{show(mean(p.get('drc_violations') for p in ppas), '.0f'):>7s}"
+            f"{show(mean(p.get('timing_slack') for p in ppas), '.3f'):>9s}{failed:>8d}"
+        )
+    lines.append("Means over seeds; '-' is not measured (see each run's ppa.json notes), never zero. "
+                 "'violations' counts the validator's placement-check failures.")
+    return lines
 
 
 def _paradigm_note(results: dict[str, list[dict]]) -> list[str]:
@@ -500,6 +622,10 @@ def _run_design(benchmark_dir, args, budget, agents, on_result=None
             # handed in - that is the one identifying the design by its contents.
             "full_hash": built.config.full_hash(),
         })
+        if built.config.environment.physical.validator is not None:
+            results[agent_name][-1].update(
+                _measure_physical(built, state, output_root / config.name, args)
+            )
         flag = "" if measured["is_legal"] else "  ILLEGAL"
         Log.info(f"  {config.name}: real_hpwl={measured['real_hpwl']:,.0f} "
                  f"return={measured['reward_return']:,.3f} "

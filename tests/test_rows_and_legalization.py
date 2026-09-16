@@ -158,12 +158,14 @@ def test_is_legal_rejects_off_row_off_site_and_out_of_core() -> None:
 # --------------------------------------------------------------------- the canvas axis
 
 
-def test_the_die_canvas_is_unchanged_and_stays_the_default(tmp_path: pathlib.Path) -> None:
-    # Every result this project has produced was `die`. It has to keep meaning what it meant, or
-    # the fix silently invalidates them instead of letting a hash say so.
+def test_the_die_canvas_is_unchanged_and_presets_now_default_to_core(tmp_path) -> None:
+    # Every result produced before the switch was `die`, and `die` still means what it meant -
+    # old manifests say so (see test_experiment_presets). New configs get `core` wherever the
+    # design has rows, because `die` lets an agent use cells where no macro can legally sit.
     directory = _design(tmp_path / "d")
     assert Benchmark.load(directory, grid=8).origin == (0.0, 0.0)
-    assert training(directory).environment.benchmark.canvas == "die"
+    assert training(directory).environment.benchmark.canvas == "core"
+    assert training(directory, canvas="die").environment.benchmark.canvas == "die"
 
 
 def test_the_core_canvas_is_anchored_and_scaled_to_the_placement_rows(tmp_path) -> None:
@@ -178,7 +180,7 @@ def test_the_canvas_choice_changes_the_hash(tmp_path: pathlib.Path) -> None:
     # It moves cell_size, so it moves every reward and every HPWL. Two runs that differ on it are
     # not comparable, and the hash has to say so.
     directory = _design(tmp_path / "d")
-    die = training(directory, budget=Budget(iterations=1))
+    die = training(directory, budget=Budget(iterations=1), canvas="die")
     core = dataclasses.replace(die, environment=dataclasses.replace(
         die.environment,
         benchmark=dataclasses.replace(die.environment.benchmark, canvas="core"),

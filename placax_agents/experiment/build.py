@@ -574,21 +574,39 @@ def build_physical(config: ExperimentConfig, machine: dict | None = None):
     machine = machine or {}
     physical = config.environment.physical
     cell_placer = (
-        resolve(CELL_PLACERS, _with_machine(physical.cell_placer, machine), what="cell placer")
+        resolve(CELL_PLACERS, _with_machine(physical.cell_placer, machine, CELL_PLACERS),
+                what="cell placer")
         if physical.cell_placer is not None else None
     )
     validator = (
-        resolve(VALIDATORS, _with_machine(physical.validator, machine), what="validator")
+        resolve(VALIDATORS, _with_machine(physical.validator, machine, VALIDATORS),
+                what="validator")
         if physical.validator is not None else None
     )
     return cell_placer, validator
 
 
-def _with_machine(spec, machine: dict):
-    """`spec` with this machine's kwargs merged in. The config's own values always win."""
+def _with_machine(spec, machine: dict, registry: dict):
+    """`spec` with the machine kwargs ITS tool accepts merged in. The config's own values win.
+
+    One `machine` dict describes the whole host - DREAMPlace's install and OpenROAD's binary side
+    by side - so each tool takes only its own keys. Passing everything to both is what made a
+    config naming both tools fail with "unexpected keyword argument 'openroad_binary'".
+    """
+    import inspect
     from dataclasses import replace as _replace
 
-    return _replace(spec, kwargs={**machine, **spec.kwargs})
+    builder = registry.get(spec.name)
+    accepted = None
+    if builder is not None:
+        parameters = inspect.signature(builder).parameters
+        accepted = set(parameters)
+        if any(p.kind is p.VAR_KEYWORD for p in parameters.values()):
+            target = getattr(builder, "forwards_to", None)
+            accepted = (accepted | set(inspect.signature(target()).parameters)
+                        if target is not None else None)
+    own = machine if accepted is None else {k: v for k, v in machine.items() if k in accepted}
+    return _replace(spec, kwargs={**own, **spec.kwargs})
 
 
 def _with_derived_kwargs(config: ExperimentConfig) -> ExperimentConfig:

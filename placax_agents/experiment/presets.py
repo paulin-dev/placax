@@ -31,6 +31,25 @@ WIREMASK_MARGIN = 1.0
 """MaskPlace's own --soft_coefficient default."""
 
 
+def default_canvas(benchmark_dir: pathlib.Path | str) -> str:
+    """`core` for a design that has placement rows, `die` for one that has none.
+
+    Decided when the config is BUILT, so the choice is written into the manifest and hashed like
+    any other - rather than a loader quietly falling back when `core` cannot be honoured. A
+    directory that does not exist (yet) gets the default, `core`.
+    """
+    from placax.netlist.rows import load_placement_rows
+
+    directory = pathlib.Path(benchmark_dir)
+    if not directory.is_dir():
+        return "core"
+    try:
+        rows = load_placement_rows(directory)
+    except (ValueError, StopIteration, FileNotFoundError):
+        return "core"
+    return "core" if rows is not None else "die"
+
+
 def maskplace(
     benchmark_dir: pathlib.Path | str,
     *,
@@ -41,6 +60,7 @@ def maskplace(
     entropy_coef: float = 0.0,
     regularity_weight: float = 0.0,
     regularity_mode: str = "corner",
+    canvas: str | None = None,
 ) -> ExperimentConfig:
     """MaskPlace reproduced: 224 grid, connectivity order, dense HPWL/200 reward, wiremask
     observation and action mask, ResNet coarse/fine policy, buffered PPO.
@@ -60,6 +80,9 @@ def maskplace(
 
     regularity_weight > 0 adds EXPlace's periphery term on top - the one EXPlace change that needs
     none of the preprocessed clustering/dataflow data it ships separately.
+
+    One deliberate departure: the canvas is the design's core (see `default_canvas`), not
+    MaskPlace's die. Pass `canvas="die"` for the paper's exact environment.
     """
     return ExperimentConfig(
         name=f"maskplace-{pathlib.Path(benchmark_dir).name}",
@@ -70,6 +93,7 @@ def maskplace(
                 grid=MASKPLACE_GRID,
                 macro_budget=macro_budget,
                 order=Spec("connectivity_maskplace"),
+                canvas=canvas or default_canvas(benchmark_dir),
             ),
             reward=Spec("maskplace", {
                 "regularity_weight": regularity_weight,
@@ -100,6 +124,7 @@ def training(
     seed: int = 0,
     budget: Budget | None = None,
     n_envs: int = 1,
+    canvas: str | None = None,
 ) -> ExperimentConfig:
     """The plain-CNN baseline: 64 grid, alphabetical order, sparse terminal -HPWL reward, canvas-
     only observation, no extra action mask, textbook PPO defaults, one episode per update.
@@ -118,6 +143,7 @@ def training(
                 grid=64,
                 macro_budget=None,
                 order=Spec("alphabetical"),
+                canvas=canvas or default_canvas(benchmark_dir),
             ),
             reward=Spec("hpwl", {"dense": False, "reward_scale": 1.0}),
             state=Spec("canvas", {"lookahead": 1}),

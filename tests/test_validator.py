@@ -99,7 +99,7 @@ def test_timing_and_routing_failures_are_caught_not_fatal() -> None:
         pathlib.Path("d.def"), [pathlib.Path("t.lef")],
         liberty_path=pathlib.Path("l.lib"), clock_period_ns=2.0, route="global",
     )
-    assert script.count("catch {") == 3   # placement check, timing, routing
+    assert script.count("catch {") == 4   # legalization, placement check, timing, routing
     assert 'PLACAX_NOTE timing' in script and 'PLACAX_NOTE route' in script
 
 
@@ -366,3 +366,69 @@ def test_a_failed_placement_check_says_which_rules_failed() -> None:
         "check_placement DPL-0033: detailed placement checks failed during check placement.",
     )
     assert parse_openroad_output("PLACAX_METRIC placement_legal 1\n").placement_violations == ()
+
+
+
+# ------------------------------------------------------------------ final legalization
+
+def test_openroads_detailed_placement_runs_before_anything_is_measured() -> None:
+    script = build_openroad_script(pathlib.Path("d.def"), [pathlib.Path("t.lef")],
+                                   legalized_def=pathlib.Path("/out/legalized.def"))
+    order = [script.index(marker) for marker in (
+        "PLACAX_METRIC hpwl_before_legalization_um", "detailed_placement",
+        "write_def {/out/legalized.def}", "check_placement", "PLACAX_METRIC hpwl_um",
+    )]
+    assert order == sorted(order)
+    # The deprecated flag is not passed: this OpenROAD always disallows one-site gaps.
+    assert "-disallow_one_site_gaps" not in script
+    assert "detailed_placement -use_diamond_legalizer -max_displacement {5000 1000}" in script
+
+
+def test_the_legalizer_is_selectable_and_checked() -> None:
+    script = build_openroad_script(pathlib.Path("d.def"), [pathlib.Path("t.lef")],
+                                   legalizer="negotiation")
+    assert "{detailed_placement -max_displacement {5000 1000}}" in script
+    narrow = build_openroad_script(pathlib.Path("d.def"), [pathlib.Path("t.lef")],
+                                   legalize_window=None)
+    assert "-max_displacement" not in narrow
+    with pytest.raises(ValueError, match="unknown legalizer"):
+        build_openroad_script(pathlib.Path("d.def"), [pathlib.Path("t.lef")], legalizer="magic")
+
+
+def test_legalization_can_be_turned_off() -> None:
+    script = build_openroad_script(pathlib.Path("d.def"), [pathlib.Path("t.lef")], legalize=False)
+    assert "detailed_placement" not in script and "hpwl_before_legalization" not in script
+    assert "PLACAX_METRIC hpwl_um [placax_hpwl]" in script
+
+
+def test_what_legalization_cost_is_parsed_from_the_tools_own_table() -> None:
+    # Real output: OpenROAD 26Q3-2130 on the converted tiny design with two cells overlapping.
+    raw = (
+        "PLACAX_METRIC hpwl_before_legalization_um 184.5\n"
+        "Placement Analysis\n---------------------------------\n"
+        "total displacement          7.0 u\naverage displacement        1.4 u\n"
+        "max displacement            4.0 u\noriginal HPWL             184.5 u\n"
+        "legalized HPWL            181.5 u\ndelta HPWL                   -2 %\n\n"
+        "PLACAX_METRIC legalized 1\nPLACAX_METRIC placement_legal 1\n"
+        "PLACAX_METRIC hpwl_um 181.5\n"
+    )
+    result = parse_openroad_output(raw)
+    assert result.legalized is True
+    assert result.hpwl_before_legalization == 184.5 and result.hpwl == 181.5
+    assert result.legalization_max_displacement == 4.0
+    assert result.legalization_mean_displacement == 1.4
+    assert result.legalization_total_displacement == 7.0
+
+
+def test_a_failed_legalization_is_a_note_and_no_displacement() -> None:
+    result = parse_openroad_output(
+        "PLACAX_METRIC legalized 0\nPLACAX_NOTE legalize DPL-0036 Detailed placement failed.\n"
+    )
+    assert result.legalized is False
+    assert result.legalization_max_displacement is None
+    assert result.notes[0].startswith("legalize DPL-0036")
+    assert any("partly legalized" in note for note in result.notes)
+
+
+def test_a_validator_without_legalization_reports_none_not_false() -> None:
+    assert parse_openroad_output("PLACAX_METRIC placement_legal 1\n").legalized is None
