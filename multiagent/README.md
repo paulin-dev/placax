@@ -114,6 +114,9 @@ python -m multiagent.visualize --run=multiagent/runs/<run> --against multiagent/
 # All runs as one table
 python -m multiagent.compare multiagent/runs/*
 
+# Rebuild report.html from the runs (--recompute after new or changed runs)
+python -m multiagent.build_report
+
 # Smoke tests (8 macros on a 32 grid), after every change
 python -m pytest multiagent/test_multiagent.py -q
 ```
@@ -149,7 +152,8 @@ python -m pytest multiagent/test_multiagent.py -q
 | `transfer.py` | run a trained policy on another design, no retraining |
 | `visualize.py` | the GIFs and plots for one run |
 | `compare.py` | runs as one table, with an environment-mismatch warning |
-| `report.html` | the write-up |
+| `report.html` | the write-up; generated, don't edit it by hand |
+| `report_template.html`, `build_report.py` | the report's page and the script that fills it from `runs/` (charts, numbers, embedded GIFs) |
 
 Every run directory holds `manifest.json` (written before training), `log.jsonl`, `summary.json`,
 `snapshots/iter_*.npy` (the raw placement at each evaluation — re-legalize these rather than

@@ -1,0 +1,849 @@
+<title>Macro Swarm Placement</title>
+<meta name="description" content="Research report: can chip macros, each acting on local information with one shared policy, refine a placement together?">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<style>
+:root {
+  color-scheme: light;
+  --ground: #f5f6f4;
+  --paper: #fcfcfb;
+  --ink: #16191b;
+  --ink-2: #4f5559;
+  --ink-3: #7a8084;
+  --rule: #d8dcda;
+  --rule-soft: #e7eae8;
+  --accent: #1f5f8b;
+  --policy: #2a78d6;
+  --adam: #eb6834;
+  --pull: #1baf7a;
+  --good: #0ca30c;
+  --warn: #c98500;
+  --bad: #d03b3b;
+  --good-bg: #e6f4e6;
+  --warn-bg: #fbf1dc;
+  --bad-bg: #fae6e6;
+  --plate: #ffffff;
+  --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --cond: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #141617;
+    --paper: #1b1e1f;
+    --ink: #eef0ee;
+    --ink-2: #b9beba;
+    --ink-3: #8b918d;
+    --rule: #33383a;
+    --rule-soft: #262a2c;
+    --accent: #7fb6e0;
+    --policy: #3987e5;
+    --adam: #d95926;
+    --pull: #199e70;
+    --good-bg: #16301a;
+    --warn-bg: #33290f;
+    --bad-bg: #371a1a;
+    --plate: #f4f5f3;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #141617;
+  --paper: #1b1e1f;
+  --ink: #eef0ee;
+  --ink-2: #b9beba;
+  --ink-3: #8b918d;
+  --rule: #33383a;
+  --rule-soft: #262a2c;
+  --accent: #7fb6e0;
+  --policy: #3987e5;
+  --adam: #d95926;
+  --pull: #199e70;
+  --good-bg: #16301a;
+  --warn-bg: #33290f;
+  --bad-bg: #371a1a;
+  --plate: #f4f5f3;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: 17px;
+  line-height: 1.6;
+  padding-inline: 16px;
+  padding-block: 40px 80px;
+}
+.wrap { max-width: 1060px; margin: 0 auto; display: grid; gap: 56px; }
+.col { max-width: 700px; }
+h1, h2, h3, .eyebrow, .figlabel, th, .chip, .legend, .kicker {
+  font-family: var(--cond);
+}
+h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.08; font-weight: 700; margin: 8px 0 16px; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font-size: 26px; font-weight: 600; margin: 0 0 12px; text-wrap: balance; }
+h3 { font-size: 19px; font-weight: 600; margin: 28px 0 6px; }
+p { margin: 0 0 14px; }
+.eyebrow { text-transform: uppercase; letter-spacing: 0.09em; font-size: 13px; color: var(--ink-3); font-weight: 600; }
+.lede { font-size: 20px; color: var(--ink-2); max-width: 680px; }
+.num, code, .mono { font-family: var(--mono); font-size: 0.88em; font-variant-numeric: tabular-nums; }
+code { background: var(--rule-soft); padding: 1px 5px; border-radius: 3px; }
+a { color: var(--accent); }
+section { display: grid; gap: 4px; }
+.sec-head { display: flex; gap: 14px; align-items: baseline; border-top: 2px solid var(--ink); padding-top: 10px; margin-bottom: 8px; }
+.sec-head .kicker { font-size: 13px; color: var(--ink-3); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; min-width: 64px; }
+
+/* verdicts */
+.verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+.verdict { background: var(--paper); padding: 16px 18px; display: grid; gap: 6px; align-content: start; }
+.verdict .q { font-family: var(--cond); font-weight: 600; font-size: 16px; }
+.verdict .a { font-size: 15.5px; color: var(--ink-2); line-height: 1.5; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; padding: 2px 9px 2px 7px; border-radius: 999px; width: fit-content; }
+.chip svg { width: 12px; height: 12px; }
+.chip.good { background: var(--good-bg); color: var(--ink); }
+.chip.good svg { fill: var(--good); }
+.chip.warn { background: var(--warn-bg); color: var(--ink); }
+.chip.warn svg { fill: var(--warn); }
+.chip.bad { background: var(--bad-bg); color: var(--ink); }
+.chip.bad svg { fill: var(--bad); }
+
+/* figures */
+figure { margin: 18px 0 8px; display: grid; gap: 10px; }
+.figbody { background: var(--paper); border: 1px solid var(--rule); padding: 18px; position: relative; overflow-x: auto; }
+figcaption { font-size: 15px; color: var(--ink-2); max-width: 760px; line-height: 1.5; }
+.figlabel { font-weight: 700; color: var(--ink); margin-right: 6px; }
+.plate { background: var(--plate); border-radius: 2px; padding: 6px; }
+.plate img { display: block; width: 100%; height: auto; }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px; }
+.panel-title { font-family: var(--cond); font-weight: 600; font-size: 15px; margin: 0 0 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 14px; color: var(--ink-2); margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend svg { width: 26px; height: 12px; overflow: visible; }
+svg.chart { display: block; width: 100%; height: auto; font-family: var(--cond); }
+svg.chart text { fill: var(--ink-2); font-size: 12px; }
+svg.chart .axis-title { fill: var(--ink-3); font-size: 12px; }
+svg.chart .grid { stroke: var(--rule-soft); stroke-width: 1; }
+svg.chart .zero { stroke: var(--ink-3); stroke-width: 1; }
+svg.chart .rowlabel { fill: var(--ink); font-size: 13px; }
+svg.chart .grouplabel { fill: var(--ink-3); font-size: 11.5px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--paper); font-family: var(--cond); font-size: 13px; line-height: 1.4; padding: 7px 10px; border-radius: 4px; max-width: 280px; z-index: 5; }
+.tip b { font-weight: 600; }
+
+/* tables */
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--paper); }
+table { border-collapse: collapse; width: 100%; font-size: 15px; }
+th { text-align: left; font-weight: 600; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-3); padding: 10px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+td { padding: 9px 14px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+tr:last-child td { border-bottom: 0; }
+td.m { font-family: var(--mono); font-size: 13.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.formula { font-family: var(--mono); font-size: 15px; background: var(--paper); border: 1px solid var(--rule); padding: 12px 16px; overflow-x: auto; white-space: nowrap; margin: 8px 0 16px; }
+ul.tight { margin: 0 0 14px; padding-left: 20px; }
+ul.tight li { margin-bottom: 6px; }
+.callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; color: var(--ink-2); margin: 10px 0 16px; }
+.muted { color: var(--ink-3); }
+footer { font-size: 14px; color: var(--ink-3); border-top: 1px solid var(--rule); padding-top: 14px; }
+@media (max-width: 560px) { body { font-size: 16px; } .lede { font-size: 18px; } .figbody { padding: 12px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header class="col">
+  <div class="eyebrow">Research report · <span class="mono">multiagent/</span> · September 2026</div>
+  <h1>Can a placement emerge from many identical, locally informed macros?</h1>
+  <p class="lede">Every macro on the chip becomes an agent. All agents run one shared network on what they can see, nudge themselves at the same time, and are judged only on the whole chip's wirelength and overlap. This is what we built, what we measured, and what held up.</p>
+</header>
+
+<section aria-labelledby="answers">
+  <div class="sec-head"><span class="kicker">Summary</span><h2 id="answers">The answers so far</h2></div>
+  <div class="verdicts">
+    <div class="verdict">
+      <div class="q">Q1 · Can local agents with one shared brain improve a placement?</div>
+      <span class="chip good"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.6 9.2 1.5 6.1l1.1-1.1 2 2 4.8-4.8 1.1 1.1z"/></svg>Yes, modestly</span>
+      <div class="a">+7.0% legal HPWL on adaptec1, with the three seeds within 0.2 points of each other (overlap penalty 3).</div>
+    </div>
+    <div class="verdict">
+      <div class="q">Q2 · How much does a macro need to see?</div>
+      <span class="chip warn"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 10.5H1zM5.4 4.5v3h1.2v-3zm0 4v1.1h1.2V8.5z"/></svg>It depends on the goal</span>
+      <div class="a">Seeing only itself is enough on the chip it trained on, because it memorizes the chip. Transfer needs its partners: m0 −1.8% versus m1 +7.5% on bigblue1.</div>
+    </div>
+    <div class="verdict">
+      <div class="q">Q3 · Better than optimizing the positions directly?</div>
+      <span class="chip warn"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 10.5H1zM5.4 4.5v3h1.2v-3zm0 4v1.1h1.2V8.5z"/></svg>Mixed</span>
+      <div class="a">On the same objective, yes: +7.0% against Adam's +2.0%. With each at its best penalty, Adam wins (+16.7%). A 0.5-second swap search (+18.1%) beats both. But agents followed by swaps reach <b>+25–26%</b>, the best adaptec1 result.</div>
+    </div>
+    <div class="verdict">
+      <div class="q">Q4 · Does the learned rule help on an unseen chip?</div>
+      <span class="chip bad"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.1 2 6 4.9 8.9 2 10 3.1 7.1 6 10 8.9 8.9 10 6 7.1 3.1 10 2 8.9 4.9 6 2 3.1z"/></svg>No</span>
+      <div class="a">The best bigblue1 transfer (+8.6%) is within random jitter's lucky draws (up to +8.3%), and a swap search gets +44%. On ariane133, every transferred policy loses 1–9%.</div>
+    </div>
+    <div class="verdict">
+      <div class="q">Swarm rules · Do fish-school dynamics (alignment) help?</div>
+      <span class="chip bad"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.1 2 6 4.9 8.9 2 10 3.1 7.1 6 10 8.9 8.9 10 6 7.1 3.1 10 2 8.9 4.9 6 2 3.1z"/></svg>No</span>
+      <div class="a">Alignment takes the gain on adaptec1 from +7% to about 0%. Partners that move together can't shorten the wires between them.</div>
+    </div>
+    <div class="verdict">
+      <div class="q">Swap move · Can the agents trade places themselves?</div>
+      <span class="chip good"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4.6 9.2 1.5 6.1l1.1-1.1 2 2 4.8-4.8 1.1 1.1z"/></svg>Yes, with an exact local judge</span>
+      <div class="a">A leaderless swap swarm, where two macros swap when they pick each other, matches the central swap search and beats it on ariane133 (+35.3% vs +33.8%). A judge <i>learned</i> from the agents' view doesn't transfer.</div>
+    </div>
+    <div class="verdict" style="grid-column: 1 / -1">
+      <div class="q">The methodological lesson · three controls</div>
+      <span class="chip warn"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1 11 10.5H1zM5.4 4.5v3h1.2v-3zm0 4v1.1h1.2V8.5z"/></svg>Needed to judge fairly</span>
+      <div class="a">Random jitter + legalize, a swap search, and a legalizer that works on dense canvases. Without them, the first "+24%" and the bigblue1 transfer looked like wins, and ariane looked unsolvable.</div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="method">
+  <div class="sec-head"><span class="kicker">Method</span><h2 id="method">One shared rule, many macros, one score</h2></div>
+  <div class="col">
+    <p>The design is <b>adaptec1</b> (ISPD 2005): its first 128 macros on a 224 × 224 grid, core canvas. Every episode starts from the <b>greedy wiremask</b> placement, which places each macro on the legal cell that adds the least wirelength. It's legal and scores <span class="num">441,257</span> HPWL. The agents only refine; they never build a placement from scratch.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <svg class="chart" viewBox="0 0 980 300" role="img" aria-label="Diagram of one training episode: the placement is observed per macro, the shared network outputs a bounded move for every macro at once, the placement updates, and the objective's gradient flows back to the shared weights.">
+        <defs>
+          <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" style="fill: var(--ink-2)"/></marker>
+          <marker id="arrb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" style="fill: var(--policy)"/></marker>
+        </defs>
+        <g style="font-family: var(--cond)">
+          <rect x="10" y="40" width="170" height="92" rx="4" style="fill: var(--ground); stroke: var(--rule)"/>
+          <text x="95" y="68" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">Placement xₜ</text>
+          <text x="95" y="90" text-anchor="middle">128 macros, float</text>
+          <text x="95" y="108" text-anchor="middle">grid positions</text>
+
+          <rect x="232" y="40" width="190" height="92" rx="4" style="fill: var(--ground); stroke: var(--rule)"/>
+          <text x="327" y="68" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">View of macro i</text>
+          <text x="327" y="90" text-anchor="middle">m0: itself · m1: + 4 partners</text>
+          <text x="327" y="108" text-anchor="middle">m1all: + all partners</text>
+
+          <rect x="474" y="40" width="180" height="92" rx="4" style="fill: var(--paper); stroke: var(--policy); stroke-width: 2"/>
+          <text x="564" y="68" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">Shared MLP θ</text>
+          <text x="564" y="90" text-anchor="middle">same weights for</text>
+          <text x="564" y="108" text-anchor="middle">every macro</text>
+
+          <rect x="706" y="40" width="264" height="92" rx="4" style="fill: var(--ground); stroke: var(--rule)"/>
+          <text x="838" y="68" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">All move at once</text>
+          <text x="838" y="90" text-anchor="middle">Δᵢ = max_step · tanh(·), ≤ 1 cell</text>
+          <text x="838" y="108" text-anchor="middle">xₜ₊₁ = clip(xₜ + Δ)</text>
+
+          <line x1="180" y1="86" x2="228" y2="86" style="stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <line x1="422" y1="86" x2="470" y2="86" style="stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <line x1="654" y1="86" x2="702" y2="86" style="stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <path d="M838 40 V16 H95 V36" style="fill:none; stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <text x="466" y="11" text-anchor="middle" class="axis-title">repeat 32 steps</text>
+
+          <rect x="560" y="186" width="410" height="64" rx="4" style="fill: var(--paper); stroke: var(--rule)"/>
+          <text x="765" y="212" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">Shared score J(xₜ), the same for every agent</text>
+          <text x="765" y="234" text-anchor="middle">smoothed wirelength + density + overlap</text>
+          <line x1="838" y1="132" x2="838" y2="182" style="stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <path d="M560 218 H564 H520 V136" style="fill:none; stroke: var(--policy); stroke-width:2; stroke-dasharray: 6 4" marker-end="url(#arrb)"/>
+          <text x="408" y="186" text-anchor="middle" style="fill: var(--policy); font-size:13px; font-weight:600">∂J/∂θ through the moves</text>
+          <text x="408" y="204" text-anchor="middle" class="axis-title">each macro gets its own exact share</text>
+          <text x="408" y="220" text-anchor="middle" class="axis-title">path cut every 8 steps</text>
+
+          <rect x="10" y="186" width="250" height="64" rx="4" style="fill: var(--ground); stroke: var(--rule)"/>
+          <text x="135" y="212" text-anchor="middle" style="fill: var(--ink); font-size:15px; font-weight:600">After step 32: legalize</text>
+          <text x="135" y="234" text-anchor="middle">round → re-place overlaps → legal HPWL</text>
+          <path d="M95 132 V182" style="fill:none; stroke: var(--ink-2); stroke-width:1.5" marker-end="url(#arr)"/>
+          <text x="10" y="284" class="axis-title">Training: one episode per iteration, Adam on θ, 100 iterations ≈ 30 s on an RTX 3050 laptop GPU.</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><span class="figlabel">Fig. 1</span>One episode. The whole episode is differentiable, so the gradient of the shared score reaches every macro's move directly, with no sampled returns and no multi-agent credit-assignment problem. This is SHAC's short-horizon window without its critic.</figcaption>
+  </figure>
+  <div class="col">
+    <div class="formula">J(x) = WLₛₘₒₒₜₕ(x) / WL₀  +  λ_d · density(x)  +  λ_o · overlap(x) / macro area</div>
+    <p>The loss is J averaged over the episode's 33 placements, so a policy that dives and drifts back is penalized. Wirelength is log-sum-exp smoothed (γ = 1 cell) so every connected macro receives a gradient. λ_d = 1 throughout; λ_o, the pairwise overlap penalty, was added in the second sweep.</p>
+    <h3>What a macro sees</h3>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>View</th><th>Inputs per macro</th><th>Features</th></tr></thead>
+      <tbody>
+        <tr><td><b>m0</b></td><td>its own position, size and distance to each canvas edge, normalized to the canvas</td><td class="m">8</td></tr>
+        <tr><td><b>m1</b></td><td>m0 + its 4 most strongly wired partners: offset from itself, size, connection weight</td><td class="m">32</td></tr>
+        <tr><td><b>m1all</b></td><td>m1 + a summary of <i>every</i> wired partner: weighted mean offset (the direction a "move toward your partners" rule would step), weighted spread, connection strength, partner count</td><td class="m">38</td></tr>
+        <tr><td><b>m2</b></td><td>m1 + a chip-wide summary (wirelength so far, overlap, episode progress); defined, not studied here</td><td class="m">35</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <h3>What every method is compared against</h3>
+    <ul class="tight">
+      <li><b>Adam on positions</b> (Q3's baseline): the same J minimized directly over the 256 coordinates, with the same bounds and the same legalizer. It's a simple version of DREAMPlace-style analytical placement.</li>
+      <li><b>Pull rule</b> (untrained control): each step, every macro moves one cell toward the weighted centre of its partners. If the learned policy can't beat this, it learned nothing useful.</li>
+      <li><b>Swap search</b> (added last): repeatedly apply the single swap of two same-footprint macros that most shortens the wires. It's legal by construction, takes about a second, and has no learning. It makes the one move no continuous method can.</li>
+      <li><b>Random jitter</b> (control): the greedy start plus 1 cell of Gaussian noise, then the legalizer. It measures how much the legalizer alone can give or take.</li>
+      <li><b>Legalizer</b>, the same for every method: round to the grid, then, largest macro first, move each overlapping macro to the free spot among its 256 nearest that adds the least wire. The final version also tries a <i>spreading</i> pass first (Finding 5) and keeps whichever legal result is shorter.</li>
+      <li><b>Metric:</b> legal HPWL after the legalizer, as % improvement over the greedy start. For learned runs, the <b>median of the last 5 checkpoints</b> across <b>3 seeds</b>, never the best checkpoint (see Fig. 3).</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="crowd">
+  <div class="sec-head"><span class="kicker">Finding 1</span><h2 id="crowd">Without an overlap penalty, the agents learn to crowd and the legalizer decides</h2></div>
+  <div class="col">
+    <p>The first run looked excellent: +24% on adaptec1, above Adam's +21%. Looking closer, the policy was compressing the placement until a third of the macro area overlapped, and handing the legalizer a pile to sort out. Which checkpoint happened to legalize well was close to chance.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-crowd"></div>
+      <div class="two">
+        <div><div class="panel-title">Overlap handed to the legalizer</div><div id="fig-overlap"></div></div>
+        <div><div class="panel-title">Legal HPWL improvement after legalizing</div><div id="fig-impr"></div></div>
+      </div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 2</span>adaptec1, seed 0, evaluated along training. Without a penalty (solid), the policy crowds steadily past 30% overlap and its legal result swings by 20 points between neighbouring checkpoints. With the overlap penalty at 3 (dashed), overlap stays near 3% and the result is steady.</figcaption>
+  </figure>
+  <figure>
+    <div class="figbody two">
+      <div><div class="panel-title">No penalty · warm start → raw end → legalized</div><div class="plate"><img alt="Three panels for the no-penalty policy: greedy start, a raw end state with most macros shown red for overlap, and the legalized result." src="{{IMG_OV0}}"></div></div>
+      <div><div class="panel-title">Overlap penalty 3 · warm start → raw end → legalized</div><div class="plate"><img alt="Three panels for the penalty-3 policy: greedy start, a raw end state with few overlapping macros, and a legalized result close to it." src="{{IMG_OV3}}"></div></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 3</span>The same comparison as placements. Red macros overlap another macro; dashed outlines mark the greedy start, and orange lines show how far each macro moved. Left: the policy collapses whole blocks onto each other. Right: small, local moves that survive legalization almost unchanged.</figcaption>
+  </figure>
+  <figure>
+    <div class="figbody" style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; align-items: start;">
+      <div class="plate"><img alt="Animation of the penalty-3 policy's episode: all 128 macros moving at once for 32 steps, then the legalized result." src="{{GIF_OV3}}"></div>
+      <div>
+        <div class="panel-title">Untrained pull rule: result by episode length</div>
+        <div class="legend" id="leg-pull"></div>
+        <div id="fig-pull"></div>
+        <p class="muted" style="font-size:14px; margin-top:8px">The pull rule has no penalty, so it crowds 50–75% of the macro area. Its legal result swings between −8% and +19% with episode length alone.</p>
+      </div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 4</span>Left: one full episode of the penalty-3 policy; every macro moves in every frame. Right: why a crowding method can't be measured by its best result. A rule with no learning at all reaches +19% on a lucky step count.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="sweep1">
+  <div class="sec-head"><span class="kicker">Finding 2</span><h2 id="sweep1">Sight, big-then-small steps and the overlap penalty</h2></div>
+  <div class="col">
+    <p>Three changes, tried separately and combined, with three seeds each. Transfer means applying the adaptec1-trained policy to <b>bigblue1</b> in one 32-step rollout with no retraining.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-s1"></div>
+      <div id="fig-s1"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 5</span>Each dot is one seed; the bar is the mean. Only the overlap penalty at weight 3 gives seeds that agree (+6.9, +6.6, +7.0). Big-then-small steps (16 cells shrinking to 1) either crush everything, with 63% overlap and legalization moving macros 63 cells on average, or, combined with a strong penalty, scramble the start past recovery (−40%). Values below −25% are pinned to the axis edge.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="sweep2">
+  <div class="sec-head"><span class="kicker">Finding 3</span><h2 id="sweep2">What survives an honest measurement</h2></div>
+  <div class="col">
+    <p>Every run below uses overlap penalty 3. We tested three things: <b>sight</b> (m0 / m1 / m1all); <b>schools</b> (alignment, see the next section); and <b>generalization</b>: noisy starting placements, a random half of macros moving each step, and training on two chips in turn. Each policy is applied without retraining to <b>bigblue1</b> and to <b>ariane133</b>, a RISC-V core with a different netlist format and die canvas.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-s2"></div>
+      <div id="fig-s2"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 6</span>Blue dots are seeds and the bar is their mean, all scored by the final legalizer. Vertical lines show the baselines, each run directly on that chip: Adam at the same penalty (orange, dashed), Adam with no penalty (orange, dotted), and the pull rule (aqua). On adaptec1 every learned view beats Adam at the same penalty. On bigblue1, only views that include partners improve anything. On ariane133, no transferred policy gets above zero.</figcaption>
+  </figure>
+  <div class="col">
+    <h3>Reading it</h3>
+    <ul class="tight">
+      <li><b>Sight doesn't matter where the policy trained; it matters for transfer.</b> m0 matches m1 on adaptec1 (+6.7% vs +5.6%) because its absolute position lets it memorize the chip. That rule fails on bigblue1 (−1.8%), while m1 transfers at +7.5%.</li>
+      <li><b>Breaking the memorization helps transfer and costs the home chip.</b> Noisy starts and random-subset moves fall to about 0–2% on adaptec1 but reach +6.6% and +8.6% on bigblue1, above Adam run from scratch there at the same penalty (+4.1%).</li>
+      <li><b>ariane133 resists every continuous method.</b> Even Adam, optimizing ariane directly, only reaches +0.6%. Finding 5 shows why: first the legalizer, then the kind of move itself.</li>
+      <li><b>These transfer numbers still need a control.</b> On bigblue1, random jitter plus the legalizer ranges from −8.3% to +8.3% (Finding 6), so the +7–9% transfers are not clearly above chance.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="swarm">
+  <div class="sec-head"><span class="kicker">Finding 4</span><h2 id="swarm">Macros as fish: what swarm research offers, and what it did</h2></div>
+  <div class="col">
+    <p>Reynolds' boids (1987) produce flocks and fish schools from three local rules, applied by every individual with no leader. Two of the three have existed in chip placement for decades as <b>force-directed placement</b> (Eisenmann &amp; Johannes, 1998; Kraftwerk2, 2008): nets act as springs and density acts as repulsion. Our objective already contains both.</p>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Boids rule</th><th>Fish</th><th>Macros</th><th>Tested as</th><th>Result</th></tr></thead>
+      <tbody>
+        <tr><td><b>Cohesion</b></td><td>steer toward neighbours' centre</td><td>pull toward wired partners</td><td>wirelength term; the pull rule</td><td>the source of every gain, and of the crowding</td></tr>
+        <tr><td><b>Separation</b></td><td>avoid crowding neighbours</td><td>don't overlap</td><td>overlap penalty λ_o</td><td>made results reliable; λ_o = 3 best</td></tr>
+        <tr><td><b>Alignment</b></td><td>match neighbours' heading</td><td>move with your partners, so clusters travel as schools</td><td>Δᵢ ← (1−a)·Δᵢ + a·mean of partners' Δ, with a ∈ {0.5, 0.9}</td><td><b>hurts</b>: adaptec1 +7% → about 0%</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p style="margin-top:14px"><b>Why alignment fails here.</b> Wirelength shrinks only when connected macros move <i>relative to each other</i>, and alignment is designed to make them move together. A school keeps its internal wires the same length. It only helps when a whole cluster should migrate far, which 32 steps of at most one cell rule out, and a big-step schedule plus a penalty can't recover from.</p>
+    <p><b>The closest relative in machine learning is the neural cellular automaton</b> (Mordvintsev et al., <i>Growing NCA</i>, 2020). Identical cells run a learned local rule, trained by backprop through the unrolled dynamics, which is our recipe exactly. We borrowed its two training techniques. <b>Random-subset updates</b> gave the best bigblue1 transfer (+8.6%). <b>Varied starting states</b> reduced memorization (+6.6%). Neither rescued ariane133.</p>
+    <p class="callout">Particle-swarm and ant-colony floorplanners share the word "swarm" but not the idea: their agents are candidate <i>solutions</i>, not blocks.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-school"></div>
+      <div id="fig-school"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 7</span>The swarm and NCA variants against the plain m1all policy, all at overlap penalty 3, shown as seed means on each chip. Alignment trades the home-chip gain for small moves everywhere. Random-subset updates trade the home chip for transfer.</figcaption>
+  </figure>
+</section>
+
+<section aria-labelledby="ariane">
+  <div class="sec-head"><span class="kicker">Finding 5</span><h2 id="ariane">Why ariane133 resisted: first the legalizer, then the move set</h2></div>
+  <div class="col">
+    <p>ariane133 is 128 <b>identical 17 × 11-cell SRAMs covering 50% of the canvas</b>; adaptec1 covers 29% and bigblue1 3.5%. The original legalizer could only move an overlapping macro into a hole that was already free. On a packed canvas that hole is far away, so one cell of overlap became a ~28-cell jump. Adam shows it clearly: it shortened ariane's raw HPWL by 13%, then the legalizer turned that into −7%.</p>
+    <p><b>The fix is the swarm's separation rule, used as a legalizer.</b> Take small gradient steps on the pairwise overlap area alone, so packed neighbours each shift a little instead of one block teleporting, then run the usual repair. Spreading hurts on a sparse canvas, where choosing among free spots is itself an optimizer, so the final legalizer tries both and keeps the shorter legal result. A legal placement passes through untouched.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-jit"></div>
+      <div id="fig-jit"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 8</span>The no-intelligence control: the greedy start plus 1 cell of random jitter, then legalized (5 seeds). With the original legalizer, ariane loses 7–11% and macros move ~28 cells on average; with the final one, it loses ~2% and they move ~2 cells. On bigblue1 the final legalizer always keeps the original result, and the lottery remains: −8.3% to +8.3% from noise alone.</figcaption>
+  </figure>
+  <div class="col">
+    <p><b>With a fair legalizer, continuous moves still don't help ariane.</b> Adam reaches +0.6% and the transferred policies −1% to −9%. Yet a plain swap search gets <b>+33.8%</b>. ariane's slack lies in <i>which</i> SRAM sits in which slot. Swapping two blocks with small moves means passing them through each other, which every overlap term forbids. Nudging agents, Adam and fish schools all share that blind spot.</p>
+  </div>
+</section>
+
+<section aria-labelledby="q3">
+  <div class="sec-head"><span class="kicker">Finding 6</span><h2 id="q3">Q3, settled on fair terms</h2></div>
+  <div class="col">
+    <p>Every number below uses the final legalizer and, for learned runs, the median of the last 5 checkpoints over 3 seeds. The right-hand marker applies the swap search to each method's legal output, testing whether nudges and swaps <i>combine</i>.</p>
+  </div>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-q3"></div>
+      <div id="fig-q3"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 9</span>adaptec1, the only chip where every method ran directly. Alone, the agents beat Adam on their shared objective but lose to Adam at its best penalty and to swaps. Followed by swaps, the agents reach +25% on every seed; that's 7 points above swaps alone and 5 above Adam plus swaps. The agents' nudges and the swaps are complementary.</figcaption>
+  </figure>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-unseen"></div>
+      <div id="fig-unseen"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 10</span>On chips the policy never saw, the complement disappears: the swap search alone beats every transferred policy, and running the policy first makes swaps slightly <i>worse</i>. The grey band is random jitter's range, the no-intelligence control.</figcaption>
+  </figure>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th>Fair comparison</th><th>Result</th><th>Winner</th></tr></thead>
+      <tbody>
+        <tr><td>Same objective, same penalty (λ_o = 3)</td><td class="m">+7.0% vs +2.0%</td><td>Agents</td></tr>
+        <tr><td>Each method at its own best penalty</td><td class="m">+7.0% vs +16.7%</td><td>Adam</td></tr>
+        <tr><td>Against a 0.5-second swap search</td><td class="m">+7.0% / +16.7% vs +18.1%</td><td>Swaps</td></tr>
+        <tr><td>Followed by swaps, on the training chip</td><td class="m">+25.0% vs +17–20%</td><td>Agents</td></tr>
+        <tr><td>Followed by swaps, on unseen chips</td><td class="m">below swaps alone</td><td>Swaps</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section aria-labelledby="swapswarm">
+  <div class="sec-head"><span class="kicker">Finding 7</span><h2 id="swapswarm">Agents that swap places themselves</h2></div>
+  <div class="col">
+    <p>Finding 6 found the move every continuous method lacks. This gives it to the agents. Each macro considers trading places with same-footprint macros (so legality is kept by construction). <b>A swap happens only when two macros pick each other</b>, and all agreed swaps in a round happen at once, with no coordinator. A macro judges a swap in one of two ways. The <b>exact</b> judge is the true wirelength change of its own nets: local information, but exact pin geometry. The <b>learned</b> judge is a shared network that reads only the nudging policy's view (m0 / m1 / m1all for both macros) and predicts that change; it's trained on adaptec1.</p>
+  </div>
+  <figure>
+    <div class="figbody two">
+      <div><div class="panel-title">ariane133 · exact judge · +35.3% in 47 rounds</div><div class="plate"><img alt="Animation of the swap swarm on ariane133: in each round, a few pairs of identical SRAMs trade places, highlighted purple and linked." src="{{GIF_SW_ARIANE}}"></div></div>
+      <div style="display:grid; gap:14px; align-content:start">
+        <div><div class="panel-title">adaptec1 · all agreed swaps at once · −15.1%</div><div class="plate"><img alt="Animation: the four large adaptec1 macros swap back and forth each round, making the chip worse." src="{{GIF_SW_A1_BAD}}"></div></div>
+        <div><div class="panel-title">adaptec1 · a swap waits for better wired ones · +18.1%</div><div class="plate"><img alt="Animation: three swaps in one round, improving adaptec1 by 18 percent." src="{{GIF_SW_A1_GOOD}}"></div></div>
+      </div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 11</span>Purple blocks just traded places (linked); orange lines show how far each macro now sits from its greedy slot. On adaptec1, macros of the same size share buses, so swaps chosen independently and applied together interfere. The four big blocks swap back and forth and the chip gets 15% worse. The fix is local: a swap waits if a wired partner is in a better swap that round.</figcaption>
+  </figure>
+  <figure>
+    <div class="figbody">
+      <div class="legend" id="leg-swarm"></div>
+      <div id="fig-swarm"></div>
+    </div>
+    <figcaption><span class="figlabel">Fig. 12</span>Every swap variant against the central swap search (black line). With an exact judge and local conflict resolution, the swarm matches the central search on adaptec1 and bigblue1 and beats it on ariane133. Seeing only the 8 nearest same-size macros halves the gain on ariane. Learned judges find the key adaptec1 swaps on some seeds and help nowhere else, even when trained on two chips. m0 never swaps usefully. The policy's nudges help only before swaps on its own chip.</figcaption>
+  </figure>
+  <div class="col">
+    <ul class="tight">
+      <li><b>Decentralized swapping works, once conflicts are resolved locally.</b> It's the textbook multi-agent coordination failure, with the textbook fix. The swarm needs fewer parallel rounds (47 on ariane) than the central search's sequential swaps (97).</li>
+      <li><b>Sight matters again, as range this time.</b> Swaps need to see far: the best partner to trade with is rarely among the nearest 8.</li>
+      <li><b>Learning <i>when</i> to swap fails the same way learning <i>where</i> to move did:</b> it works partly on the chip it learned from and not elsewhere. A macro can compute its exact swap gain from its own nets, so here the learned judge only adds error.</li>
+      <li><b>Nudges and swaps combine only on the training chip.</b> Nudges then swaps gives +25.8% on adaptec1 (one policy seed), the best result there. On unseen chips the nudges cost more than they set up.</li>
+    </ul>
+  </div>
+</section>
+
+<section aria-labelledby="limits">
+  <div class="sec-head"><span class="kicker">Limits</span><h2 id="limits">What these numbers do not show, and what comes next</h2></div>
+  <div class="col">
+    <ul class="tight">
+      <li><b>Three designs, 128 macros, wirelength only.</b> No timing or congestion; none of these benchmarks ships a <code>.lib</code> or <code>.sdc</code>.</li>
+      <li><b>Adam isn't DREAMPlace.</b> A faithful analytical placer, with electrostatic density and Nesterov steps, is the real bar for Q3.</li>
+      <li><b>The legalizer still contributes.</b> At penalty 3 the smoothed wirelength falls only about 3% before legalizing; the rest comes from legalizing the few remaining overlaps well. It's the same for every method, and Fig. 8 bounds how much it can give by itself.</li>
+      <li><b>No critic.</b> Gradients are cut every 8 steps with nothing to bootstrap the future; real SHAC would add a value function.</li>
+    </ul>
+    <p><b>Next.</b> The swarm that works is the one with an <b>exact local judge</b> and conflict resolution. Learning adds error to a quantity each macro can compute itself. Two directions follow. First, swaps between <i>different</i>-size macros, which need a legal repair and so a learned or searched judge. Second, the nudge + swap swarm as a refinement stage behind a stronger constructive placer, measured against a real DREAMPlace run on more than three designs.</p>
+  </div>
+</section>
+
+<footer>
+  Code: <code>multiagent/</code>: <code>train.py</code>, <code>adam.py</code>, <code>pull.py</code>, <code>transfer.py</code>, <code>swap.py</code>, <code>swarm_swap.py</code>, <code>legalize.py</code>, <code>visualize.py</code>. Runs: <code>multiagent/runs/sweep</code>, <code>sweep2</code>, <code>q3</code>, <code>swarmswap</code>. References: C. Reynolds, <i>Flocks, herds and schools</i>, SIGGRAPH 1987 · H. Eisenmann &amp; F. M. Johannes, <i>Generic global placement and floorplanning</i>, DAC 1998 · P. Spindler et al., <i>Kraftwerk2</i>, TCAD 2008 · A. Mordvintsev et al., <i>Growing Neural Cellular Automata</i>, Distill 2020 · J. Xu et al., <i>Accelerated Policy Learning with Parallel Differentiable Simulation</i> (SHAC), ICLR 2022 · Y. Shi et al., <i>Macro Placement by Wire-Mask-Guided Black-Box Optimization</i>, NeurIPS 2023.
+</footer>
+</div>
+
+<script>
+const DATA = {{DATA}};
+const NS = "http://www.w3.org/2000/svg";
+const pct = v => (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+const pct0 = v => (v * 100).toFixed(0) + "%";
+const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
+function el(tag, attrs = {}, parent) {
+  const n = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+function tipFor(host) {
+  const box = host.closest(".figbody");
+  let tip = box.querySelector(".tip");
+  if (!tip) { tip = document.createElement("div"); tip.className = "tip"; tip.hidden = true; box.appendChild(tip); }
+  return {
+    show(html, evt) {
+      tip.innerHTML = html; tip.hidden = false;
+      const r = box.getBoundingClientRect();
+      let x = evt.clientX - r.left + box.scrollLeft + 14, y = evt.clientY - r.top + 12;
+      if (x + tip.offsetWidth > box.scrollWidth - 6) x = x - tip.offsetWidth - 28;
+      tip.style.left = x + "px"; tip.style.top = y + "px";
+    },
+    hide() { tip.hidden = true; },
+  };
+}
+function legend(id, items) {
+  const box = document.getElementById(id);
+  for (const it of items) {
+    const s = document.createElement("span");
+    let mark;
+    if (it.kind === "dot") mark = `<svg viewBox="0 0 26 12"><circle cx="13" cy="6" r="4.5" style="fill:${it.color}; stroke: var(--paper); stroke-width:1.5"/></svg>`;
+    else if (it.kind === "bar") mark = `<svg viewBox="0 0 26 12"><rect x="11.5" y="0" width="3" height="12" rx="1" style="fill:${it.color}"/></svg>`;
+    else mark = `<svg viewBox="0 0 26 12"><line x1="1" y1="6" x2="25" y2="6" style="stroke:${it.color}; stroke-width:2; stroke-dasharray:${it.dash || "none"}"/></svg>`;
+    s.innerHTML = mark + it.label;
+    box.appendChild(s);
+  }
+}
+
+/* ---------- line chart with crosshair tooltip ---------- */
+function lineChart(id, opt) {
+  const host = document.getElementById(id);
+  const W = opt.width || 480, H = opt.height || 260, m = { l: 48, r: 14, t: 10, b: 38 };
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opt.aria }, host);
+  const xs = opt.series.flatMap(s => s.points.map(p => p[0]));
+  const x0 = opt.xDomain ? opt.xDomain[0] : Math.min(...xs), x1 = opt.xDomain ? opt.xDomain[1] : Math.max(...xs);
+  const [y0, y1] = opt.yDomain;
+  const X = v => m.l + (v - x0) / (x1 - x0) * (W - m.l - m.r);
+  const Y = v => H - m.b - (Math.max(y0, Math.min(y1, v)) - y0) / (y1 - y0) * (H - m.t - m.b);
+  for (const t of opt.yTicks) {
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), class: t === 0 ? "zero" : "grid" }, svg);
+    el("text", { x: m.l - 6, y: Y(t) + 4, "text-anchor": "end" }, svg).textContent = opt.yFmt(t);
+  }
+  for (const t of opt.xTicks) {
+    el("text", { x: X(t.v ?? t), y: H - m.b + 16, "text-anchor": "middle" }, svg).textContent = t.label ?? t;
+  }
+  el("text", { x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle", class: "axis-title" }, svg).textContent = opt.xTitle;
+  for (const s of opt.series) {
+    const d = s.points.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + " " + Y(p[1]).toFixed(1)).join(" ");
+    el("path", { d, style: `fill:none; stroke:${s.color}; stroke-width:2; stroke-dasharray:${s.dash || "none"}; stroke-linejoin:round` }, svg);
+  }
+  const cross = el("line", { y1: m.t, y2: H - m.b, style: "stroke: var(--ink-3); stroke-width:1", visibility: "hidden" }, svg);
+  const dots = opt.series.map(s => el("circle", { r: 4.5, style: `fill:${s.color}; stroke: var(--paper); stroke-width:2`, visibility: "hidden" }, svg));
+  const hit = el("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, style: "fill: transparent" }, svg);
+  const tip = tipFor(host);
+  hit.addEventListener("pointermove", e => {
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+    const loc = pt.matrixTransform(svg.getScreenCTM().inverse());
+    const xv = x0 + (loc.x - m.l) / (W - m.l - m.r) * (x1 - x0);
+    cross.setAttribute("x1", loc.x); cross.setAttribute("x2", loc.x); cross.setAttribute("visibility", "visible");
+    let rows = [];
+    opt.series.forEach((s, i) => {
+      const p = s.points.reduce((a, b) => Math.abs(b[0] - xv) < Math.abs(a[0] - xv) ? b : a);
+      dots[i].setAttribute("cx", X(p[0])); dots[i].setAttribute("cy", Y(p[1])); dots[i].setAttribute("visibility", "visible");
+      rows.push(`${s.label}: <b>${opt.yFmt(p[1], true)}</b> <span style="opacity:.7">@ ${opt.xFmt ? opt.xFmt(p[0]) : p[0]}</span>`);
+    });
+    tip.show(rows.join("<br>"), e);
+  });
+  hit.addEventListener("pointerleave", () => { cross.setAttribute("visibility", "hidden"); dots.forEach(d => d.setAttribute("visibility", "hidden")); tip.hide(); });
+}
+
+/* ---------- dot panels: rows x chips, seeds + mean + baseline lines ---------- */
+function dotPanels(id, opt) {
+  const host = document.getElementById(id);
+  const labelW = opt.labelW || 210, panelW = opt.panelW || 250, gap = 22, rowH = 30, top = 44;
+  const groups = [];
+  for (const r of opt.rows) { if (!groups.length || groups[groups.length - 1] !== r.group) groups.push(r.group); }
+  const groupPad = opt.rows.some(r => r.group) ? 24 : 0;
+  let y = top; const rowY = [];
+  let prev = null;
+  for (const r of opt.rows) { if (r.group && r.group !== prev) { y += groupPad; prev = r.group; } rowY.push(y + rowH / 2); y += rowH; }
+  const W = labelW + opt.panels.length * (panelW + gap), H = y + 34;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opt.aria, style: `min-width:${Math.min(W, 640)}px` }, host);
+  const [d0, d1] = opt.domain;
+  const tip = tipFor(host);
+  // group labels
+  prev = null;
+  opt.rows.forEach((r, i) => {
+    if (r.group && r.group !== prev) {
+      el("text", { x: 0, y: rowY[i] - rowH / 2 - 8, class: "grouplabel" }, svg).textContent = r.group;
+      prev = r.group;
+    }
+    el("text", { x: 0, y: rowY[i] + 4.5, class: "rowlabel" }, svg).textContent = r.label;
+  });
+  opt.panels.forEach((p, k) => {
+    const px = labelW + k * (panelW + gap);
+    const X = v => px + (Math.max(d0, Math.min(d1, v)) - d0) / (d1 - d0) * panelW;
+    el("text", { x: px + panelW / 2, y: 16, "text-anchor": "middle", style: "fill: var(--ink); font-size:14px; font-weight:600" }, svg).textContent = p.title;
+    if (p.subtitle) el("text", { x: px + panelW / 2, y: 32, "text-anchor": "middle", class: "axis-title" }, svg).textContent = p.subtitle;
+    for (const t of opt.ticks) {
+      el("line", { x1: X(t), x2: X(t), y1: top, y2: y, class: t === 0 ? "zero" : "grid" }, svg);
+      el("text", { x: X(t), y: y + 16, "text-anchor": "middle" }, svg).textContent = t === 0 ? "0" : pct0(t).replace("-", "−");
+    }
+    if (p.band) {
+      const band = el("rect", { x: X(p.band[0]), y: top, width: X(p.band[1]) - X(p.band[0]), height: y - top, style: "fill: var(--ink-3); opacity:.16" }, svg);
+      band.addEventListener("pointermove", e => tip.show(`<b>Random jitter + legalize</b> (control) on ${p.title}:<br>${pct(p.band[0])} to ${pct(p.band[1])}`, e));
+      band.addEventListener("pointerleave", () => tip.hide());
+    }
+    // row banding for legibility
+    opt.rows.forEach((r, i) => { if (i % 2 === 0) el("rect", { x: px, y: rowY[i] - rowH / 2, width: panelW, height: rowH, style: "fill: var(--ground); opacity:.55" }, svg); });
+    for (const ref of (p.refs || [])) {
+      if (ref.value == null) continue;
+      const line = el("line", { x1: X(ref.value), x2: X(ref.value), y1: top - 4, y2: y, style: `stroke:${ref.color}; stroke-width:2; stroke-dasharray:${ref.dash || "none"}` }, svg);
+      const hitl = el("rect", { x: X(ref.value) - 6, y: top - 4, width: 12, height: y - top + 4, style: "fill: transparent" }, svg);
+      hitl.addEventListener("pointermove", e => tip.show(`<b>${ref.label}</b> on ${p.title}: <b>${pct(ref.value)}</b>`, e));
+      hitl.addEventListener("pointerleave", () => tip.hide());
+    }
+    opt.rows.forEach((r, i) => {
+      const vals = (r.values[p.key] || []).filter(v => v != null);
+      if (!vals.length) {
+        el("text", { x: px + panelW / 2, y: rowY[i] + 4, "text-anchor": "middle", class: "axis-title" }, svg).textContent = r.note?.[p.key] || "n/a";
+        return;
+      }
+      const mu = mean(vals);
+      el("rect", { x: X(mu) - 1.5, y: rowY[i] - 10, width: 3, height: 20, rx: 1, style: `fill: var(--ink)` }, svg);
+      vals.forEach((v, s) => {
+        const clipped = v < d0 || v > d1;
+        const c = el("circle", { cx: X(v), cy: rowY[i], r: 5, style: `fill:${opt.color}; stroke: var(--paper); stroke-width:1.5; ${clipped ? "fill-opacity:.35" : ""}` }, svg);
+        const hitc = el("circle", { cx: X(v), cy: rowY[i], r: 10, style: "fill: transparent" }, svg);
+        hitc.addEventListener("pointermove", e => tip.show(`<b>${r.label}</b>, seed ${s}<br>${p.title}: <b>${pct(v)}</b>${clipped ? " (off scale)" : ""}<br>mean of seeds: ${pct(mu)}`, e));
+        hitc.addEventListener("pointerleave", () => tip.hide());
+      });
+      if (r.note?.[p.key]) el("text", { x: X(mu) + 8, y: rowY[i] - 9, class: "axis-title", style: "font-size:10.5px" }, svg).textContent = r.note[p.key];
+    });
+    el("text", { x: px + panelW / 2, y: y + 32, "text-anchor": "middle", class: "axis-title" }, svg).textContent = "legal HPWL vs greedy start";
+  });
+}
+
+/* ---------- data wiring ---------- */
+const C = n => `var(--${n})`;
+const B = DATA.baselines;
+const seeds = (grp, name, key) => (grp[name] || []).map(r => r[key]);
+
+// Fig 2
+legend("leg-crowd", [
+  { label: "Policy, no penalty", color: C("policy") },
+  { label: "Policy, penalty 3", color: C("policy"), dash: "6 4" },
+  { label: "Adam, no penalty", color: C("adam") },
+  { label: "Adam, penalty 3", color: C("adam"), dash: "6 4" },
+]);
+const cv = DATA.curves;
+const crowdSeries = idx => [
+  { label: "Policy, no penalty", color: C("policy"), points: cv.policy_ov0.map(r => [r[0], r[idx]]) },
+  { label: "Policy, penalty 3", color: C("policy"), dash: "6 4", points: cv.policy_ov3.map(r => [r[0], r[idx]]) },
+  { label: "Adam, no penalty", color: C("adam"), points: cv.adam_ov0.map(r => [r[0], r[idx]]) },
+  { label: "Adam, penalty 3", color: C("adam"), dash: "6 4", points: cv.adam_ov3.map(r => [r[0], r[idx]]) },
+];
+const moveTicks = [0, 800, 1600, 2400, 3200];
+lineChart("fig-overlap", {
+  series: crowdSeries(2), yDomain: [0, 0.4], yTicks: [0, 0.1, 0.2, 0.3, 0.4], yFmt: v => pct0(v),
+  xTicks: moveTicks, xDomain: [0, 3200], xTitle: "simultaneous moves spent", xFmt: v => v + " moves",
+  aria: "Overlap ratio over training for policy and Adam, with and without the overlap penalty.",
+});
+lineChart("fig-impr", {
+  series: crowdSeries(3), yDomain: [-0.15, 0.3], yTicks: [-0.1, 0, 0.1, 0.2, 0.3], yFmt: (v, tip) => tip ? pct(v) : (v === 0 ? "0" : pct0(v).replace("-", "−")),
+  xTicks: moveTicks, xDomain: [0, 3200], xTitle: "simultaneous moves spent", xFmt: v => v + " moves",
+  aria: "Legal HPWL improvement over training for policy and Adam, with and without the overlap penalty.",
+});
+
+// Fig 4 (pull by steps)
+legend("leg-pull", [{ label: "toward top-4 partners", color: C("pull") }, { label: "toward all partners", color: C("pull"), dash: "6 4" }]);
+const steps = ["8", "16", "32", "64", "128"];
+const pa = DATA.pull.adaptec1;
+lineChart("fig-pull", {
+  width: 420, height: 230,
+  series: [
+    { label: "top-4 partners", color: C("pull"), points: steps.map((s, i) => [i, pa.k4[s]]) },
+    { label: "all partners", color: C("pull"), dash: "6 4", points: steps.map((s, i) => [i, pa.all[s]]) },
+  ],
+  yDomain: [-0.1, 0.25], yTicks: [-0.1, 0, 0.1, 0.2], yFmt: (v, tip) => tip ? pct(v) : (v === 0 ? "0" : pct0(v).replace("-", "−")),
+  xTicks: steps.map((s, i) => ({ v: i, label: s })), xDomain: [0, 4], xTitle: "episode length (steps)", xFmt: i => steps[i] + " steps",
+  aria: "Pull rule legal improvement on adaptec1 by episode length; non-monotone between -8 and +19 percent.",
+});
+
+// Fig 5 (sweep 1)
+const s1 = DATA.sweep1;
+legend("leg-s1", [
+  { kind: "dot", label: "one seed", color: C("policy") }, { kind: "bar", label: "mean of 3 seeds", color: C("ink") },
+  { label: "Adam, no penalty", color: C("adam"), dash: "2 3" }, { label: "pull rule, 32 steps", color: C("pull") },
+]);
+const s1rows = [
+  ["m1", "m1 · no penalty"], ["m1all", "m1all · no penalty"], ["m1all-sched", "m1all · steps 16→1"],
+  ["m1all-ov3", "m1all · overlap 3"], ["m1all-ov10", "m1all · overlap 10"],
+  ["m1all-sched-ov10", "m1all · steps 16→1 · overlap 10"], ["m0-sched-ov10", "m0 · steps 16→1 · overlap 10"],
+].map(([k, label]) => ({ label, values: { adaptec1: seeds(s1, k, "final"), bigblue1: seeds(s1, k, "bigblue1") } }));
+dotPanels("fig-s1", {
+  rows: s1rows, domain: [-0.25, 0.25], ticks: [-0.2, -0.1, 0, 0.1, 0.2], color: C("policy"), labelW: 230, panelW: 280,
+  panels: [
+    { key: "adaptec1", title: "adaptec1 (trained on)", subtitle: "median of last 5 checkpoints",
+      refs: [{ label: "Adam, no penalty", value: B.adam_ov0.adaptec1.final, color: C("adam"), dash: "2 3" }, { label: "Pull rule", value: DATA.pull.adaptec1.k4["32"], color: C("pull") }] },
+    { key: "bigblue1", title: "bigblue1 (unseen)", subtitle: "one rollout, no retraining",
+      refs: [{ label: "Adam from scratch, no penalty", value: B.adam_ov0.bigblue1.final, color: C("adam"), dash: "2 3" }, { label: "Pull rule", value: DATA.pull.bigblue1.k4["32"], color: C("pull") }] },
+  ],
+  aria: "Sweep 1: improvement per seed for seven configurations on adaptec1 and bigblue1.",
+});
+
+// Fig 6 (sweep 2)
+const s2 = DATA.sweep2;
+legend("leg-s2", [
+  { kind: "dot", label: "one seed", color: C("policy") }, { kind: "bar", label: "mean of 3 seeds", color: C("ink") },
+  { label: "Adam, penalty 3", color: C("adam"), dash: "6 4" }, { label: "Adam, no penalty", color: C("adam"), dash: "2 3" },
+  { label: "pull rule", color: C("pull") },
+]);
+const row = (k, label, group, note) => ({ label, group, note, values: {
+  adaptec1: seeds(s2, k, "final"), bigblue1: seeds(s2, k, "bigblue1"), ariane133: seeds(s2, k, "ariane133") } });
+const s2rows = [
+  row("m0", "m0 · itself only", "Sight"), row("m1", "m1 · + 4 partners", "Sight"), row("m1all", "m1all · + all partners", "Sight"),
+  row("align0.5", "alignment 0.5", "Schools"), row("align0.9", "alignment 0.9", "Schools"), row("align0.9-sched4", "alignment 0.9 · steps 4→1", "Schools"),
+  row("noise4", "noisy starts (±4 cells)", "Generalization"), row("async0.5", "random half move", "Generalization"),
+  row("noise4-2chips", "noisy starts + 2 chips", "Generalization", { bigblue1: "trained on it" }),
+];
+const refs = chip => [
+  { label: "Adam, penalty 3", value: B.adam_ov3[chip]?.final, color: C("adam"), dash: "6 4" },
+  { label: "Adam, no penalty", value: B.adam_ov0[chip]?.final, color: C("adam"), dash: "2 3" },
+  { label: "Pull rule", value: DATA.pull[chip].k4["32"], color: C("pull") },
+];
+dotPanels("fig-s2", {
+  rows: s2rows, domain: [-0.15, 0.2], ticks: [-0.1, 0, 0.1, 0.2], color: C("policy"), labelW: 200, panelW: 230,
+  panels: [
+    { key: "adaptec1", title: "adaptec1 (trained on)", subtitle: "median of last 5 checkpoints", refs: refs("adaptec1") },
+    { key: "bigblue1", title: "bigblue1 (unseen)", subtitle: "no retraining", refs: refs("bigblue1") },
+    { key: "ariane133", title: "ariane133 (unseen)", subtitle: "no retraining, die canvas", refs: refs("ariane133") },
+  ],
+  aria: "Sweep 2: improvement per seed for nine configurations on adaptec1, bigblue1 and ariane133, with Adam and pull-rule baselines.",
+});
+
+// Fig 7 (school & NCA summary: means only)
+legend("leg-school", [{ kind: "dot", label: "one seed", color: C("policy") }, { kind: "bar", label: "mean", color: C("ink") }, { label: "Adam, penalty 3", color: C("adam"), dash: "6 4" }]);
+dotPanels("fig-school", {
+  rows: [
+    row("m1all", "plain m1all (reference)"), row("align0.9", "school: alignment 0.9"),
+    row("async0.5", "NCA: random half move"), row("noise4", "NCA: varied starts"),
+  ],
+  domain: [-0.15, 0.15], ticks: [-0.1, 0, 0.1], color: C("policy"), labelW: 200, panelW: 220,
+  panels: ["adaptec1", "bigblue1", "ariane133"].map(chip => ({ key: chip, title: chip, refs: [refs(chip)[0]] })),
+  aria: "Swarm and NCA variants compared with the plain m1all policy on three chips.",
+});
+
+/* ---------- Fig 12: the swap swarm ---------- */
+const W = DATA.swarm;
+legend("leg-swarm", [{ kind: "dot", label: "one run / seed", color: C("policy") }, { kind: "bar", label: "mean", color: C("ink") }, { label: "central swap search", color: C("ink") }]);
+const one = (key) => Object.fromEntries(["adaptec1", "bigblue1", "ariane133"].map(c => [c, W[key][c] == null ? [] : [].concat(W[key][c])]));
+dotPanels("fig-swarm", {
+  rows: [
+    { group: "Exact judge", label: "all swaps at once", values: one("at_once") },
+    { group: "Exact judge", label: "wired swaps wait", values: one("resolve") },
+    { group: "Exact judge", label: "wired swaps wait, 8 nearest", values: one("resolve_k8") },
+    { group: "Learned judge (trained on adaptec1)", label: "m0 view", values: one("m0") },
+    { group: "Learned judge (trained on adaptec1)", label: "m1 view", values: one("m1") },
+    { group: "Learned judge (trained on adaptec1)", label: "m1all view", values: one("m1all") },
+    { group: "Learned judge (trained on adaptec1)", label: "m1/m1all, + bigblue1", values: one("two_chips"), note: { bigblue1: "trained on it", adaptec1: "trained on it" } },
+    { group: "Nudges and swaps", label: "policy nudges, then swaps", values: one("nudge_swap") },
+  ],
+  domain: [-0.2, 0.5], ticks: [-0.2, -0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5], color: C("policy"), labelW: 210, panelW: 250,
+  panels: ["adaptec1", "bigblue1", "ariane133"].map(c => ({ key: c, title: c, refs: [{ label: "Central swap search", value: W.central[c], color: C("ink") }] })),
+  aria: "Swap swarm variants on three chips against the central swap search.",
+});
+
+/* ---------- Fig 8: jitter under both legalizers ---------- */
+const J = DATA.jitter;
+legend("leg-jit", [{ kind: "dot", label: "one jitter seed", color: C("policy") }, { kind: "bar", label: "mean of 5 seeds", color: C("ink") }]);
+dotPanels("fig-jit", {
+  rows: [
+    { label: "original legalizer", values: Object.fromEntries(Object.keys(J).map(c => [c, J[c].old])) },
+    { label: "final legalizer", values: Object.fromEntries(Object.keys(J).map(c => [c, J[c].new])) },
+  ],
+  domain: [-0.15, 0.1], ticks: [-0.1, 0, 0.1], color: C("policy"), labelW: 150, panelW: 220,
+  panels: ["adaptec1", "bigblue1", "ariane133"].map(c => ({ key: c, title: c,
+    subtitle: `macro move ${mean(J[c].old_move).toFixed(0)} → ${mean(J[c].new_move).toFixed(0)} cells` })),
+  aria: "Random jitter plus legalization, under the original and final legalizer, on three chips.",
+});
+
+/* ---------- dumbbell: alone -> plus swaps ---------- */
+function dumbbell(id, opt) {
+  const host = document.getElementById(id);
+  const labelW = 230, plotW = 520, rowH = 34, top = 20;
+  const W = labelW + plotW + 20, H = top + opt.rows.length * rowH + 40;
+  const svg = el("svg", { class: "chart", viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": opt.aria, style: "min-width:560px" }, host);
+  const [d0, d1] = opt.domain;
+  const X = v => labelW + (Math.max(d0, Math.min(d1, v)) - d0) / (d1 - d0) * plotW;
+  const y1 = top + opt.rows.length * rowH;
+  const tip = tipFor(host);
+  for (const t of opt.ticks) {
+    el("line", { x1: X(t), x2: X(t), y1: top, y2: y1, class: t === 0 ? "zero" : "grid" }, svg);
+    el("text", { x: X(t), y: y1 + 16, "text-anchor": "middle" }, svg).textContent = t === 0 ? "0" : pct0(t).replace("-", "−");
+  }
+  el("text", { x: labelW + plotW / 2, y: y1 + 34, "text-anchor": "middle", class: "axis-title" }, svg).textContent = "legal HPWL vs greedy start";
+  opt.rows.forEach((r, i) => {
+    const cy = top + i * rowH + rowH / 2;
+    if (i % 2 === 0) el("rect", { x: labelW, y: cy - rowH / 2, width: plotW, height: rowH, style: "fill: var(--ground); opacity:.55" }, svg);
+    el("text", { x: 0, y: cy + 4.5, class: "rowlabel", style: r.bold ? "font-weight:700" : "" }, svg).textContent = r.label;
+    const a = r.alone == null ? null : mean([].concat(r.alone)), b = r.plus == null ? null : mean([].concat(r.plus));
+    if (a != null && b != null) el("line", { x1: X(a), x2: X(b), y1: cy, y2: cy, style: `stroke:${r.color}; stroke-width:2; opacity:.6` }, svg);
+    const mark = (v, filled, what, vals) => {
+      el("circle", { cx: X(v), cy, r: 6, style: filled ? `fill:${r.color}; stroke: var(--paper); stroke-width:2` : `fill: var(--paper); stroke:${r.color}; stroke-width:2.5` }, svg);
+      const h = el("circle", { cx: X(v), cy, r: 11, style: "fill: transparent" }, svg);
+      const seedTxt = Array.isArray(vals) && vals.length > 1 ? `<br>seeds: ${vals.map(pct).join(" / ")}` : "";
+      h.addEventListener("pointermove", e => tip.show(`<b>${r.label}</b><br>${what}: <b>${pct(v)}</b>${seedTxt}`, e));
+      h.addEventListener("pointerleave", () => tip.hide());
+    };
+    if (a != null) mark(a, false, "alone", r.alone);
+    if (b != null) mark(b, true, "then swap search", r.plus);
+    const end = Math.max(a ?? -1, b ?? -1);
+    el("text", { x: X(end) + 12, y: cy + 4.5, style: "fill: var(--ink-2); font-size:12px; font-family: var(--mono)" }, svg).textContent = b != null ? pct(b) : pct(a);
+  });
+}
+const Q = DATA.q3;
+legend("leg-q3", [
+  { kind: "dot", label: "alone (hollow)", color: C("ink-3") }, { kind: "dot", label: "then swap search (filled)", color: C("ink") },
+  { label: "agents", color: C("policy") }, { label: "Adam", color: C("adam") }, { label: "pull rule", color: C("pull") }, { label: "no method", color: C("ink-3") },
+]);
+dumbbell("fig-q3", {
+  domain: [-0.05, 0.3], ticks: [0, 0.1, 0.2, 0.3], aria: "adaptec1: each method alone and followed by the swap search.",
+  rows: [
+    { label: "random jitter (control)", alone: Q.jitter, color: C("ink-3") },
+    { label: "swap search only", plus: Q.swap, color: C("ink-3") },
+    { label: "pull rule", alone: Q.pull.alone, plus: Q.pull.plus, color: C("pull") },
+    { label: "Adam, penalty 3", alone: Q.adam3.alone, plus: Q.adam3.plus, color: C("adam") },
+    { label: "Adam, best penalty (0)", alone: Q.adam0.alone, plus: Q.adam0.plus, color: C("adam") },
+    { label: "agents m0, penalty 3", alone: Q.m0.alone, plus: Q.m0.plus, color: C("policy") },
+    { label: "agents m1, penalty 3", alone: Q.m1.alone, plus: Q.m1.plus, color: C("policy"), bold: true },
+    { label: "agents m1all, penalty 3", alone: Q.m1all.alone, plus: Q.m1all.plus, color: C("policy"), bold: true },
+  ],
+});
+const U = DATA.unseen;
+legend("leg-unseen", [{ kind: "dot", label: "one seed", color: C("policy") }, { kind: "bar", label: "mean", color: C("ink") }, { label: "swap search only", color: C("ink") }, { label: "random jitter range", color: C("ink-3") }]);
+dotPanels("fig-unseen", {
+    rows: [
+      { label: "m1, transferred", values: { bigblue1: U.bigblue1.m1.alone, ariane133: U.ariane133.m1.alone } },
+      { label: "random half move, transferred", values: { bigblue1: U.bigblue1.async.alone, ariane133: U.ariane133.async.alone } },
+      { label: "m1, then swaps", values: { bigblue1: U.bigblue1.m1.plus, ariane133: U.ariane133.m1.plus } },
+      { label: "random half move, then swaps", values: { bigblue1: U.bigblue1.async.plus, ariane133: U.ariane133.async.plus } },
+    ],
+    domain: [-0.15, 0.5], ticks: [-0.1, 0, 0.1, 0.2, 0.3, 0.4, 0.5], color: C("policy"), labelW: 220, panelW: 300,
+    panels: ["bigblue1", "ariane133"].map(c => ({ key: c, title: `${c} (unseen)`,
+      band: U[c].jitter, refs: [{ label: "Swap search only", value: U[c].swap, color: C("ink") }] })),
+    aria: "Unseen chips: transferred policies alone and followed by swaps, against the swap search alone.",
+});
+</script>
