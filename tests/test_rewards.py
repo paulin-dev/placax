@@ -1,8 +1,12 @@
 from placax.netlist.padding import build_macro_net_index  # noqa: F401  must precede jax imports
-from placax.extras.rewards import hpwl, lookahead_wiremasks, make_hpwl_reward, wiremask  # noqa: F401
+from placax.extras.rewards import (  # noqa: F401
+    hpwl, lookahead_wiremasks, make_hpwl_reward, smoothed_wirelength, wiremask,
+)
 from placax.types import EnvParams, EnvState  # noqa: F401
 
+import jax
 import jax.numpy as jnp
+import pytest
 
 # 4 macros: 0=(0,0) 1=(3,0) 2=(3,2) 3=(0,2)
 POSITIONS = jnp.array([[0, 0], [3, 0], [3, 2], [0, 2]])
@@ -260,3 +264,54 @@ def test_wiremask_at_real_scale_uses_vmap_without_running_out_of_memory() -> Non
     assert wm.shape == (64, 64)
     assert (wm >= 0.0).all()  # HPWL increase from a placement is never negative
     assert elapsed < 5.0  # generous bound; the vmap version should be fast, not just non-crashing
+
+
+# ---------------------------------------------------------------------------
+# smoothed_wirelength's GRADIENT, which is the only thing it exists for.
+# ---------------------------------------------------------------------------
+
+# Real design coordinates, so `(value - shift) / gamma` is large - that is the regime the bug
+# lived in, and a toy 3x2 placement never reaches it.
+FAR_POSITIONS = POSITIONS * 1000.0
+
+
+def test_smoothed_wirelength_gradient_survives_far_away_padding() -> None:
+    """A padded pin slot must not be able to overflow exp() and NaN the gradient.
+
+    `padded_pin_idx` reads macro 2's coordinate for net A's unused slot, and the mask discards it
+    from the VALUE. It used to reach `exp()` anyway: centering only the counted values left the
+    padded slot's offset from the per-net shift free to be hundreds of gammas wide, which is +inf
+    in float32, and reverse-mode AD turns the discarded `0 * inf` into NaN. Measured on adaptec1
+    (128 macros, 224 grid, core canvas): 21,304 overflowing slots and a NaN gradient for 23 of the
+    128 macros, with a perfectly correct forward number.
+    """
+    gradient = jax.grad(
+        lambda xy: smoothed_wirelength(xy, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK, gamma=1.0)
+    )(FAR_POSITIONS)
+    assert jnp.all(jnp.isfinite(gradient)), gradient
+    # Every macro on a counted net must actually receive signal - the point of the surrogate.
+    assert jnp.all(jnp.abs(gradient).sum(axis=-1) > 0)
+
+
+def test_smoothed_wirelength_gradient_survives_a_net_with_nothing_placed() -> None:
+    """The state every constructive episode starts in: no macro placed, so no net has two pins."""
+    nothing_placed = jnp.zeros(4, dtype=bool)
+    gradient = jax.grad(
+        lambda xy: smoothed_wirelength(
+            xy, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK, nothing_placed, gamma=1.0
+        )
+    )(FAR_POSITIONS)
+    assert jnp.all(jnp.isfinite(gradient)), gradient
+    assert jnp.all(gradient == 0.0), "an empty placement has no wirelength to differentiate"
+
+
+def test_smoothed_wirelength_still_masks_padding_in_the_value() -> None:
+    """The fix must not have bought finite gradients by letting padding into the number."""
+    all_valid = jnp.ones_like(VALID_MASK, dtype=bool)
+    masked = smoothed_wirelength(FAR_POSITIONS, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK, gamma=1.0)
+    unmasked = smoothed_wirelength(FAR_POSITIONS, PADDED_PIN_IDX, ZERO_OFFSET, all_valid, gamma=1.0)
+    assert float(masked) < float(unmasked)
+    # At gamma small against the coordinates, the surrogate is HPWL to within a hair.
+    assert float(masked) == pytest.approx(
+        float(hpwl(FAR_POSITIONS, PADDED_PIN_IDX, ZERO_OFFSET, VALID_MASK)), rel=1e-3
+    )

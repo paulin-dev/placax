@@ -241,8 +241,25 @@ def smoothed_wirelength(
     # exp(x / gamma) overflows for any real chip coordinate at a small gamma.
     def soft_max(values: jax.Array) -> jax.Array:
         shift = jnp.where(counted[..., None], values, -_BIG).max(axis=1, keepdims=True)
-        weights = jnp.where(counted[..., None], jnp.exp((values - shift) / gamma), 0.0)
-        return (shift + gamma * jnp.log(weights.sum(axis=1, keepdims=True))).squeeze(1)
+        # Both masks below are INSIDE the transcendental, and that placement is the whole point.
+        #
+        # An uncounted slot - padding, or a macro this partial placement has not placed yet -
+        # still carries a coordinate: `positions[padded_pin_idx]` reads macro 0's position for
+        # every padded slot. Centering only the counted values and masking `exp`'s RESULT left
+        # `exp((values - shift) / gamma)` free to overflow on those slots: measured on adaptec1
+        # (128 macros, 224 grid, core canvas), the soft-MIN branch reached exp(170.9) and produced
+        # +inf in 21,304 of 23,800 slots. The value survived, because `where` discarded them - but
+        # reverse-mode differentiation multiplies the discarded branch by zero, and `0 * inf` is
+        # NaN. So the forward number was right while `d(smoothed_wirelength)/d(positions)` was NaN
+        # for 23 of the design's 128 macros, which is silent everywhere except in the one method
+        # that needs this function's gradient at all.
+        centered = jnp.where(counted[..., None], values - shift, 0.0)
+        weights = jnp.where(counted[..., None], jnp.exp(centered / gamma), 0.0)
+        # A net with no counted pins sums to exactly zero, and `log(0) = -inf` is NaN-in-the-
+        # gradient by the same argument - the caller discards the value with another `where`.
+        # Every constructive episode starts in exactly that state, with nothing placed.
+        total = weights.sum(axis=1, keepdims=True)
+        return (shift + gamma * jnp.log(jnp.where(total > 0, total, 1.0))).squeeze(1)
 
     # soft_min(x) is -soft_max(-x); sharing one implementation keeps the two exactly symmetric.
     span = soft_max(pin_xy) + soft_max(-pin_xy)
