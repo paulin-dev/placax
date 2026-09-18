@@ -142,6 +142,9 @@ def main(argv=None) -> None:
                 hpwl_after = repaired["repaired_real_hpwl_snapped"]
                 improvement = 1.0 - hpwl_after / warm["real_hpwl_snapped"]
                 line["eval_hpwl_improvement"] = improvement
+                snapshots = out / "snapshots"
+                snapshots.mkdir(exist_ok=True)
+                np.save(snapshots / f"iter_{iteration:05d}.npy", np.asarray(positions))
                 print(f"step {iteration:5d}  cost={float(cost):.4f}  "
                       f"wl_norm={metrics['wl_norm']:.4f}  "
                       f"raw={metrics['real_hpwl_snapped']:,.0f} (overlap {metrics['overlap_ratio']:.2%})"

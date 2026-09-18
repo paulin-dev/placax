@@ -238,6 +238,13 @@ def main(argv=None) -> None:
                 hpwl_after = repaired["repaired_real_hpwl_snapped"]
                 improvement = 1.0 - hpwl_after / warm["real_hpwl_snapped"]
                 line["eval_hpwl_improvement"] = improvement
+                # What visualize.py animates as "training": the policy's own end placement at
+                # this checkpoint, and the weights that produced it.
+                snapshots = out / "snapshots"
+                snapshots.mkdir(exist_ok=True)
+                np.save(snapshots / f"iter_{iteration:05d}.npy", np.asarray(positions))
+                with (out / "last_params.pkl").open("wb") as handle:
+                    pickle.dump(jax.tree_util.tree_map(np.asarray, variables), handle)
                 print(f"iter {iteration:4d}  loss={float(loss):.4f}  "
                       f"wl_norm={metrics['wl_norm']:.4f}  "
                       f"raw={metrics['real_hpwl_snapped']:,.0f} (overlap {metrics['overlap_ratio']:.2%})"

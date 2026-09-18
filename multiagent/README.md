@@ -31,6 +31,13 @@ Apply a trained policy to a design it never saw (the claim Adam cannot match):
 python -m multiagent.transfer --run=multiagent/runs/adaptec1-m1-s0 --benchmark_dir=benchmarks/bigblue1
 ```
 
+Watch it: the policy's episode as a GIF (every macro moving at once, then the repair), the
+placement at each checkpoint as training goes, before/after, and curves against Adam:
+
+```bash
+python -m multiagent.visualize --run=multiagent/runs/adaptec1-m1-s0 --against multiagent/runs/adaptec1-adam-s0
+```
+
 Put the finished runs in one table:
 
 ```bash
@@ -107,6 +114,7 @@ This is the only core change made from here.
 | `legalize.py` | round, then move each overlapping macro to the nearby free spot that adds the least wire |
 | `transfer.py` | run a trained policy on another design, with no retraining |
 | `compare.py` | the runs as one table, with an environment-mismatch warning |
+| `visualize.py` | `episode.gif`, `training.gif`, `before_after.png`, `curves.png` into `<run>/viz/` |
 
 Every run directory holds `manifest.json` (written before training, so a crash is still
 attributable), `log.jsonl` (one line per iteration), `summary.json`, `best_positions.npy` (the

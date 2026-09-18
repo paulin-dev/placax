@@ -56,7 +56,8 @@ def rollout(
     steps: int,
     horizon: int,
     density_weight=None,
-) -> tuple[jax.Array, jax.Array]:
+    return_path: bool = False,
+):
     """Runs one episode of simultaneous moves, returning `(final_positions, costs)`.
 
     `act(positions, parts, progress, key) -> deltas` is the decision rule - a policy in `train.py`,
@@ -67,6 +68,10 @@ def rollout(
     the final placement. Every entry is on the same scale as every other, so the mean over them is
     a sensible loss (it rewards getting low early and staying there) and `costs[0]` is always the
     warm start - the number the episode has to beat.
+
+    `return_path=True` adds a third output, `(steps + 1, n_macros, 2)`: every placement the episode
+    passed through, starting with `positions` itself. That is what `visualize.py` animates, and it
+    is taken from this same scan so the animation cannot drift from the transition it shows.
     """
     # Which steps end a window. A static array rather than arithmetic on the scan index, matching
     # the shipped SHAC agent; the last step always closes one so nothing dangles.
@@ -83,9 +88,12 @@ def rollout(
         moved = apply_deltas(carried, deltas, lo, hi)
         # 3. The window boundary: cut the path backwards from here.
         moved = jnp.where(is_boundary, jax.lax.stop_gradient(moved), moved)
-        return moved, parts["total"]
+        return moved, (parts["total"], moved)
 
-    final, costs = jax.lax.scan(
+    final, (costs, path) = jax.lax.scan(
         scan_step, positions, (jax.random.split(key, steps), boundaries, progress)
     )
-    return final, jnp.concatenate([costs, objective.total(final, density_weight)[None]])
+    costs = jnp.concatenate([costs, objective.total(final, density_weight)[None]])
+    if return_path:
+        return final, costs, jnp.concatenate([positions[None], path])
+    return final, costs
