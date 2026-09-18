@@ -1,159 +1,182 @@
 # multiagent — every macro moves itself
 
-A one-week experiment, kept deliberately outside `placax/` and `placax_agents/`. It **imports** the
-core (netlist loading, smoothed wirelength, differentiable density cost, greedy warm start,
-legality measurement, `experiment.run.score_placement`) and adds one thing the core cannot express:
-an action that moves **every macro at once**, one small displacement each, chosen by **one shared
-policy applied per macro**.
+An experiment kept outside `placax/` and `placax_agents/`. It **imports** the core (netlist loading,
+smoothed wirelength, density cost, greedy warm start, legality measurement, `score_placement`) and
+adds what the core can't express: an action that moves **every macro at once**, one small step
+each, chosen by **one shared policy applied per macro**, trained by differentiating the whole-chip
+score through the episode.
 
-The question:
+> Can a placement emerge from many identical, locally informed macros cooperating on one global
+> score — and does it beat optimizing the positions directly?
 
-> Can a shared per-macro policy, trained by differentiating the placement objective through the
-> episode, improve a good placement — and do it better than optimizing the positions directly?
+**The full write-up is [`report.html`](report.html)**: one self-contained file with the method,
+every experiment, the charts and the placements. Open it in a browser. This README is the short
+version and the how-to.
+
+## Results in one table
+
+adaptec1 (128 macros, 224 grid, core canvas), starting from the greedy-wiremask placement
+(441,257 HPWL). Numbers are legal HPWL improvement over that start, after `legalize.py`. Learned
+runs are the **median of the last 5 checkpoints, averaged over 3 seeds**, never the best
+checkpoint.
+
+| method | alone | then `swap.py` |
+|---|---|---|
+| random jitter (1 cell) + legalize — the no-intelligence control | −2.6% | — |
+| `swap.py` — swap same-size macros, no learning, 0.5 s | +18.1% | — |
+| `pull.py` — step toward your partners, no learning | +11.0% | +19.8% |
+| `adam.py`, overlap penalty 3 (the agents' objective) | +2.0% | +20.0% |
+| `adam.py`, its best penalty (0) | +16.7% | +17.0% |
+| **agents** m1all / m1, overlap penalty 3 | **+7.0%** / +5.7% | +24.2% / **+25.0%** |
+
+On chips the policy never saw, a swap search alone wins: bigblue1 +44.4% and ariane133 +33.8%,
+against at best +8.6% and −1% for transferred policies. On bigblue1, random jitter alone ranges
+from −8.3% to +8.3%, so a transfer gain has to clear that band before it counts.
+
+| question | answer |
+|---|---|
+| Q1 — can local agents with one shared brain improve a placement? | **Yes, modestly and reliably:** +7%, seeds within 0.2 points |
+| Q2 — how much must a macro see? | **Itself, on the chip it trained on (it memorizes); its partners, for transfer** (m0 −1.8% vs m1 +7.5% on bigblue1) |
+| Q3 — better than direct optimization? | **Mixed.** Yes on the same objective; no against Adam at its best penalty or against swaps; yes as the refinement step before swaps (+25%) |
+| Q4 — transfer to an unseen chip? | **No.** Inside the jitter band on bigblue1, negative on ariane133 |
+| swarm rules (boids alignment, schools) | **No.** Partners moving together can't shorten the wires between them |
+| agents that swap | **Yes, with an exact local judge:** a leaderless swarm matches or beats the centralized swap search. **No, with a learned one:** it doesn't transfer |
+
+### Agents that swap (`swarm_swap.py`)
+
+Every macro considers trading places with its `k` nearest same-footprint macros; a swap happens
+when two macros pick each other, and all agreed swaps in a round happen at once. No coordinator.
+
+| | adaptec1 | bigblue1 | ariane133 |
+|---|---|---|---|
+| centralized swap search (`swap.py`) | +18.1% | +44.4% | +33.8% |
+| swarm, exact local gain, all swaps at once | **−15.1%** | +38.5% | +37.3% |
+| swarm, exact local gain, **wired swaps wait** (`--resolve`) | **+18.1%** | **+44.4%** | **+35.3%** |
+| same, but only the 8 nearest candidates | +18.1% | +27.8% | +15.5% |
+| swarm, learned judge (m1/m1all view), trained on adaptec1 | +18% on 1–2 of 3 seeds | −38% to 0% | −1% to +1% |
+| same, trained on adaptec1 + bigblue1 | — | *(trained on)* | −0.1% to +2.4% |
+| learned judge, m0 view | 0% | 0% | 0% |
+| nudging policy (m1, penalty 3, one seed), then swap swarm | **+25.8%** | +38.8% | +27.8% |
+
+- **A leaderless swap swarm matches the centralized search, and beats it on ariane**, in fewer
+  parallel rounds than the search's sequential swaps. But only with **local conflict
+  resolution**: a swap waits if a wired partner is in a better one this round. Without it,
+  swaps that share nets interfere, and adaptec1 gets 15% worse.
+- **Swap decisions need a wide candidate range.** Restricting a macro to its 8 nearest
+  same-size macros halves the gain on ariane.
+- **Learning when to swap from the nudging policy's view does not transfer**, even from two
+  chips. m0 never finds a useful swap: without its partners' positions, a macro has nothing to go
+  on.
+- **Nudges and swaps combine only on the chip the policy trained on** (+25.8% on adaptec1). On
+  unseen chips the nudges undo part of what the swaps gained, and repeating the cycle makes it
+  worse.
+
+### What the numbers needed before they meant anything
+
+- **An overlap penalty.** Without it, the agents crowd macros onto each other and the legalizer
+  decides the result. Seeds disagreed by 26 points, and the best checkpoint overstated the median
+  by ~15. Use `--overlap_weight=3`.
+- **A random-jitter control.** On a sparse canvas (bigblue1 is 3.5% full), the wire-aware
+  legalizer is a lottery: noise alone can gain 8%.
+- **A legalizer that works on a packed canvas.** On ariane133 (identical SRAMs covering 50% of the
+  canvas), the original repair turned a 1-cell overlap into a ~28-cell jump. `legalize.spread`
+  pushes overlapping pairs apart first; `repair_and_report` tries both ways and keeps the shorter
+  legal result.
+- **A swap search.** Continuous moves can't make two blocks trade places without passing through
+  each other. That is where most of the slack in these starts is.
 
 ## Quick start
 
-The warm start every method begins from, and the number every method has to beat:
-
 ```bash
-python -m multiagent.adam --benchmark_dir=benchmarks/adaptec1 --steps=600
-```
+# The shared policy, the method under test (~30 s on a laptop GPU)
+python -m multiagent.train --benchmark_dir=benchmarks/adaptec1 --view=m1 --overlap_weight=3 --iterations=100 --lr=1e-3
 
-Train the shared policy (this is the method under test):
+# The same objective optimized directly on the positions
+python -m multiagent.adam --benchmark_dir=benchmarks/adaptec1 --overlap_weight=3 --steps=2000 --eval_every=100 --lr=0.05
 
-```bash
-python -m multiagent.train --benchmark_dir=benchmarks/adaptec1 --view=m1 --iterations=200
-```
+# The controls
+python -m multiagent.pull --benchmark_dir=benchmarks/adaptec1 --steps 32
+python -m multiagent.swap --benchmark_dir=benchmarks/adaptec1
+python -m multiagent.swap --benchmark_dir=benchmarks/adaptec1 --positions=multiagent/runs/<run>/best_positions.npy
 
-Apply a trained policy to a design it never saw (the claim Adam cannot match):
+# The swap swarm: exact judge, and a learned one (train on adaptec1, apply anywhere)
+python -m multiagent.swarm_swap run --benchmark_dir=benchmarks/ariane133 --canvas=die --k=0 --resolve
+python -m multiagent.swarm_swap train --view=m1all --seed=0 --out=multiagent/runs/<scorer>
+python -m multiagent.swarm_swap run --scorer=multiagent/runs/<scorer> --benchmark_dir=benchmarks/bigblue1 --k=0 --resolve --threshold=0.3
+python -m multiagent.swarm_swap run --policy=multiagent/runs/<policy run> --k=0 --resolve --nudge_first
 
-```bash
-python -m multiagent.transfer --run=multiagent/runs/adaptec1-m1-s0 --benchmark_dir=benchmarks/bigblue1
-```
+# A trained policy on a design it never saw (ariane133 has no rows: --canvas=die)
+python -m multiagent.transfer --run=multiagent/runs/<run> --benchmark_dir=benchmarks/bigblue1
 
-Watch it: the policy's episode as a GIF (every macro moving at once, then the repair), the
-placement at each checkpoint as training goes, before/after, and curves against Adam:
+# Watch it: episode.gif, training.gif, before_after.png, curves.png into <run>/viz/
+python -m multiagent.visualize --run=multiagent/runs/<run> --against multiagent/runs/<adam run>
 
-```bash
-python -m multiagent.visualize --run=multiagent/runs/adaptec1-m1-s0 --against multiagent/runs/adaptec1-adam-s0
-```
-
-Put the finished runs in one table:
-
-```bash
+# All runs as one table
 python -m multiagent.compare multiagent/runs/*
-```
 
-Smoke tests (seconds, 8 macros on a 32 grid — run them after every change):
-
-```bash
+# Smoke tests (8 macros on a 32 grid), after every change
 python -m pytest multiagent/test_multiagent.py -q
 ```
 
-## What is already measured
+### `train.py` options that change the experiment
 
-All on **adaptec1, 128 macros, 224 grid, core canvas**, one seed, starting from the greedy-wiremask
-placement, whose own HPWL is **441,257** (legal, 0% overlap). `raw` is the continuous placement as
-the optimizer left it; `repaired` is after `legalize.py` (round, then move each overlapping macro to
-the free spot among its 256 nearest that adds the least wire) — the only number a tool would accept.
-
-| method | moves to best | raw HPWL | raw overlap | repaired HPWL | vs greedy |
-|---|---|---|---|---|---|
-| greedy_wiremask (warm start) | — | 441,257 | 0.00% | 441,257 | — |
-| **policy m1**, weight 1, lr 1e-3 | 2,240 (70 × 32) | 203,128 | 30.6% | **334,247** | **+24.3%** |
-| adam, weight 1, lr 0.05 | 320 (of 2,560) | 291,254 | 11.8% | 348,433 | +21.0% |
-| adam, weight 5 | 600 | 427,287 | 0.8% | 425,770 | +3.5% |
-
-**This is the day-7 go signal, with caveats that belong in the write-up:**
-
-1. **The policy beats Adam at a matched budget** (+24.3% vs +21.0%). Adam was given 2,560 moves
-   and stalls by ~960 at `wl_norm` 0.531 (cost flat to 4 decimals after that); the policy keeps
-   going to 0.445. A plausible reading is that the policy's sampled, non-stationary rollouts escape
-   the local optimum deterministic gradient descent settles in. Both were evaluated 8 times, so
-   best-checkpoint selection favours neither.
-2. **The repair is doing real work, and more of it for the policy.** The policy hands over a far
-   more compressed placement (30.6% overlap) and the repair moves macros ~13–15 cells on average,
-   against ~10 for Adam. Every method goes through the identical repair, so the comparison is fair —
-   but the honest description is "the policy learns placements that legalize well", not "the
-   policy produces legal placements". Report `repair_mean_displacement_cells` beside every number.
-3. **One seed, one design, untuned.** Seeds 1–2, the m0/m2 ablation and bigblue1 are what turn this
-   into a result.
-
-What the earlier (nearest-spot repair) runs established, and still holds:
-
-- **The gradient path works end to end** — 128 macros each get their own derivative of the shared
-  objective, and the policy's wirelength falls steadily from the first iteration.
-- **The legality penalty alone cannot produce legal placements.** Weight 1 → −48% raw wirelength at
-  16% overlap; weight 25 → −1.5% at 0.5%. A ramp 0.5 → 30 did worse than a constant weight.
-- **The repair was the bottleneck.** Switching it from nearest-free-spot to wirelength-aware took
-  the same Adam output from +11.1% to +20.0% (see `legalize.py`'s docstring for the sweep).
-
-### A core bug this turned up, now fixed
-
-`placax/extras/rewards.py: smoothed_wirelength` produced **NaN gradients** — with a perfectly
-correct forward value. Its per-net mask was applied *after* `exp()`, so padded pin slots (which
-read macro 0's coordinates) could overflow float32 inside the exponent: on this design the soft-min
-branch reached `exp(170.9)` and gave `+inf` in 21,304 of 23,800 slots, and reverse-mode AD turns
-each discarded `0 * inf` into NaN — for 23 of the 128 macros. Any analytic-gradient method on a
-padded netlist was silently broken, including the shipped `shac` agent. The fix masks inside the
-exponent and guards the empty-net `log(0)`; three regression tests are in `tests/test_rewards.py`.
-This is the only core change made from here.
+| flag | what it does | finding |
+|---|---|---|
+| `--view` | `m0` itself · `m1` + top-4 partners · `m1all` + all partners · `m2` + global summary | m0 = m1 = m1all on adaptec1; only partner views transfer |
+| `--overlap_weight` | pairwise overlap penalty | 3 is the setting that made results reproducible |
+| `--max_step_start` | step bound shrinking geometrically to `--max_step` | hurts: crushes everything, or scrambles past recovery |
+| `--align` | boids alignment: blend your move with your partners' | hurts: +7% → ~0% |
+| `--update_prob` | a random subset of macros moves each step (NCA-style) | best bigblue1 transfer (+8.6%), still inside the jitter band |
+| `--start_noise` | train from jittered starts | less memorization, better bigblue1 transfer, worse home chip |
+| `--extra_benchmarks` | train on several designs in turn | least-bad ariane transfer |
 
 ## The pieces
 
 | file | what it is |
 |---|---|
-| `neighbors.py` | who is wired to whom (clique weights, `2/m` per net), and each macro's top-k partners |
 | `context.py` | one loaded design: greedy warm start, bounds, footprints, neighbour table |
-| `objective.py` | the shared score — normalized smoothed wirelength + normalized legality cost, with `ramp` |
-| `moves.py` | the transition: all macros move at once, clipped to the canvas, gradient cut every `--horizon` |
-| `view.py` | what one macro sees: **m0** itself · **m1** + wired neighbours · **m2** + global summary |
-| `policy.py` | one shared network, applied per macro row; bounded `max_step * tanh` displacement |
+| `neighbors.py` | who is wired to whom (clique weights, `2/m` per net), each macro's top-k partners |
+| `objective.py` | the shared score: smoothed wirelength + density + pairwise overlap, all normalized |
+| `moves.py` | the transition: every macro moves at once, clipped; gradient cut every `--horizon` |
+| `view.py` | what one macro sees: `m0`, `m1`, `m1all`, `m2` |
+| `policy.py` | the shared network, the step bound, and `make_act` — the one decision rule train, transfer and visualize all use (alignment, async updates) |
 | `train.py` | short-horizon analytic-gradient training (SHAC's window, no critic) |
-| `adam.py` | the same objective optimized directly on the positions — the baseline that matters |
-| `legalize.py` | round, then move each overlapping macro to the nearby free spot that adds the least wire |
-| `transfer.py` | run a trained policy on another design, with no retraining |
-| `compare.py` | the runs as one table, with an environment-mismatch warning |
-| `visualize.py` | `episode.gif`, `training.gif`, `before_after.png`, `curves.png` into `<run>/viz/` |
+| `adam.py` | the same objective optimized directly on the positions |
+| `pull.py` | untrained control: step toward the weighted centre of your partners |
+| `swap.py` | swap same-footprint macros while it shortens the wires; legal by construction |
+| `swarm_swap.py` | the swap swarm: local candidates, mutual consent, `--resolve`, exact or learned judge, `--policy` nudge/swap cycles |
+| `legalize.py` | wire-aware repair, `spread` for packed canvases, and the both-ways portfolio |
+| `transfer.py` | run a trained policy on another design, no retraining |
+| `visualize.py` | the GIFs and plots for one run |
+| `compare.py` | runs as one table, with an environment-mismatch warning |
+| `report.html` | the write-up |
 
-Every run directory holds `manifest.json` (written before training, so a crash is still
-attributable), `log.jsonl` (one line per iteration), `summary.json`, `best_positions.npy` (the
-repaired, legal placement), `best_positions_raw.npy`, and `best_params.pkl`.
+Every run directory holds `manifest.json` (written before training), `log.jsonl`, `summary.json`,
+`snapshots/iter_*.npy` (the raw placement at each evaluation — re-legalize these rather than
+retraining), `best_positions.npy` (repaired, legal), `best_positions_raw.npy`, `best_params.pkl`
+and `last_params.pkl`.
 
-## What to tune first, in order
+## How to measure, so it means something
 
-1. **Seeds.** Everything above is one seed. Before tuning anything, run `--seed=1` and `--seed=2`
-   for the policy — if +24% does not hold, nothing below matters.
-2. **`--density_weight`** (1.0 constant is best so far) and `--max_step`. Lower weights may let the
-   policy compress further and lean even harder on the repair — watch the displacement column.
-3. **`legalize.py`** still has headroom: macro ordering (largest-first today) and letting a macro
-   push a smaller neighbour are the obvious next steps.
-4. **`--lr` and `--iterations`** for the policy. It is trained for far fewer moves than Adam gets;
-   200 iterations × 32 steps is 6,400 moves, which is the compute-matched Adam row (`--steps=6400`).
-5. **`--horizon`**, the one hyperparameter the method is actually about. If longer windows help, a
-   value-function bootstrap (real SHAC) is the next step.
+1. **Report the median of the last 5 checkpoints over 3 seeds.** The best checkpoint of a crowding
+   method is mostly legalizer luck.
+2. **Report `repair_mean_displacement_cells` beside every number.** It is how much of the answer
+   the legalizer wrote.
+3. **Run random jitter + legalize on every chip you report.** A gain inside its band isn't one.
+4. **Compare against `swap.py`, alone and after your method.**
 
-## The week
+## Honest limits
 
-- **Days 1–2** — Tune the repair and the weight until the policy beats its own warm start reliably.
-  Run `m0` / `m1` / `m2` at 2–3 seeds each. If `m0` fails and `m1` works, that is a finding.
-- **Days 3–4** — Adam at matched move budgets (`--steps` = iterations × steps) on adaptec1 and
-  bigblue1, 3 seeds. Then `transfer.py`: adaptec1 → bigblue1, against Adam from scratch on
-  bigblue1. This is the headline experiment.
-- **Day 5** — Scale: `--macro_budget=0` (every macro, 543 on adaptec1) versus 128, for both
-  methods. Centralized comparison: `scripts/compare_agents.py --agents=greedy_wiremask,shac,ppo`
-  at a matched budget, so the table has a one-macro-per-step row.
-- **Days 6–7** — DREAMPlace + OpenROAD on each method's `best_positions.npy`, then write up.
-  Leave the last day for writing, not running.
+- **Three designs, 128 macros, wirelength only.** None of the benchmarks carries a `.lib` or
+  `.sdc`, so there is no timing.
+- **Adam is not DREAMPlace.** A faithful analytical placer is the real bar for Q3.
+- **No critic.** Gradients are cut every `--horizon` steps with nothing to bootstrap the future.
 
-## Honest limits, for the write-up
+### A core bug this turned up, now fixed
 
-- **No critic**, so this is SHAC's window without its bootstrap. The log says `short_horizon`
-  rather than `shac` for that reason.
-- **Legality is a penalty plus a repair**, not a guarantee. Every number is reported both ways.
-- **One design tested so far** (adaptec1). bigblue1 works through the same code path; ariane133 has
-  no placement rows, so it needs `--canvas=die`.
-- **No timing anywhere.** None of the benchmarks here carries a `.lib` or an `.sdc`, so WNS/TNS
-  cannot be computed — do not put them in the plan.
-- **The `m2` global summary is the only channel between macros.** There is no communication
-  protocol, deliberately.
+`placax/extras/rewards.py: smoothed_wirelength` produced **NaN gradients** with a correct forward
+value: its per-net mask was applied *after* `exp()`, so padded pin slots could overflow float32
+(`exp(170.9)` on adaptec1), and reverse-mode AD turned each discarded `0 * inf` into NaN for 23 of
+128 macros. Any analytic-gradient method on a padded netlist was silently broken, including the
+shipped `shac` agent. The fix masks inside the exponent and guards the empty-net `log(0)`;
+regression tests are in `tests/test_rewards.py`. It is the only core change this experiment made.
