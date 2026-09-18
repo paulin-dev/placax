@@ -316,3 +316,38 @@ def test_repaired_metrics_are_reported_under_their_own_prefix(ctx, objective):
 def test_unknown_repair_mode_is_refused(ctx):
     with pytest.raises(ValueError, match="unknown repair mode"):
         legalize.repair(ctx, ctx.warm_start, mode="teleport")
+
+
+def test_spread_leaves_a_legal_placement_exactly_where_it_is(ctx):
+    spread = legalize.spread(ctx, ctx.warm_start)
+    assert jnp.allclose(spread, jnp.clip(ctx.warm_start, 0.0, None), atol=1e-6)
+
+
+def test_spread_reduces_overlap_on_a_jittered_placement(ctx):
+    objective = objective_mod.make(ctx, overlap_weight=1.0)
+    rng = np.random.default_rng(0)
+    jittered = jnp.clip(ctx.warm_start + rng.standard_normal(ctx.warm_start.shape).astype(np.float32),
+                        ctx.lo, ctx.hi)
+    before = float(objective.parts(jittered)["overlap_norm"])
+    after = float(objective.parts(legalize.spread(ctx, jittered))["overlap_norm"])
+    assert before > 0 and after < before
+
+
+def test_portfolio_repair_is_legal_and_no_worse_than_the_plain_one(ctx, objective):
+    rng = np.random.default_rng(1)
+    jittered = jnp.clip(ctx.warm_start + rng.standard_normal(ctx.warm_start.shape).astype(np.float32),
+                        ctx.lo, ctx.hi)
+    _, plain = legalize.repair_and_report(ctx, objective, jittered, spread_steps=0)
+    _, both = legalize.repair_and_report(ctx, objective, jittered, spread_steps=100)
+    assert both["repaired_is_legal"]
+    assert both["repaired_real_hpwl_snapped"] <= plain["repaired_real_hpwl_snapped"] + 1e-6
+
+
+def test_swap_descent_keeps_legality_and_never_lengthens_wires(ctx, objective):
+    from multiagent.swap import swap_descent
+    start = np.asarray(jnp.round(ctx.warm_start))
+    final, _swaps = swap_descent(ctx, start)
+    before = objective_mod.report(ctx, objective, jnp.asarray(start))
+    after = objective_mod.report(ctx, objective, jnp.asarray(final))
+    assert after["is_legal"]
+    assert after["real_hpwl_snapped"] <= before["real_hpwl_snapped"] + 1e-6
