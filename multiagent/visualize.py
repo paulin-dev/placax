@@ -203,6 +203,57 @@ def save_gif(frames: list, ctx, warm, path: pathlib.Path, fps: int, wires: bool)
     plt.close(fig)
 
 
+SWAPPED = "#B279A2"
+
+
+def save_swap_gif(ctx, frames: list, warm_hpwl: float, path: pathlib.Path, label: str,
+                  fps: int = 3) -> None:
+    """A swap swarm (optionally interleaved with nudges) as an animation.
+
+    `frames`: `(kind, positions, swapped_pairs)` with kind in start / nudge / legalize / swap. On a
+    swap frame the macros that just traded places are filled purple and linked; everything else
+    reads as in `draw` (red = overlapping, orange trail = distance from the greedy start).
+    """
+    from multiagent import objective as objective_mod
+
+    objective = objective_mod.make(ctx)
+    warm = np.asarray(jnp.round(ctx.warm_start))
+    sizes = np.asarray(ctx.sizes_grid)
+    fig, ax = plt.subplots(figsize=(6, 6.4))
+    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.88)
+    rounds = nudges = 0
+    titled = []
+    for kind, positions, pairs in frames:
+        if kind == "swap":
+            rounds += 1
+        if kind == "nudge":
+            nudges += 1
+        metrics = objective_mod.report(ctx, objective, jnp.asarray(positions))
+        hpwl = metrics["real_hpwl_snapped"]
+        what = {"start": "greedy start", "nudge": f"policy nudge, step {nudges}",
+                "legalize": "legalized", "swap": f"swap round {rounds}: {len(pairs)} swaps"}[kind]
+        titled.append((positions, pairs, f"{label}\n{what}   ·   HPWL {hpwl:,.0f} "
+                                          f"({1 - hpwl / warm_hpwl:+.1%} vs greedy)"))
+    titled += [titled[-1]] * (2 * fps)
+
+    def frame(i):
+        positions, pairs, title = titled[i]
+        draw(ax, positions, ctx, warm, title)
+        if pairs:
+            moved = sorted({m for pair in pairs for m in pair})
+            ax.add_collection(PatchCollection(
+                [Rectangle(positions[m], *sizes[m]) for m in moved],
+                facecolor=SWAPPED, edgecolor="black", linewidth=0.4, alpha=0.95, zorder=4))
+            centers = positions + sizes / 2
+            links = [[centers[i], centers[j]] for i, j in pairs]
+            ax.add_collection(LineCollection(links, colors="white", linewidths=3.2, zorder=5))
+            ax.add_collection(LineCollection(links, colors="#3B1F4A", linewidths=1.6, zorder=6))
+            ax.scatter(centers[moved, 0], centers[moved, 1], s=9, color="#3B1F4A", zorder=7)
+
+    FuncAnimation(fig, frame, frames=len(titled)).save(str(path), writer=PillowWriter(fps=fps))
+    plt.close(fig)
+
+
 # ----------------------------------------------------------------------------------------------
 # The four outputs
 

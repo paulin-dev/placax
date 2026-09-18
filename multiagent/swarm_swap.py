@@ -188,6 +188,7 @@ def swarm(ctx, positions: np.ndarray, judge, k: int = 8, max_rounds: int = 60,
     pos = np.asarray(positions, dtype=np.float32).copy()
     hpwls = [float(exact.total(jnp.asarray(pos)))]
     swaps_per_round = []
+    path, swapped = [pos.copy()], [[]]
     seen = {pos.tobytes()}
     for _ in range(max_rounds):
         idx, valid = candidates(ctx, pos, k)
@@ -206,11 +207,13 @@ def swarm(ctx, positions: np.ndarray, judge, k: int = 8, max_rounds: int = 60,
         pos = new
         swaps_per_round.append(len(pairs))
         hpwls.append(float(exact.total(jnp.asarray(pos))))
+        path.append(pos.copy()); swapped.append(pairs)
         key = pos.tobytes()
         if key in seen:        # the swarm is cycling between arrangements it has already been in
             break
         seen.add(key)
-    return {"positions": pos, "hpwl": hpwls, "swaps_per_round": swaps_per_round}
+    return {"positions": pos, "hpwl": hpwls, "swaps_per_round": swaps_per_round,
+            "path": path, "swapped": swapped}
 
 
 # ----------------------------------------------------------------------------------------------
@@ -338,13 +341,16 @@ def nudger(ctx, objective, run_dir: pathlib.Path):
 
     @jax.jit
     def episode(start):
-        return moves.rollout(start, jax.random.PRNGKey(0), act, objective, ctx.lo, ctx.hi,
-                             int(trained["steps"]), int(trained["horizon"]))[0]
+        _final, _costs, path = moves.rollout(
+            start, jax.random.PRNGKey(0), act, objective, ctx.lo, ctx.hi,
+            int(trained["steps"]), int(trained["horizon"]), return_path=True)
+        return path
 
-    def nudge(positions):
-        raw = episode(jnp.asarray(positions, dtype=jnp.float32))
-        placed, _ = legalize.repair_and_report(ctx, objective, raw)
-        return np.asarray(placed, dtype=np.float32)
+    def nudge(positions, return_path=False):
+        path = np.asarray(episode(jnp.asarray(positions, dtype=jnp.float32)))
+        placed, _ = legalize.repair_and_report(ctx, objective, jnp.asarray(path[-1]))
+        placed = np.asarray(placed, dtype=np.float32)
+        return (placed, path) if return_path else placed
 
     return nudge
 
@@ -369,15 +375,25 @@ def run(args) -> None:
         # Alternate the nudging policy and the swap swarm. `--nudge_first` decides the order.
         nudge = nudger(ctx, objective, args.policy)
         pos, trace, swaps = start, [float(exact.total(jnp.asarray(start)))], []
+        frames = [("start", start, [])]
+
+        def do_nudge(pos):
+            placed, path = nudge(pos, return_path=True)
+            frames.extend(("nudge", p, []) for p in path[1:])
+            frames.append(("legalize", placed, []))
+            trace.append(float(exact.total(jnp.asarray(placed))))
+            return placed
+
         for _cycle in range(args.cycles):
             if args.nudge_first:
-                pos = nudge(pos); trace.append(float(exact.total(jnp.asarray(pos))))
+                pos = do_nudge(pos)
             step = swarm(ctx, pos, judge, k=args.k, max_rounds=args.max_rounds, exact=exact,
                          resolve=args.resolve, threshold=args.threshold)
+            frames.extend(("swap", p, pr) for p, pr in zip(step["path"][1:], step["swapped"][1:]))
             pos = step["positions"]; trace.append(step["hpwl"][-1]); swaps += step["swaps_per_round"]
             if not args.nudge_first:
-                pos = nudge(pos); trace.append(float(exact.total(jnp.asarray(pos))))
-        result = {"positions": pos, "hpwl": trace, "swaps_per_round": swaps}
+                pos = do_nudge(pos)
+        result = {"positions": pos, "hpwl": trace, "swaps_per_round": swaps, "frames": frames}
     final = objective_mod.report(ctx, objective, jnp.asarray(result["positions"]))
     improvement = 1.0 - final["real_hpwl_snapped"] / warm
     best = 1.0 - min(result["hpwl"]) / warm
@@ -386,6 +402,15 @@ def run(args) -> None:
           f"{len(result['swaps_per_round'])} rounds, {sum(result['swaps_per_round'])} swaps -> "
           f"{improvement:+.2%} vs greedy (best round {best:+.2%})  legal={final['is_legal']}  "
           f"[{time.perf_counter() - started:.1f}s]")
+    if args.gif is not None:
+        from multiagent.visualize import save_swap_gif
+        frames = result.get("frames") or [
+            ("start" if r == 0 else "swap", p, pr)
+            for r, (p, pr) in enumerate(zip(result["path"], result["swapped"]))]
+        label = ("exact" if args.scorer is None else "learned") + f" judge, k={'all' if args.k <= 0 else args.k}, " + (
+            "wired swaps wait" if args.resolve else "all swaps at once")
+        save_swap_gif(ctx, frames, warm, args.gif, label)
+        print(f"gif written to {args.gif}")
     if args.out is not None:
         args.out.mkdir(parents=True, exist_ok=True)
         np.save(args.out / "positions.npy", result["positions"])
@@ -420,6 +445,8 @@ def parse_args(argv=None):
     r.add_argument("--policy", type=pathlib.Path, default=None,
                    help="A trained multiagent.train run: alternate its nudges with swap rounds.")
     r.add_argument("--cycles", type=int, default=1)
+    r.add_argument("--gif", type=pathlib.Path, default=None,
+                   help="Write an animation: one frame per nudge step and per swap round.")
     r.add_argument("--nudge_first", action="store_true")
     r.add_argument("--threshold", type=float, default=0.0,
                    help="Swap only when the judge's score exceeds this. A learned judge needs a "
