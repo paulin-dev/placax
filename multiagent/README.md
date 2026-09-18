@@ -114,6 +114,9 @@ python -m multiagent.visualize --run=multiagent/runs/<run> --against multiagent/
 # All runs as one table
 python -m multiagent.compare multiagent/runs/*
 
+# Re-run every experiment the report is built from (~45 min), then rebuild it
+bash multiagent/run_all.sh
+
 # Rebuild report.html from the runs (--recompute after new or changed runs)
 python -m multiagent.build_report
 
@@ -153,6 +156,7 @@ python -m pytest multiagent/test_multiagent.py -q
 | `visualize.py` | the GIFs and plots for one run |
 | `compare.py` | runs as one table, with an environment-mismatch warning |
 | `report.html` | the write-up; generated, don't edit it by hand |
+| `run_all.sh` | every experiment the report reads, in order; skips runs that already exist |
 | `report_template.html`, `build_report.py` | the report's page and the script that fills it from `runs/` (charts, numbers, embedded GIFs) |
 
 Every run directory holds `manifest.json` (written before training), `log.jsonl`, `summary.json`,
