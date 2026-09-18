@@ -32,7 +32,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from multiagent import context, legalize, moves, objective as objective_mod, view as view_mod
-from multiagent.policy import SharedMacroPolicy, displacements
+from multiagent.policy import SharedMacroPolicy, make_act
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -85,6 +85,7 @@ def main(argv=None) -> None:
         ctx, density_weight=float(trained["density_weight"]),
         target_density=float(trained["target_density"]),
         gamma_cells=float(trained["gamma_cells"]),
+        overlap_weight=float(trained.get("overlap_weight", 0.0)),
     )
     view_fn, n_features = view_mod.make(ctx, trained["view"])
 
@@ -111,9 +112,10 @@ def main(argv=None) -> None:
 
     started = time.perf_counter()
 
+    rule = make_act(policy, view_fn, trained, ctx.connection_weights)
+
     def act(positions, parts, progress, key):
-        mean_raw, log_std = policy.apply(variables, view_fn(positions, parts, progress))
-        return displacements(mean_raw, log_std, key, float(trained["max_step"]), stochastic=False)
+        return rule(variables, positions, parts, progress, key, False)
 
     positions, costs = jax.jit(lambda: moves.rollout(
         ctx.warm_start, jax.random.PRNGKey(0), act, objective, ctx.lo, ctx.hi, steps,

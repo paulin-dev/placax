@@ -46,6 +46,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     env.add_argument("--macro_budget", type=int, default=context.DEFAULT_MACRO_BUDGET,
                      help="0 or negative means every macro in the design.")
     env.add_argument("--canvas", default="core", choices=("die", "core"))
+    env.add_argument("--overlap_weight", type=float, default=0.0,
+                     help="Weight on pairwise macro overlap area (fraction of macro area).")
     env.add_argument("--density_weight", type=float, default=1.0,
                      help="Legality weight at the START of the run.")
     env.add_argument("--density_weight_end", type=float, default=None,
@@ -77,7 +79,7 @@ def main(argv=None) -> None:
     )
     objective = objective_mod.make(
         ctx, density_weight=args.density_weight, target_density=args.target_density,
-        gamma_cells=args.gamma_cells,
+        gamma_cells=args.gamma_cells, overlap_weight=args.overlap_weight,
     )
     warm = objective_mod.report(ctx, objective, ctx.warm_start)
     print(f"warm start (greedy wiremask): real_hpwl={warm['real_hpwl']:,.0f}  "
@@ -110,6 +112,7 @@ def main(argv=None) -> None:
             "density_weight": objective.density_weight,
             "target_density": objective.target_density,
             "gamma_cells": objective.gamma_cells,
+            "overlap_weight": objective.overlap_weight,
         },
         "warm_start": warm,
     }

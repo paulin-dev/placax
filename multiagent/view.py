@@ -7,6 +7,12 @@ difference in information and nothing else:
     m1  + its neighbours    the k macros it is most strongly wired to, relative to itself
     m2  + global numbers    how the whole placement is currently doing
 
+and one branch off the ladder, `m1all`: m1 plus six numbers summarizing EVERY macro this one is
+wired to, not just the top k - the weighted mean offset toward them (exactly the direction the
+untrained `pull.py` rule steps in, so the policy can at least learn that rule), their weighted
+spread, and how strongly and how widely this macro is connected. Fixed-size, so it works for any
+number of partners and any design.
+
 The reason to build the ablation before tuning anything: if `m0` cannot improve a placement and
 `m1` can, that is the finding - wirelength is a property of pairs, so a macro that cannot see its
 partners has no gradient information about which direction helps, and no amount of training fixes
@@ -31,8 +37,8 @@ import jax.numpy as jnp
 
 from multiagent.context import Context
 
-LEVELS = ("m0", "m1", "m2")
-"""The observability ladder, in the order the experiment walks it."""
+LEVELS = ("m0", "m1", "m2", "m1all")
+"""The observability ladder, in the order the experiment walks it, then the all-partners branch."""
 
 
 def make(ctx: Context, level: str = "m1") -> tuple[Callable, int]:
@@ -51,6 +57,11 @@ def make(ctx: Context, level: str = "m1") -> tuple[Callable, int]:
     neighbor_weight = ctx.neighbor_weight
     neighbor_valid = ctx.neighbor_valid.astype(jnp.float32)
     k = neighbor_idx.shape[1]
+    weights = jnp.asarray(ctx.connection_weights, dtype=jnp.float32)   # (n, n), every connection
+    total_weight = weights.sum(axis=1, keepdims=True)
+    safe_total = jnp.maximum(total_weight, 1e-9)
+    connected = (total_weight > 0).astype(jnp.float32)
+    n_partners = (weights > 0).sum(axis=1, keepdims=True).astype(jnp.float32)
 
     def local(positions: jax.Array) -> jax.Array:
         """m0: the 8 numbers a macro can know about itself without looking at anything else."""
@@ -76,6 +87,19 @@ def make(ctx: Context, level: str = "m1") -> tuple[Callable, int]:
         per_neighbor = per_neighbor * neighbor_valid[..., None]
         return per_neighbor.reshape(positions.shape[0], k * 6)
 
+    def all_partners(positions: jax.Array) -> jax.Array:
+        """m1all's addition: 6 numbers about ALL wired partners, weighted by connection strength."""
+        centers = (positions + ctx.sizes_grid / 2) / canvas
+        relative = centers[None, :, :] - centers[:, None, :]          # (n, n, 2), j from i
+        mean = (weights[..., None] * relative).sum(axis=1) / safe_total
+        spread = jnp.sqrt(
+            (weights[..., None] * (relative - mean[:, None, :]) ** 2).sum(axis=1) / safe_total + 1e-12
+        )
+        return jnp.concatenate([
+            mean * connected, spread * connected,
+            jnp.log1p(total_weight), jnp.log1p(n_partners) / 5.0,
+        ], axis=-1)
+
     def global_state(positions: jax.Array, parts: dict, progress: jax.Array) -> jax.Array:
         """m2's addition: 3 numbers every macro sees the same copy of.
 
@@ -99,6 +123,13 @@ def make(ctx: Context, level: str = "m1") -> tuple[Callable, int]:
         def view_fn(positions, _parts, _progress):
             return jnp.concatenate([local(positions), wired(positions)], axis=-1)
         return view_fn, 8 + 6 * k
+
+    if level == "m1all":
+        def view_fn(positions, _parts, _progress):
+            return jnp.concatenate(
+                [local(positions), wired(positions), all_partners(positions)], axis=-1
+            )
+        return view_fn, 8 + 6 * k + 6
 
     def view_fn(positions, parts, progress):
         return jnp.concatenate(

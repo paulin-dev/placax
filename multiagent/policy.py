@@ -60,6 +60,19 @@ class SharedMacroPolicy(nn.Module):
         return mean_raw, log_std
 
 
+def step_bound(progress: jax.Array, max_step: float, max_step_start: float | None = None):
+    """The largest move allowed at `progress` (0 at the first step, ->1 at the last), in cells.
+
+    Constant `max_step` by default. With `max_step_start`, it shrinks geometrically from that to
+    `max_step` over the episode - big jumps first, to reach a different arrangement, then small
+    corrections. Geometric for the reason the density ramp is: the useful range spans orders of
+    magnitude.
+    """
+    if max_step_start is None or max_step_start == max_step:
+        return max_step
+    return max_step_start * (max_step / max_step_start) ** progress
+
+
 def displacements(
     mean_raw: jax.Array,
     log_std: jax.Array,
@@ -80,3 +93,52 @@ def displacements(
         # the whole placement - which `lax.scan` rejects as a carry whose type changed.
         raw = raw + jnp.exp(log_std) * jax.random.normal(key, mean_raw.shape, dtype=mean_raw.dtype)
     return max_step * jnp.tanh(raw)
+
+
+def alignment_matrix(connection_weights) -> jax.Array:
+    """Row-normalized connection weights: row i is macro i's partners, summing to 1 (or 0)."""
+    weights = jnp.asarray(connection_weights, dtype=jnp.float32)
+    total = weights.sum(axis=1, keepdims=True)
+    return jnp.where(total > 0, weights / jnp.maximum(total, 1e-9), 0.0)
+
+
+def make_act(policy: nn.Module, view_fn, config: dict, connection_weights):
+    """The whole decision rule, built from a run's settings - so train, transfer and visualize
+    move macros identically. `config` is a run's args (a manifest's `args` dict works as is).
+
+    On top of the network's own displacement, two swarm rules, both off by default:
+
+    * **alignment** (`align` = a in [0, 1]) - Boids' third rule, the one placement never uses. A
+      macro's move becomes `(1 - a) * own + a * (weighted mean of its partners' moves)`, a convex
+      combination, so it stays inside the step bound. At a near 1 a connected cluster moves as one
+      school: its internal wires stay short while the group as a whole travels, which is the kind
+      of long move a single macro's gradient never takes. A macro with no partners keeps its own.
+    * **asynchronous updates** (`update_prob` = p) - each macro moves on a given step with
+      probability p, as in Growing Neural Cellular Automata. Breaks the lockstep symmetry behind
+      two partners chasing each other. Also applied in evaluation (with a fixed key there), because
+      the rule was trained that way.
+
+    Returns `act(variables, positions, parts, progress, key, stochastic) -> deltas`.
+    """
+    max_step = float(config["max_step"])
+    start = config.get("max_step_start")
+    start = None if start in (None, "None") else float(start)
+    align = float(config.get("align", 0.0) or 0.0)
+    update_prob = float(config.get("update_prob", 1.0) or 1.0)
+    partners = alignment_matrix(connection_weights)
+    connected = (partners.sum(axis=1, keepdims=True) > 0)
+
+    def act(variables, positions, parts, progress, key, stochastic):
+        noise_key, update_key = jax.random.split(key)
+        mean_raw, log_std = policy.apply(variables, view_fn(positions, parts, progress))
+        bound = step_bound(progress, max_step, start)
+        deltas = displacements(mean_raw, log_std, noise_key, bound, stochastic)
+        if align > 0.0:
+            shared = partners @ deltas
+            deltas = jnp.where(connected, (1.0 - align) * deltas + align * shared, deltas)
+        if update_prob < 1.0:
+            moving = jax.random.bernoulli(update_key, update_prob, (deltas.shape[0], 1))
+            deltas = deltas * moving
+        return deltas.astype(positions.dtype)
+
+    return act

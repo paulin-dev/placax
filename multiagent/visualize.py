@@ -41,7 +41,7 @@ from matplotlib.collections import LineCollection, PatchCollection  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
 
 from multiagent import context, legalize, moves, objective as objective_mod, view as view_mod  # noqa: E402
-from multiagent.policy import SharedMacroPolicy, displacements  # noqa: E402
+from multiagent.policy import SharedMacroPolicy, make_act  # noqa: E402
 
 CLEAR = "#4C78A8"
 OVERLAPPING = "#E45756"
@@ -93,6 +93,7 @@ def build_context(manifest: dict, benchmark_dir: pathlib.Path | None = None):
     objective = objective_mod.make(
         ctx, density_weight=float(args["density_weight"]),
         target_density=float(args["target_density"]), gamma_cells=float(args["gamma_cells"]),
+        overlap_weight=float(args.get("overlap_weight", 0.0)),
     )
     return ctx, objective
 
@@ -115,9 +116,10 @@ def policy_episode(run: pathlib.Path, manifest: dict, ctx, objective, which: str
         raise SystemExit(f"the policy reads {trained_features} features and this design's "
                          f"{args['view']} view has {n_features}.")
 
+    rule = make_act(policy, view_fn, args, ctx.connection_weights)
+
     def act(positions, parts, progress, key):
-        mean_raw, log_std = policy.apply(variables, view_fn(positions, parts, progress))
-        return displacements(mean_raw, log_std, key, float(args["max_step"]), stochastic=False)
+        return rule(variables, positions, parts, progress, key, False)
 
     _final, _costs, path = jax.jit(lambda: moves.rollout(
         ctx.warm_start, jax.random.PRNGKey(0), act, objective, ctx.lo, ctx.hi,

@@ -37,7 +37,7 @@ import numpy as np
 import optax
 
 from multiagent import context, legalize, moves, objective as objective_mod, view as view_mod
-from multiagent.policy import SharedMacroPolicy, displacements
+from multiagent.policy import SharedMacroPolicy, make_act
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -53,6 +53,16 @@ def parse_args(argv=None) -> argparse.Namespace:
     env.add_argument("--steps", type=int, default=32, help="Simultaneous moves per episode.")
     env.add_argument("--max_step", type=float, default=1.0,
                      help="Largest displacement per macro per step, in grid cells.")
+    env.add_argument("--max_step_start", type=float, default=None,
+                     help="Largest displacement at the FIRST step; shrinks geometrically to "
+                          "--max_step by the last. Unset = constant --max_step.")
+    env.add_argument("--align", type=float, default=0.0,
+                     help="Boids alignment in [0, 1]: each macro's move is blended with its "
+                          "partners' average move, so connected clusters travel together.")
+    env.add_argument("--update_prob", type=float, default=1.0,
+                     help="Probability each macro moves on a given step (NCA-style async).")
+    env.add_argument("--overlap_weight", type=float, default=0.0,
+                     help="Weight on pairwise macro overlap area (fraction of macro area).")
     env.add_argument("--density_weight", type=float, default=1.0,
                      help="Legality weight at the START of the run.")
     env.add_argument("--density_weight_end", type=float, default=None,
@@ -69,6 +79,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     agent.add_argument("--hidden", default="64,64", help="Shared policy's hidden widths.")
     agent.add_argument("--horizon", type=int, default=8,
                        help="Steps differentiated before the gradient path is cut.")
+    agent.add_argument("--start_noise", type=float, default=0.0,
+                       help="Training episodes start from the warm start plus Gaussian noise of "
+                            "this many grid cells, so the rule is learned on many placements, not "
+                            "one. Evaluation always starts from the warm start itself.")
+    agent.add_argument("--extra_benchmarks", type=pathlib.Path, nargs="*", default=[],
+                       help="More designs to train on, in turn with --benchmark_dir. Evaluation "
+                            "and checkpoints use --benchmark_dir only.")
     agent.add_argument("--iterations", type=int, default=200)
     agent.add_argument("--lr", type=float, default=3e-4)
     agent.add_argument("--max_grad_norm", type=float, default=1.0)
@@ -110,16 +127,23 @@ def main(argv=None) -> None:
     out = prepare_output(args)
 
     # 1. The design, the warm start, and the score everything is judged by.
-    ctx = context.build(
-        args.benchmark_dir, grid=args.grid,
-        macro_budget=args.macro_budget if args.macro_budget > 0 else None,
-        canvas=args.canvas, k_neighbors=args.k_neighbors,
-    )
-    objective = objective_mod.make(
-        ctx, density_weight=args.density_weight, target_density=args.target_density,
-        gamma_cells=args.gamma_cells,
-    )
-    view_fn, n_features = view_mod.make(ctx, args.view)
+    def load(benchmark_dir):
+        ctx = context.build(
+            benchmark_dir, grid=args.grid,
+            macro_budget=args.macro_budget if args.macro_budget > 0 else None,
+            canvas=args.canvas, k_neighbors=args.k_neighbors,
+        )
+        objective = objective_mod.make(
+            ctx, density_weight=args.density_weight, target_density=args.target_density,
+            gamma_cells=args.gamma_cells, overlap_weight=args.overlap_weight,
+        )
+        view_fn, n_features = view_mod.make(ctx, args.view)
+        return ctx, objective, view_fn, n_features
+
+    ctx, objective, view_fn, n_features = load(args.benchmark_dir)
+    extras = [load(path) for path in args.extra_benchmarks]
+    for path, extra in zip(args.extra_benchmarks, extras):
+        print(f"also training on {path.name}: {extra[0].n_macros} macros")
 
     warm = objective_mod.report(ctx, objective, ctx.warm_start)
     print(f"design {args.benchmark_dir.name}: {ctx.n_macros} macros on a {args.grid} grid "
@@ -142,28 +166,45 @@ def main(argv=None) -> None:
     )
     opt_state = optimizer.init(variables)
 
-    def episode(variables, key, density_weight, stochastic: bool):
-        """One episode driven by the policy, returning (final positions, per-step costs)."""
-        def act(positions, parts, progress, step_key):
-            mean_raw, log_std = policy.apply(variables, view_fn(positions, parts, progress))
-            return displacements(mean_raw, log_std, step_key, args.max_step, stochastic)
+    def make_episode(ctx, objective, view_fn):
+        """One episode on one design, returning (final positions, per-step costs)."""
+        rule = make_act(policy, view_fn, vars(args), ctx.connection_weights)
 
-        return moves.rollout(
-            ctx.warm_start, key, act, objective, ctx.lo, ctx.hi, args.steps, args.horizon,
-            density_weight,
-        )
+        def episode(variables, key, density_weight, stochastic: bool):
+            start_key, key = jax.random.split(key)
+            start = ctx.warm_start
+            if stochastic and args.start_noise > 0:
+                noise = jax.random.normal(start_key, start.shape, dtype=start.dtype)
+                start = jnp.clip(start + args.start_noise * noise, ctx.lo, ctx.hi)
 
-    @jax.jit
-    def train_step(variables, opt_state, key, density_weight):
-        def loss_fn(variables):
-            _final, costs = episode(variables, key, density_weight, stochastic=True)
-            # The mean over the episode's placements, not just the last one: a policy that dives
-            # and then wanders back up has not learned to hold a good placement.
-            return costs.mean(), costs
+            def act(positions, parts, progress, step_key):
+                return rule(variables, positions, parts, progress, step_key, stochastic)
 
-        (loss, costs), grads = jax.value_and_grad(loss_fn, has_aux=True)(variables)
-        updates, opt_state = optimizer.update(grads, opt_state, variables)
-        return optax.apply_updates(variables, updates), opt_state, loss, costs
+            return moves.rollout(
+                start, key, act, objective, ctx.lo, ctx.hi, args.steps, args.horizon,
+                density_weight,
+            )
+        return episode
+
+    def make_train_step(episode):
+        @jax.jit
+        def train_step(variables, opt_state, key, density_weight):
+            def loss_fn(variables):
+                _final, costs = episode(variables, key, density_weight, stochastic=True)
+                # The mean over the episode's placements, not just the last one: a policy that
+                # dives and then wanders back up has not learned to hold a good placement.
+                return costs.mean(), costs
+
+            (loss, costs), grads = jax.value_and_grad(loss_fn, has_aux=True)(variables)
+            updates, opt_state = optimizer.update(grads, opt_state, variables)
+            return optax.apply_updates(variables, updates), opt_state, loss, costs
+        return train_step
+
+    episode = make_episode(ctx, objective, view_fn)
+    # One compiled step per design; iteration i trains on design i mod the count.
+    train_steps = [make_train_step(episode)] + [
+        make_train_step(make_episode(c, o, v)) for c, o, v, _ in extras
+    ]
 
     @jax.jit
     def evaluate(variables, density_weight):
@@ -175,7 +216,8 @@ def main(argv=None) -> None:
     manifest = {
         "kind": "multiagent.train",
         "method": "short_horizon",
-        "args": {name: str(value) if isinstance(value, pathlib.Path) else value
+        "args": {name: str(value) if isinstance(value, pathlib.Path)
+                 else [str(v) for v in value] if isinstance(value, list) else value
                  for name, value in vars(args).items()},
         "git_sha": git_sha(),
         "n_macros": ctx.n_macros,
@@ -187,6 +229,7 @@ def main(argv=None) -> None:
             "density_weight": objective.density_weight,
             "target_density": objective.target_density,
             "gamma_cells": objective.gamma_cells,
+            "overlap_weight": objective.overlap_weight,
         },
         "warm_start": warm,
         "metric_meanings": {
@@ -213,6 +256,7 @@ def main(argv=None) -> None:
                 args.density_weight, args.density_weight_end or args.density_weight,
                 (iteration - 1) / max(args.iterations - 1, 1),
             )
+            train_step = train_steps[(iteration - 1) % len(train_steps)]
             variables, opt_state, loss, costs = train_step(
                 variables, opt_state, step_key, jnp.float32(weight)
             )

@@ -95,6 +95,7 @@ class Objective:
     density_weight: float
     target_density: float
     gamma_cells: float
+    overlap_weight: float = 0.0
 
 
 def make(
@@ -103,6 +104,7 @@ def make(
     target_density: float = DEFAULT_TARGET_DENSITY,
     gamma_cells: float = DEFAULT_GAMMA_CELLS,
     bounds_weight: float = 1.0,
+    overlap_weight: float = 0.0,
 ) -> Objective:
     """Builds the objective for one context. Called once per run; the closures are jit-friendly."""
     benchmark = ctx.benchmark
@@ -124,6 +126,21 @@ def make(
     def legality_cost(positions: jax.Array) -> jax.Array:
         return density_cost(to_real_centers(positions, sizes, cell_size), None)
 
+    grid_sizes = ctx.sizes_grid
+    upper = jnp.triu(jnp.ones((ctx.n_macros, ctx.n_macros), dtype=bool), k=1)
+
+    def overlap_area(positions: jax.Array) -> jax.Array:
+        """Total pairwise overlap area, in grid cells squared - what the repair has to undo.
+
+        The density term measures congestion per bin, which two macros can share a little of
+        while every bin stays under target; this is the overlap itself. Its gradient pushes each
+        overlapping pair apart along both axes, and is zero for a pair that does not touch.
+        """
+        lo, hi = positions, positions + grid_sizes
+        width = jnp.minimum(hi[:, None, 0], hi[None, :, 0]) - jnp.maximum(lo[:, None, 0], lo[None, :, 0])
+        height = jnp.minimum(hi[:, None, 1], hi[None, :, 1]) - jnp.maximum(lo[:, None, 1], lo[None, :, 1])
+        return jnp.where(upper, jax.nn.relu(width) * jax.nn.relu(height), 0.0).sum()
+
     # The two normalizers, computed once from the placement the agents start from.
     wl0 = float(wirelength(ctx.warm_start))
     area_bins = float((ctx.sizes_grid[:, 0] * ctx.sizes_grid[:, 1]).sum())
@@ -134,12 +151,14 @@ def make(
         wl_norm = wl / wl0
         legal_norm = legal / area_bins
         weight = density_weight if weight is None else weight
+        overlap_norm = overlap_area(positions) / area_bins
         return {
             "wl": wl,
             "wl_norm": wl_norm,
             "legal": legal,
             "legal_norm": legal_norm,
-            "total": wl_norm + weight * legal_norm,
+            "overlap_norm": overlap_norm,
+            "total": wl_norm + weight * legal_norm + overlap_weight * overlap_norm,
         }
 
     def total(positions: jax.Array, weight=None) -> jax.Array:
@@ -148,6 +167,7 @@ def make(
     return Objective(
         total=total, parts=parts, wl0=wl0, area_bins=area_bins,
         density_weight=density_weight, target_density=target_density, gamma_cells=gamma_cells,
+        overlap_weight=overlap_weight,
     )
 
 

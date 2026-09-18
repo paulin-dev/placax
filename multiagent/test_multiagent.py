@@ -89,6 +89,35 @@ def test_view_feature_counts(ctx, objective, level, expected):
     assert jnp.all(jnp.isfinite(obs))
 
 
+def test_all_partners_view_extends_m1_and_is_finite(ctx, objective):
+    parts = objective.parts(ctx.warm_start)
+    m1 = view_mod.make(ctx, "m1")[0](ctx.warm_start, parts, jnp.float32(0.0))
+    view_fn, n_features = view_mod.make(ctx, "m1all")
+    obs = view_fn(ctx.warm_start, parts, jnp.float32(0.0))
+    assert obs.shape == (ctx.n_macros, n_features) == (ctx.n_macros, m1.shape[1] + 6)
+    assert jnp.allclose(obs[:, : m1.shape[1]], m1)
+    assert jnp.all(jnp.isfinite(obs))
+    grads = jax.grad(lambda p: view_fn(p, parts, jnp.float32(0.0)).sum())(ctx.warm_start)
+    assert jnp.all(jnp.isfinite(grads))
+
+
+def test_overlap_term_is_zero_when_legal_and_positive_when_stacked(ctx):
+    objective = objective_mod.make(ctx, overlap_weight=1.0)
+    assert float(objective.parts(ctx.warm_start)["overlap_norm"]) < 1e-6
+    stacked = jnp.zeros_like(ctx.warm_start)
+    assert float(objective.parts(stacked)["overlap_norm"]) > 0.0
+    grads = jax.grad(lambda p: objective.parts(p)["overlap_norm"])(ctx.warm_start + 0.3)
+    assert jnp.all(jnp.isfinite(grads))
+
+
+def test_step_bound_shrinks_from_start_to_end():
+    from multiagent.policy import step_bound
+    assert step_bound(jnp.float32(0.5), 1.0) == 1.0
+    assert jnp.isclose(step_bound(jnp.float32(0.0), 1.0, 16.0), 16.0)
+    assert jnp.isclose(step_bound(jnp.float32(1.0), 1.0, 16.0), 1.0)
+    assert jnp.isclose(step_bound(jnp.float32(0.5), 1.0, 16.0), 4.0)
+
+
 def test_each_view_extends_the_one_below_it(ctx, objective):
     parts = objective.parts(ctx.warm_start)
     m0 = view_mod.make(ctx, "m0")[0](ctx.warm_start, parts, jnp.float32(0.25))
@@ -157,6 +186,57 @@ def test_policy_gradient_is_finite_and_nonzero(ctx, objective):
     assert jnp.isfinite(value)
     assert jnp.all(jnp.isfinite(flat))
     assert float(jnp.abs(flat).max()) > 0.0, "no gradient reached the shared policy"
+
+
+def _rule(ctx, config, view="m1"):
+    from multiagent.policy import make_act
+    view_fn, n_features = view_mod.make(ctx, view)
+    policy = SharedMacroPolicy(features=(8,))
+    variables = policy.init(jax.random.PRNGKey(0), jnp.zeros((ctx.n_macros, n_features)))
+    # A non-zero output layer, so the rule actually moves macros.
+    variables = jax.tree_util.tree_map(lambda x: x + 0.5, variables)
+    rule = make_act(policy, view_fn, config, ctx.connection_weights)
+    return lambda objective, stochastic=True: rule(
+        variables, ctx.warm_start, objective.parts(ctx.warm_start), jnp.float32(0.0),
+        jax.random.PRNGKey(1), stochastic,
+    )
+
+
+def test_alignment_keeps_every_move_inside_the_step_bound(ctx, objective):
+    for align in (0.0, 0.5, 1.0):
+        deltas = _rule(ctx, {"max_step": 1.0, "align": align})(objective)
+        assert jnp.all(jnp.abs(deltas) <= 1.0 + 1e-5)
+
+
+def test_full_alignment_moves_a_macro_with_its_partners_average(ctx, objective):
+    own = _rule(ctx, {"max_step": 1.0})(objective, stochastic=False)
+    aligned = _rule(ctx, {"max_step": 1.0, "align": 1.0})(objective, stochastic=False)
+    from multiagent.policy import alignment_matrix
+    partners = alignment_matrix(ctx.connection_weights)
+    connected = partners.sum(axis=1) > 0
+    assert jnp.allclose(aligned[connected], (partners @ own)[connected], atol=1e-5)
+    assert jnp.allclose(aligned[~connected], own[~connected], atol=1e-5)
+
+
+def test_update_prob_zero_freezes_every_macro(ctx, objective):
+    deltas = _rule(ctx, {"max_step": 1.0, "update_prob": 1e-9})(objective)
+    assert jnp.allclose(deltas, 0.0)
+
+
+def test_train_with_every_swarm_option_and_a_second_design(tmp_path, ctx):
+    out = tmp_path / "swarm"
+    train.main([
+        f"--benchmark_dir={BENCHMARK}", f"--grid={GRID}", f"--macro_budget={BUDGET}",
+        "--canvas=die", "--k_neighbors=3", "--view=m1all", "--hidden=16,16",
+        "--steps=4", "--horizon=2", "--iterations=2", "--eval_every=1", f"--out={out}",
+        "--align=0.7", "--update_prob=0.5", "--start_noise=2", "--overlap_weight=3",
+        "--max_step_start=4", f"--extra_benchmarks={BENCHMARK}",
+    ])
+    lines = [json.loads(line) for line in (out / "log.jsonl").read_text().splitlines()]
+    assert len(lines) == 2 and all(np.isfinite(line["loss"]) for line in lines)
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["args"]["align"] == 0.7
+    assert manifest["args"]["extra_benchmarks"] == [str(BENCHMARK)]
 
 
 def test_train_entry_point_writes_a_run(tmp_path, ctx):
