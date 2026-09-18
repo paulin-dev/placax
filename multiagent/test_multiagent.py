@@ -351,3 +351,23 @@ def test_swap_descent_keeps_legality_and_never_lengthens_wires(ctx, objective):
     after = objective_mod.report(ctx, objective, jnp.asarray(final))
     assert after["is_legal"]
     assert after["real_hpwl_snapped"] <= before["real_hpwl_snapped"] + 1e-6
+
+
+def test_swap_candidates_share_the_macros_footprint(ctx):
+    from multiagent.swarm_swap import candidates
+    from placax_agents.policy.scale import to_grid_units
+    footprints = np.asarray(to_grid_units(ctx.benchmark.sizes_array, ctx.benchmark.cell_size))
+    idx, valid = candidates(ctx, np.asarray(ctx.warm_start), k=0)
+    for i in range(ctx.n_macros):
+        for j in idx[i][valid[i]]:
+            assert j != i and np.all(footprints[j] == footprints[i])
+
+
+def test_resolved_swap_swarm_stays_legal_and_never_lengthens_wires(ctx, objective):
+    from multiagent.swarm_swap import ExactGain, swarm
+    start = np.asarray(jnp.round(ctx.warm_start), dtype=np.float32)
+    exact = ExactGain(ctx)
+    result = swarm(ctx, start, exact, k=0, exact=exact, resolve=True)
+    assert objective_mod.report(ctx, objective, jnp.asarray(result["positions"]))["is_legal"]
+    trace = np.array(result["hpwl"])
+    assert np.all(np.diff(trace) <= 1e-3 * trace[0])
