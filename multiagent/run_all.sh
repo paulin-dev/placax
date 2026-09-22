@@ -152,6 +152,17 @@ gif adaptec1-all-at-once.gif --benchmark_dir=benchmarks/adaptec1 --k=0
 gif adaptec1-resolve.gif --benchmark_dir=benchmarks/adaptec1 --k=0 --resolve
 gif adaptec1-nudge-then-swap.gif --policy=$R/sweep2/m1-s0 --benchmark_dir=benchmarks/adaptec1 --k=0 --resolve --nudge_first
 
+# --- Simulated annealing at five budgets, and the wall clock of every method ---
+for chip in adaptec1 bigblue1 ariane133; do
+  for sec in 1 5 30 120; do
+    once "$R/anneal/$chip-${sec}s" summary.json multiagent.anneal --benchmark_dir=benchmarks/$chip \
+      --canvas=$(canvas_of $chip) --seconds=$sec --seeds=3 --out=$R/anneal/$chip-${sec}s
+  done
+  once "$R/anneal/$chip-600s" summary.json multiagent.anneal --benchmark_dir=benchmarks/$chip \
+    --canvas=$(canvas_of $chip) --seconds=600 --seeds=1 --out=$R/anneal/$chip-600s
+done
+once "$R/timing" summary.json multiagent.timing --out=$R/timing
+
 # --- The paper: re-score everything under the final legalizer, then figures, tables, LaTeX ---
 say "paper build --recompute"
 "$PY" -m multiagent.paper.build --recompute 2>&1 | tee -a "$LOG"

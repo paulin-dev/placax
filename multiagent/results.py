@@ -241,5 +241,21 @@ def collect(recompute: bool) -> dict:
                       "ariane133": [imp(f"learned2-{v}-s{s}-ariane133") for v in ("m1", "m1all") for s in range(3)]},
         "nudge_swap": {c: imp(f"cycles-{c}-c1-nudgefirst") for c in CHIPS},
     }
+    # Simulated annealing at each time budget, and the wall clock of every method.
+    anneal = {}
+    for chip in CHIPS:
+        for budget in (1, 5, 30, 120, 600):
+            path = RUNS / "anneal" / f"{chip}-{budget}s"
+            if (path / "summary.json").exists():
+                run = summary(path)
+                anneal.setdefault(chip, {})[str(budget)] = {
+                    "mean": statistics.mean(x["hpwl_improvement"] for x in run["seeds"]),
+                    "seeds": [x["hpwl_improvement"] for x in run["seeds"]],
+                    "proposed": statistics.mean(x["proposed"] for x in run["seeds"]),
+                }
+    timing = json.loads((RUNS / "timing/summary.json").read_text())["designs"] \
+        if (RUNS / "timing/summary.json").exists() else {}
+
     return {"sweep1": sweep1, "sweep2": sweep2, "baselines": baselines, "curves": curves,
-            "pull": pull, "jitter": jit, "q3": q3, "unseen": unseen, "swarm": swarm}
+            "pull": pull, "jitter": jit, "q3": q3, "unseen": unseen, "swarm": swarm,
+            "anneal": anneal, "timing": timing}

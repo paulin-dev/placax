@@ -293,6 +293,39 @@ def fig_swarm_trace(out):
     plt.close(fig)
 
 
+def fig_time(data, out):
+    """What each method reaches, against the wall clock it needs. Log time axis."""
+    anneal, timing = data["anneal"], data["timing"]
+    marks = [("swap_swarm", "swap swarm (ours)", COLOR["swap"], "o"),
+             ("swap_search", "central swap search", COLOR["neutral"], "s"),
+             ("adam_2000_steps", "Adam", COLOR["adam"], "^"),
+             ("policy_episode", "agents, one episode", COLOR["agents"], "D")]
+    fig, axes = plt.subplots(1, 3, figsize=(TEXTWIDTH, 1.9), sharey=False)
+    for ax, chip in zip(axes, CHIPS):
+        budgets = sorted(anneal[chip], key=float)
+        xs = [float(b) for b in budgets]
+        ys = [anneal[chip][b]["mean"] for b in budgets]
+        lo = [min(anneal[chip][b]["seeds"]) for b in budgets]
+        hi = [max(anneal[chip][b]["seeds"]) for b in budgets]
+        ax.fill_between(xs, lo, hi, color="black", alpha=0.10, linewidth=0)
+        ax.plot(xs, ys, "-o", color="black", markersize=2.5, label="simulated annealing")
+        for key, name, color, marker in marks:
+            if key in timing[chip]:
+                entry = timing[chip][key]
+                ax.plot([entry["first_s"]], [entry["value"]], marker, color=color, markersize=4,
+                        label=name if chip == "adaptec1" else None)
+        ax.set_xscale("log")
+        ax.axhline(0, color="black", linewidth=0.5)
+        percent_axis(ax)
+        ax.set_xlabel("wall clock (s)")
+        ax.set_title(chip, fontsize=7.5, pad=3)
+    handles, names = axes[0].get_legend_handles_labels()
+    fig.legend(handles, names, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=3, columnspacing=1.2)
+    fig.subplots_adjust(wspace=0.32)
+    fig.savefig(out)
+    plt.close(fig)
+
+
 # ----------------------------------------------------------------------------------------------
 # Tables and quoted numbers
 
@@ -392,6 +425,59 @@ def table_swarm(data):
     return "\n".join(lines)
 
 
+def table_anneal(data):
+    """Annealing quality per time budget, against what our methods reach and when."""
+    anneal, timing, w = data["anneal"], data["timing"], data["swarm"]
+    lines = ["\\begin{tabular}{@{}lccc@{}}", "\\toprule",
+             "Method (time budget) & adaptec1 & bigblue1 & ariane133 \\\\", "\\midrule",
+             "\\multicolumn{4}{@{}l}{\\emph{Simulated annealing, 3 seeds (600\\,s: 1 seed)}} \\\\"]
+    for budget in ("1", "5", "30", "120", "600"):
+        cells = []
+        for chip in CHIPS:
+            entry = anneal[chip][budget]
+            cells.append(ms(entry["seeds"]) if len(entry["seeds"]) > 1 else ms(entry["mean"]))
+        lines.append(f"\\quad {budget}\\,s & " + " & ".join(cells) + " \\\\")
+    lines.append("\\midrule")
+    lines.append("\\multicolumn{4}{@{}l}{\\emph{Ours, at the wall clock each one needs}} \\\\")
+    swarm_cells = " & ".join(f"{ms(w['resolve'][c])} \\small ({timing[c]['swap_swarm']['first_s']:.1f}\\,s)" for c in CHIPS)
+    lines.append(f"\\quad swap swarm & {swarm_cells} \\\\")
+    nudge_cells = []
+    for chip in CHIPS:
+        seconds = timing[chip]["swap_swarm"]["first_s"] + timing[chip]["policy_episode"]["first_s"]
+        nudge_cells.append(f"{ms(w['nudge_swap'][chip])} \\small ({seconds:.1f}\\,s)")
+    lines.append("\\quad agents, then swap swarm & " + " & ".join(nudge_cells) + " \\\\")
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines)
+
+
+def table_runtime(data):
+    """Wall clock and cost-evaluation count for every method, on every design."""
+    timing, anneal = data["timing"], data["anneal"]
+    order = [("swap_search", "central swap search"), ("swap_swarm", "swap swarm (ours)"),
+             ("policy_episode", "agents, one episode"), ("pull_rule", "pull rule"),
+             ("adam_2000_steps", "Adam, 2000 steps")]
+    lines = ["\\begin{tabular}{@{}lcccccc@{}}", "\\toprule",
+             "& \\multicolumn{2}{c}{adaptec1} & \\multicolumn{2}{c}{bigblue1} & \\multicolumn{2}{c}{ariane133} \\\\",
+             "\\cmidrule(lr){2-3}\\cmidrule(lr){4-5}\\cmidrule(lr){6-7}",
+             "Method & s & result & s & result & s & result \\\\", "\\midrule"]
+    for key, name in order:
+        cells = []
+        for chip in CHIPS:
+            entry = timing[chip][key]
+            cells += [f"{entry['first_s']:.1f}", ms(entry["value"])]
+        lines.append(f"{name} & " + " & ".join(cells) + " \\\\")
+    for budget in ("30", "600"):
+        cells = []
+        for chip in CHIPS:
+            cells += [budget, ms(anneal[chip][budget]["mean"])]
+        lines.append(f"simulated annealing, {budget}\\,s & " + " & ".join(cells) + " \\\\")
+    lines += ["\\midrule",
+              "\\multicolumn{7}{@{}l}{\\emph{Loading the netlist and building the greedy start, paid by every method}} \\\\",
+              "greedy start & " + " & ".join(f"{timing[c]['load_and_greedy_s']:.1f} & ---" for c in CHIPS) + " \\\\",
+              "\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines)
+
+
 def table_benchmarks():
     lines = ["\\begin{tabular}{@{}llccl@{}}", "\\toprule",
              "Design & Source & Macros placed & Canvas covered & Macro shapes \\\\", "\\midrule"]
@@ -446,6 +532,12 @@ def numbers(data, frames):
         "AdamPlusSwapsBest": max(q["adam3"]["plus"], q["adam0"]["plus"]),
         "LearnedTwoChipsAriane": mean(two_chips_ariane),
         "PullHome": q["pull"]["alone"],
+        "AnnealHomeShort": data["anneal"]["adaptec1"]["1"]["mean"],
+        "AnnealHomeLong": data["anneal"]["adaptec1"]["600"]["mean"],
+        "AnnealBigblueLong": data["anneal"]["bigblue1"]["600"]["mean"],
+        "AnnealArianeLong": data["anneal"]["ariane133"]["600"]["mean"],
+        "AnnealArianeMid": data["anneal"]["ariane133"]["120"]["mean"],
+        "AnnealHomeThirty": data["anneal"]["adaptec1"]["30"]["mean"],
     }
     lines = [f"\\newcommand{{\\n{k}}}{{{tex_pct(v)}}}" for k, v in n.items()]
     lines.append(f"\\newcommand{{\\nPenaltyThreeSdPts}}{{${100 * n['PenaltyThreeSd']:.1f}$}}")
@@ -459,6 +551,22 @@ def numbers(data, frames):
     warm = json.loads((RUNS / "sweep2/adam-ov0-ariane133/manifest.json").read_text())["warm_start"]["real_hpwl_snapped"]
     lines.append(f"\\newcommand{{\\nAdamRawAriane}}{{{tex_pct(1 - last['eval_real_hpwl_snapped'] / warm)}}}")
     scorer = json.loads((RUNS / "swarmswap/net-m1all-s0/scorer.json").read_text())
+    # How many candidate moves each method scores, so speed can be read independently of hardware.
+    from multiagent import swarm_swap
+    for chip in CHIPS:
+        ctx, _, _ = results.env(chip)
+        _idx, valid = swarm_swap.candidates(ctx, np.asarray(jnp.round(ctx.warm_start)), 0)
+        rounds = results.summary(RUNS / "swarmswap" / f"exact-{chip}-k0-resolve")["rounds"]
+        tag = "".join(c for c in chip if c.isalpha()).capitalize()
+        lines.append(f"\\newcommand{{\\nSwarmEvals{tag}}}{{${rounds * int(valid.sum()):,}$}}".replace(",", "{,}"))
+        moves = data["anneal"][chip]["120"]["proposed"]
+        lines.append(f"\\newcommand{{\\nAnnealMoves{tag}}}{{${moves:,.0f}$}}".replace(",", "{,}"))
+
+    timing = data["timing"]
+    for chip in CHIPS:
+        tag = "".join(c for c in chip if c.isalpha()).capitalize()
+        lines.append(f"\\newcommand{{\\nSwarmSeconds{tag}}}{{${timing[chip]['swap_swarm']['first_s']:.1f}$\\,s}}")
+    lines.append(f"\\newcommand{{\\nSwarmSecondsSum}}{{${timing['adaptec1']['swap_swarm']['first_s'] + timing['adaptec1']['policy_episode']['first_s']:.1f}$\\,s}}")
     lines.append(f"\\newcommand{{\\nScorerSamples}}{{${scorer['samples']:,}$}}".replace(",", "{,}"))
     lines.append(f"\\newcommand{{\\nSwarmRoundsAriane}}{{{frames['rounds']}}}")
     lines.append(f"\\newcommand{{\\nSwarmSwapsAriane}}{{{frames['swaps']}}}")
@@ -486,10 +594,13 @@ def main(argv=None) -> None:
     fig_q3(data, figs / "q3.pdf")
     fig_swarm_trace(figs / "swarm_trace.pdf")
     fig_swarm_frames(figs / "swarm_frames.pdf", tabs / "swarm_frames.json")
+    fig_time(data, figs / "time.pdf")
     print("tables ...", flush=True)
     (tabs / "main.tex").write_text(table_main(data))
     (tabs / "ablation.tex").write_text(table_ablation(data))
     (tabs / "swarm.tex").write_text(table_swarm(data))
+    (tabs / "anneal.tex").write_text(table_anneal(data))
+    (tabs / "runtime.tex").write_text(table_runtime(data))
     (tabs / "benchmarks.tex").write_text(table_benchmarks())
     (HERE / "numbers.tex").write_text(numbers(data, json.loads((tabs / "swarm_frames.json").read_text())))
 

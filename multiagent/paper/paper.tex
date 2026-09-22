@@ -50,7 +50,7 @@
 
 \begin{abstract}
 \noindent
-Learning-based macro placement usually trains a single policy that places or moves one macro at a time. We test the opposite design. Every macro is an agent, all agents run the same small network on their own local view, all macros move at the same time, and they are scored only on the wirelength and overlap of the whole design. This score is differentiable, so each agent's move gets its exact share of the credit by back-propagation. We refine a greedy placement of 128 macros on three benchmarks. On the design they train on, the agents improve wirelength by \nAgentsHome{}, more than gradient descent on the same objective (\nAdamThreeHome{}), but less than gradient descent with its best setting (\nAdamZeroHome{}) and less than a one-second search that swaps pairs of macros (\nSwapHome{}). They do not transfer to unseen designs. We then let the agents swap: two macros of the same size trade places when each picks the other, and a swap that shares wires with a better one waits. This swap swarm has no coordinator and matches the central swap search, slightly exceeding it on the densest design (\nSwarmAriane{} vs.\ \nSwapAriane{}). A swap rule learned from the agents' view does not transfer. The best result on the training design, \nNudgeSwapHome{}, uses the agents' moves followed by swaps. Two evaluation pitfalls, agents that exploit the legalizer and a legalizer that fails on dense designs, had to be fixed before these comparisons were meaningful.
+Learning-based macro placement usually trains a single policy that places or moves one macro at a time. We test the opposite design. Every macro is an agent, all agents run the same small network on their own local view, all macros move at the same time, and they are scored only on the wirelength and overlap of the whole design. This score is differentiable, so each agent's move gets its exact share of the credit by back-propagation. We refine a greedy placement of 128 macros on three benchmarks. On the design they train on, the agents improve wirelength by \nAgentsHome{}, more than gradient descent on the same objective (\nAdamThreeHome{}), but less than gradient descent with its best setting (\nAdamZeroHome{}) and less than a one-second search that swaps pairs of macros (\nSwapHome{}). They do not transfer to unseen designs. We then let the agents swap: two macros of the same size trade places when each picks the other, and a swap that shares wires with a better one waits. This swap swarm has no coordinator and matches the central swap search, slightly exceeding it on the densest design (\nSwarmAriane{} vs.\ \nSwapAriane{}). A swap rule learned from the agents' view does not transfer. The best result on the training design, \nNudgeSwapHome{}, uses the agents' moves followed by swaps. Against simulated annealing, the classic method built on the same exchange move, the swarm is ahead at equal wall clock (seconds) and behind when annealing is given two orders of magnitude more time: on the densest design annealing reaches \nAnnealArianeLong{} in 600\,s against the swarm's \nSwarmAriane{} in \nSwarmSecondsAriane{}. Two evaluation pitfalls, agents that exploit the legalizer and a legalizer that fails on dense designs, had to be fixed before these comparisons were meaningful.
 \end{abstract}
 
 % ------------------------------------------------------------------------------------------------
@@ -82,7 +82,7 @@ We study a decentralized alternative. At each step every macro looks at its surr
 
 \paragraph{Analytical and force-directed placement.} Force-directed placers~\citep{eisenmann1998generic,spindler2008kraftwerk2} treat nets as springs that pull connected cells together and density as a force that spreads them. ePlace~\citep{lu2015eplace} and DREAMPlace~\citep{lin2019dreamplace} minimize a smoothed wirelength plus a density term with gradient methods and legalize afterwards. Our Adam baseline is a simple method of this kind.
 
-\paragraph{Swaps.} Exchanging two cells is a standard move in placement, for example in simulated annealing~\citep{sechen1985timberwolf}. We use a greedy swap search as a baseline and then as the move the agents make.
+\paragraph{Swaps and annealing.} Exchanging two cells is a standard move in placement, and simulated annealing~\citep{sechen1985timberwolf} is the classic method built on it: the same move, accepted sometimes even when it lengthens wires, under a cooling schedule. We use both a greedy swap search and a tuned annealer as baselines, and the same exchange as the move the agents make.
 
 \paragraph{Multi-agent learning and differentiable simulation.} When agents share one reward, it is hard to tell which agent caused a change, the credit assignment problem~\citep{foerster2018coma}. A differentiable simulator avoids it, because the gradient of the objective gives each agent's contribution directly. We use the short-horizon training window of SHAC~\citep{xu2022shac} without its value function. A network applied to every parameter with shared weights also resembles a learned optimizer~\citep{andrychowicz2016learning}, except that our agents see positions, not gradients.
 
@@ -207,6 +207,7 @@ Exchanging two macros of the same size keeps a placement legal. Algorithm~\ref{a
 The \textbf{pull rule} has no learning: every step, each macro moves one cell toward the weighted centre of its 4 most connected macros. It shows what an obvious local rule achieves.
 The \textbf{swap search} repeatedly makes the single same-size swap that reduces HPWL the most, until no swap helps. It shows what small continuous moves cannot reach.
 \textbf{Random jitter} adds Gaussian noise with a standard deviation of one cell to the greedy start and legalizes it. It shows how much the legalizer alone can change the result.
+\textbf{Simulated annealing} starts from the same greedy placement and proposes, with equal probability, a swap of two equal-footprint macros or a shift of one macro into free space within a shrinking window. Both moves keep the placement legal, so annealing is scored on its own output with no legalizer. The temperature is steered to a target acceptance rate that falls from 30\% to 1\%, and the last 10\% of the budget runs at zero temperature from the best placement found. We tuned the acceptance target, the share of swaps and the length of that tail on adaptec1 at a 30\,s budget (12 configurations, best kept), then used one setting on all three designs. Annealing answers the question a reader asks first, because it makes the same move as our swarm.
 
 \paragraph{Reporting.} Every number in this paper is the improvement~\eqref{eq:impr} of a legalized placement over the greedy start of the same design, in percent. Methods without randomness (pull rule, swap search, swap swarm with the exact score) are run once. Adam is run once and evaluated every 100 steps. Each learned policy is trained with 3 seeds and evaluated every 5 episodes. For Adam and for each seed, we report the median of the last 5 evaluations, never the best one, and tables give the mean and standard deviation over the 3 seeds. Random jitter uses 5 noise seeds. \emph{Transfer} runs the adaptec1 policy for one episode, without noise or retraining, on another design. All values are computed from the stored runs by one script (Appendix~\ref{app:repro}).
 
@@ -313,6 +314,39 @@ With the exact score and the conflict rule, the swap swarm matches the central s
 
 Learning the swap score gives the same picture as learning the moves. With the m0 view, the learned score never produces a useful swap. With m1 or m1all it finds the three swaps that matter on adaptec1 for some seeds, but it does not help on the other designs, even when trained on two of them (ariane133: \nLearnedTwoChipsAriane{}). The best result on adaptec1, \nNudgeSwapHome{}, comes from running the agents' moves first and the swap swarm second. On the other designs the agents' moves lower the final result.
 
+\subsection{Cost: annealing and wall clock}\label{sec:cost}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/time.pdf}
+\caption{What each method reaches against the time it needs (log scale). The black line is simulated annealing at five budgets, with the band spanning its seeds. Markers are single runs of the other methods at their measured wall clock, including compilation.}
+\label{fig:time}
+\end{figure}
+
+\begin{table}[tbp]
+\centering
+\caption{Simulated annealing by time budget, against our methods at the wall clock they need. Improvement in \%, mean\,$\pm$\,std over 3 annealing seeds (1 seed at 600\,s).}
+\label{tab:anneal}
+\small
+\input{tables/anneal}
+\end{table}
+
+\begin{table}[tbp]
+\centering
+\caption{Wall clock in seconds, including JAX compilation, and the result reached. One machine: an RTX 3050 laptop GPU, with annealing single-threaded on the CPU.}
+\label{tab:runtime}
+\small
+\input{tables/runtime}
+\end{table}
+
+Table~\ref{tab:anneal} and Fig.~\ref{fig:time} put every method on one time axis, and Table~\ref{tab:runtime} gives the measured wall clock.
+
+\textbf{At equal time, the swarm is ahead.} Annealing given one second reaches \nAnnealHomeShort{} on adaptec1, while the swap swarm reaches \nSwarmHome{} in \nSwarmSecondsAdaptec{} and the agents followed by the swarm reach \nNudgeSwapHome{} in \nSwarmSecondsSum{}. Annealing needs about 30\,s to match the swarm on adaptec1 (\nAnnealHomeThirty{}) and about 120\,s on bigblue1.
+
+\textbf{Given far more time, annealing wins.} At 600\,s it reaches \nAnnealHomeLong{} on adaptec1, \nAnnealBigblueLong{} on bigblue1 and \nAnnealArianeLong{} on ariane133, the last well above the swarm's \nSwarmAriane{}. The swarm stops when no macro wants to trade, which is a local optimum of its move set, while annealing accepts uphill moves and keeps going.
+
+\textbf{Read the speed comparison with care.} The two implementations do not use the same hardware: the swarm scores all candidate swaps in parallel on a GPU, and the annealer is a single-threaded NumPy loop proposing one move at a time. A hardware-independent measure is how many candidate moves each one scores. On ariane133 the swarm scores \nSwarmEvalsAriane{} candidates in total, and annealing proposes \nAnnealMovesAriane{} in 120\,s, by which point it is already ahead (\nAnnealArianeMid{} against \nSwarmAriane{}). On adaptec1 the ordering reverses: the swarm needs \nSwarmEvalsAdaptec{} evaluations for \nSwarmHome{}, two orders of magnitude fewer than annealing spends before passing it. The swarm is thus more efficient per evaluation on the sparse and mixed designs and less efficient on the dense one, and its wall-clock advantage comes from evaluating a whole round at once.
+
 % ------------------------------------------------------------------------------------------------
 \section{Discussion}
 
@@ -320,13 +354,15 @@ Learning the swap score gives the same picture as learning the moves. With the m
 
 \paragraph{Why swaps work and learned swap scores do not.} Each macro can compute the exact effect of a swap from its own nets, and the conflict rule stops wired neighbours from acting on conflicting plans. The learned score only approximates a value that the macro can compute exactly. That it does not transfer matches the result for moves: features learned on one design do not describe another well.
 
+\paragraph{What the annealing comparison changes.} The swarm is not a better search than annealing; it is a faster one per unit of wall clock, and it stops earlier. Both use the same exchange move, and annealing's willingness to accept a worse placement is what lets it pass the swarm given enough time, especially on the dense design where good exchanges are rare and have to be reached through worse intermediate states. The consequence is to give the swarm the same ability: accept a proposed exchange with a probability set by a temperature, keeping mutual consent and the conflict rule, which turns it into a parallel annealer rather than a parallel descent. We have not tested that.
+
 \paragraph{Evaluation.} Two early conclusions were wrong because of the legalizer: a first result of \nFirstRunBest{}, and the impression that ariane133 could not be improved. Any placer evaluated after legalization can be misled in the same way. We suggest reporting a random-jitter range, a swap-search baseline, and medians over several seeds and evaluations.
 
-\paragraph{Limitations.} We use three designs and 128 macros per design, and measure only wirelength, because the benchmarks include no timing data. Adam is a weaker baseline than a full analytical placer such as DREAMPlace~\citep{lin2019dreamplace}. Swaps are limited to macros of the same size. The agents are trained without a value function. Natural next steps are swaps between macros of different sizes, using the agents and swaps after a stronger initial placer, and a comparison with DREAMPlace on more designs.
+\paragraph{Limitations.} We use three designs and 128 macros per design, and measure only wirelength, because the benchmarks include no timing data. Adam is a weaker baseline than a full analytical placer such as DREAMPlace~\citep{lin2019dreamplace}. The timing comparison is bound to our implementations: a compiled, multi-threaded annealer would propose many more moves per second than our NumPy loop, which would narrow or remove the wall-clock advantage we measure. Swaps are limited to macros of the same size. The agents are trained without a value function. Natural next steps are swaps between macros of different sizes, using the agents and swaps after a stronger initial placer, and a comparison with DREAMPlace on more designs.
 
 % ------------------------------------------------------------------------------------------------
 \section{Conclusion}
-Macros acting as identical agents with local information can improve a placement. Through small moves the gain is modest and does not transfer to other designs. Through swaps agreed between pairs, with a local rule for conflicts, they do as well as a central swap search. In both cases, learned decisions did not generalize, while exactly computed ones did. Controls for the legalizer were needed to reach these conclusions.
+Macros acting as identical agents with local information can improve a placement. Through small moves the gain is modest and does not transfer to other designs. Through swaps agreed between pairs, with a local rule for conflicts, they do as well as a central swap search, and better than simulated annealing at equal wall clock, though annealing overtakes them when given two orders of magnitude more time. In both cases, learned decisions did not generalize, while exactly computed ones did. Controls for the legalizer were needed to reach these conclusions.
 
 \small
 \bibliographystyle{plainnat}

@@ -371,3 +371,28 @@ def test_resolved_swap_swarm_stays_legal_and_never_lengthens_wires(ctx, objectiv
     assert objective_mod.report(ctx, objective, jnp.asarray(result["positions"]))["is_legal"]
     trace = np.array(result["hpwl"])
     assert np.all(np.diff(trace) <= 1e-3 * trace[0])
+
+
+def test_annealing_cost_matches_the_runner_hpwl(ctx):
+    """The incremental cost must agree with the score every other method is measured by."""
+    from placax_agents.experiment.run import score_placement
+    from multiagent.anneal import Cost
+    positions = np.asarray(jnp.round(ctx.warm_start))
+    assert Cost(ctx).total(positions) == pytest.approx(score_placement(ctx.benchmark, jnp.asarray(positions)), rel=1e-6)
+
+
+def test_annealing_keeps_the_placement_legal_and_never_returns_worse(ctx, objective):
+    from multiagent.anneal import anneal
+    start = np.asarray(jnp.round(ctx.warm_start))
+    before = objective_mod.report(ctx, objective, jnp.asarray(start))
+    run = anneal(ctx, start, seconds=2.0, rng=np.random.default_rng(0))
+    after = objective_mod.report(ctx, objective, jnp.asarray(run["positions"], dtype=jnp.float32))
+    assert after["is_legal"]
+    assert after["real_hpwl_snapped"] <= before["real_hpwl_snapped"] + 1e-6
+
+
+def test_annealing_refuses_an_overlapping_start(ctx):
+    from multiagent.anneal import Placement
+    stacked = np.zeros((ctx.n_macros, 2), dtype=np.int64)
+    with pytest.raises(SystemExit):
+        Placement(ctx, stacked)

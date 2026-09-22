@@ -1,0 +1,16 @@
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method (time budget) & adaptec1 & bigblue1 & ariane133 \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Simulated annealing, 3 seeds (600\,s: 1 seed)}} \\
+\quad 1\,s & $+7.9\,\pm\,8.7$ & $+11.0\,\pm\,1.5$ & $+12.1\,\pm\,3.5$ \\
+\quad 5\,s & $+14.6\,\pm\,3.0$ & $+17.9\,\pm\,3.8$ & $+30.6\,\pm\,1.7$ \\
+\quad 30\,s & $+19.2\,\pm\,0.8$ & $+16.7\,\pm\,21.6$ & $+35.5\,\pm\,2.1$ \\
+\quad 120\,s & $+19.2\,\pm\,0.8$ & $+44.0\,\pm\,0.8$ & $+40.3\,\pm\,1.4$ \\
+\quad 600\,s & $+25.7$ & $+44.4$ & $+45.4$ \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{Ours, at the wall clock each one needs}} \\
+\quad swap swarm & $+18.1$ \small (0.8\,s) & $+44.4$ \small (1.0\,s) & $+35.3$ \small (3.5\,s) \\
+\quad agents, then swap swarm & $+25.8$ \small (1.7\,s) & $+38.8$ \small (1.9\,s) & $+27.8$ \small (4.5\,s) \\
+\bottomrule
+\end{tabular}

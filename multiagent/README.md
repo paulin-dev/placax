@@ -9,7 +9,7 @@ score through the episode.
 > Can a placement emerge from many identical, locally informed macros cooperating on one global
 > score — and does it beat optimizing the positions directly?
 
-**The full write-up is the paper, [`paper/paper.pdf`](paper/paper.pdf)** (NeurIPS-style, 12 pages),
+**The full write-up is the paper, [`paper/paper.pdf`](paper/paper.pdf)** (NeurIPS-style, 14 pages),
 with its animations in [`paper/SUPPLEMENTARY.md`](paper/SUPPLEMENTARY.md). This README is the short
 version and the how-to.
 
@@ -24,6 +24,7 @@ checkpoint.
 |---|---|---|
 | random jitter (1 cell) + legalize — the no-intelligence control | −2.6% | — |
 | `swap.py` — swap same-size macros, no learning, 0.5 s | +18.1% | — |
+| `anneal.py` — simulated annealing, 30 s / 600 s | +19.2% / +25.7% | — |
 | `pull.py` — step toward your partners, no learning | +11.0% | +19.8% |
 | `adam.py`, overlap penalty 3 (the agents' objective) | +2.0% | +20.0% |
 | `adam.py`, its best penalty (0) | +16.7% | +17.0% |
@@ -84,6 +85,10 @@ when two macros pick each other, and all agreed swaps in a round happen at once.
   legal result.
 - **A swap search.** Continuous moves can't make two blocks trade places without passing through
   each other. That is where most of the slack in these starts is.
+- **Simulated annealing, given the same wall clock.** It makes the same swap move, so it is the
+  baseline the swarm has to answer. At one second the swarm wins everywhere; at 600 s annealing
+  wins on the dense design (+45.4% vs +35.3%). Our timing is implementation-bound: the swarm is
+  GPU-batched, the annealer a single-threaded NumPy loop.
 
 ## Quick start
 
@@ -98,6 +103,10 @@ python -m multiagent.adam --benchmark_dir=benchmarks/adaptec1 --overlap_weight=3
 python -m multiagent.pull --benchmark_dir=benchmarks/adaptec1 --steps 32
 python -m multiagent.swap --benchmark_dir=benchmarks/adaptec1
 python -m multiagent.swap --benchmark_dir=benchmarks/adaptec1 --positions=multiagent/runs/<run>/best_positions.npy
+
+# Simulated annealing (the classic method built on the same swap move), and wall-clock timing
+python -m multiagent.anneal --benchmark_dir=benchmarks/adaptec1 --seconds=30 --seeds=3
+python -m multiagent.timing --out=multiagent/runs/timing
 
 # The swap swarm: exact judge, and a learned one (train on adaptec1, apply anywhere)
 python -m multiagent.swarm_swap run --benchmark_dir=benchmarks/ariane133 --canvas=die --k=0 --resolve
@@ -152,6 +161,8 @@ python -m pytest multiagent/test_multiagent.py -q
 | `adam.py` | the same objective optimized directly on the positions |
 | `pull.py` | untrained control: step toward the weighted centre of your partners |
 | `swap.py` | swap same-footprint macros while it shortens the wires; legal by construction |
+| `anneal.py` | simulated annealing on the same moves: the baseline the swap swarm has to answer |
+| `timing.py` | wall clock of every method, compile time separated from steady state |
 | `swarm_swap.py` | the swap swarm: local candidates, mutual consent, `--resolve`, exact or learned judge, `--policy` nudge/swap cycles |
 | `legalize.py` | wire-aware repair, `spread` for packed canvases, and the both-ways portfolio |
 | `transfer.py` | run a trained policy on another design, no retraining |
