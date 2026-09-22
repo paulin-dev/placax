@@ -1,0 +1,18 @@
+\begin{tabular}{@{}llccc@{}}
+\toprule
+Judge & Variant & adaptec1 & bigblue1 & ariane133 \\
+\midrule
+--- & central swap search (reference) & $+18.1$ & $+44.4$ & $+33.8$ \\
+\midrule
+exact & all agreed swaps at once & $-15.1$ & $+38.5$ & $+37.3$ \\
+exact & wired swaps wait (Alg.~\ref{alg:swarm}) & $+18.1$ & $+44.4$ & $+35.3$ \\
+exact & wired swaps wait, 8 nearest candidates & $+18.1$ & $+27.8$ & $+15.5$ \\
+\midrule
+learned & view m0 & $0.0\,\pm\,0.0$ & $0.0\,\pm\,0.0$ & $0.0\,\pm\,0.0$ \\
+learned & view m1 & $+12.0\,\pm\,10.4$ & $-17.4\,\pm\,19.0$ & $-0.6\,\pm\,0.6$ \\
+learned & view m1all & $+6.0\,\pm\,10.4$ & $-2.2\,\pm\,3.0$ & $+0.6\,\pm\,0.6$ \\
+learned & m1, m1all, also trained on bigblue1 & -- & -- & $+0.9\,\pm\,1.1$ \\
+\midrule
+exact & after the agents' nudges & $+25.8$ & $+38.8$ & $+27.8$ \\
+\bottomrule
+\end{tabular}

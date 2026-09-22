@@ -1,10 +1,11 @@
-"""Rebuilds report.html from report_template.html and the runs under multiagent/runs/.
+"""Every number the paper reports, read from the runs under multiagent/runs/.
 
-    python -m multiagent.build_report              # reuse cached measurements where present
-    python -m multiagent.build_report --recompute  # redo them (after new or changed runs)
+    from multiagent.results import collect
+    data = collect(recompute=False)
 
-Everything the report shows is read from run directories, never typed in. Three measurements
-aren't a single run's output, so they are computed here and cached in `multiagent/runs/q3/`:
+The paper's figures and tables (multiagent/paper/build.py) are drawn from `collect()` and nothing
+else, so no number is ever typed in by hand. Three measurements aren't a single run's output, so
+they are computed here and cached in `multiagent/runs/q3/`:
 
     rescore.json     every saved run re-legalized by the final (portfolio) legalizer: the median
                      of its last 5 snapshots, and its last snapshot followed by `swap.py`
@@ -12,11 +13,9 @@ aren't a single run's output, so they are computed here and cached in `multiagen
                      the final legalizer - the no-intelligence control
     pull_steps.json  the untrained pull rule on adaptec1 at several episode lengths
 
-The runs themselves come from the commands in README.md; the directory names below are the ones
-those experiments wrote. A missing run fails loudly rather than leaving a hole in a chart.
+The runs themselves come from multiagent/run_all.sh, which writes exactly the directory names read
+below. A missing run fails loudly rather than leaving a hole in a table.
 """
-import argparse
-import base64
 import json
 import pathlib
 import re
@@ -175,6 +174,14 @@ def collect(recompute: bool) -> dict:
             "overlap": statistics.median(e["eval_overlap_ratio"] for e in tail),
         })
 
+    def overlap(run):
+        tail = evals(run)[-5:]
+        return statistics.median(e["eval_overlap_ratio"] for e in tail)
+
+    for name, seeds in sweep1.items():
+        for i, entry in enumerate(seeds):
+            entry["overlap"] = overlap(RUNS / "sweep" / f"{name}-s{i}")
+
     # Sweep 2 (nine configurations), transfers re-run under the final legalizer.
     sweep2 = {}
     for run in sorted((RUNS / "sweep2").glob("*-s[0-9]")):
@@ -184,6 +191,7 @@ def collect(recompute: bool) -> dict:
         sweep2.setdefault(cfg, []).append({
             "final": runs[f"sweep2/{run.name}"]["median"],
             "bigblue1": transfer(cfg, seed, "bigblue1"), "ariane133": transfer(cfg, seed, "ariane133"),
+            "overlap": overlap(run),
         })
 
     adam = lambda key: {"final": runs[key]["median"]}
@@ -235,39 +243,3 @@ def collect(recompute: bool) -> dict:
     }
     return {"sweep1": sweep1, "sweep2": sweep2, "baselines": baselines, "curves": curves,
             "pull": pull, "jitter": jit, "q3": q3, "unseen": unseen, "swarm": swarm}
-
-
-MEDIA = {
-    "IMG_OV0": ("sweep/m1-s0/viz/before_after.png", "image/png"),
-    "IMG_OV3": ("sweep2/m1all-s0/viz/before_after.png", "image/png"),
-    "GIF_OV3": ("sweep2/m1all-s0/viz/episode.gif", "image/gif"),
-    "GIF_SW_ARIANE": ("swarmswap/gifs/ariane133-resolve.gif", "image/gif"),
-    "GIF_SW_A1_BAD": ("swarmswap/gifs/adaptec1-all-at-once.gif", "image/gif"),
-    "GIF_SW_A1_GOOD": ("swarmswap/gifs/adaptec1-resolve.gif", "image/gif"),
-}
-
-
-def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--recompute", action="store_true",
-                        help="Redo rescore.json, jitter.json and pull_steps.json.")
-    parser.add_argument("--out", type=pathlib.Path, default=HERE / "report.html")
-    args = parser.parse_args(argv)
-
-    page = (HERE / "report_template.html").read_text()
-    page = page.replace("{{DATA}}", json.dumps(collect(args.recompute), separators=(",", ":")))
-    for key, (path, mime) in MEDIA.items():
-        media = RUNS / path
-        if not media.exists():
-            raise SystemExit(f"missing media: {media} (python -m multiagent.visualize / "
-                             f"python -m multiagent.swarm_swap run --gif=...)")
-        page = page.replace("{{" + key + "}}", f"data:{mime};base64," + base64.b64encode(media.read_bytes()).decode())
-    leftover = re.findall(r"\{\{[A-Z0-9_]+\}\}", page)
-    if leftover:
-        raise SystemExit(f"template placeholders with no value: {leftover}")
-    args.out.write_text(page)
-    print(f"wrote {args.out} ({len(page) // 1024} KB)")
-
-
-if __name__ == "__main__":
-    main()

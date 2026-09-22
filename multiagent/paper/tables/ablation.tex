@@ -1,0 +1,21 @@
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Variant (m1all unless noted) & adaptec1 & overlap$^\ddagger$ & bigblue1 & ariane133 \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{Overlap penalty and step schedule}} \\
+\quad m1, $\lambda_o=0$ & $+6.5\,\pm\,14.9$ & $31$\% & $+6.8\,\pm\,8.4$ & -- \\
+\quad $\lambda_o=0$ & $-0.3\,\pm\,11.5$ & $38$\% & $+4.8\,\pm\,3.2$ & -- \\
+\quad $\lambda_o=3$ & $+6.8\,\pm\,0.2$ & $3$\% & $+0.2\,\pm\,4.4$ & -- \\
+\quad $\lambda_o=10$ & $-0.3\,\pm\,0.3$ & $1$\% & $+1.9\,\pm\,1.3$ & -- \\
+\quad steps $16\to1$, $\lambda_o=0$ & $+0.2\,\pm\,9.9$ & $63$\% & $+11.9\,\pm\,1.3$ & -- \\
+\quad steps $16\to1$, $\lambda_o=10$ & $-39.9\,\pm\,5.9$ & $15$\% & $+5.9\,\pm\,6.2$ & -- \\
+\midrule
+\multicolumn{5}{@{}l}{\emph{Swarm rules and generalization ($\lambda_o=3$)}} \\
+\quad none (reference) & $+7.0\,\pm\,0.1$ & $3$\% & $+1.9\,\pm\,1.4$ & $-6.6\,\pm\,2.9$ \\
+\quad alignment $a=0.5$ & $-0.9\,\pm\,0.7$ & $2$\% & $-0.5\,\pm\,2.1$ & $-2.3\,\pm\,0.2$ \\
+\quad alignment $a=0.9$ & $0.0\,\pm\,0.7$ & $1$\% & $+1.9\,\pm\,0.7$ & $-1.6\,\pm\,0.5$ \\
+\quad random half of macros move & $-1.3\,\pm\,1.0$ & $2$\% & $+8.6\,\pm\,3.4$ & $-2.2\,\pm\,0.2$ \\
+\quad noisy starts ($\sigma=4$ cells) & $+1.7\,\pm\,0.3$ & $9$\% & $+6.6\,\pm\,3.7$ & $-3.1\,\pm\,0.8$ \\
+\quad noisy starts + trained on bigblue1$^\S$ & $-1.3\,\pm\,0.9$ & $10$\% & $+2.8\,\pm\,3.2$ & $-2.1\,\pm\,0.7$ \\
+\bottomrule
+\end{tabular}

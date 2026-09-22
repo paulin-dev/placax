@@ -1,0 +1,18 @@
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & adaptec1 & bigblue1 & ariane133 \\
+ & \small (training) & \small (unseen) & \small (unseen) \\
+\midrule
+\multicolumn{4}{@{}l}{\emph{No learning}} \\
+\quad Random jitter + legalize (control) & $-2.6\,\pm\,2.5$ & $-1.6\,\pm\,7.0$ & $-2.1\,\pm\,0.1$ \\
+\quad Pull toward partners & $+11.0$ & $+15.5$ & $+2.7$ \\
+\quad Swap search (central) & $+18.1$ & $\mathbf{+44.4}$ & $+33.8$ \\
+\multicolumn{4}{@{}l}{\emph{Direct optimization}} \\
+\quad Adam, $\lambda_o=0$ & $+16.7$ & $+8.2$ & $+0.6$ \\
+\quad Adam, $\lambda_o=3$ & $+2.0$ & $+4.1$ & $-1.6$ \\
+\multicolumn{4}{@{}l}{\emph{Decentralized agents (ours)}} \\
+\quad Nudging agents, m1all, $\lambda_o=3$$^\dagger$ & $+7.0\,\pm\,0.1$ & $+1.9\,\pm\,1.4$ & $-6.6\,\pm\,2.9$ \\
+\quad Swap swarm, exact judge & $+18.1$ & $\mathbf{+44.4}$ & $\mathbf{+35.3}$ \\
+\quad Nudging agents, then swap swarm$^{\dagger\ast}$ & $\mathbf{+25.8}$ & $+38.8$ & $+27.8$ \\
+\bottomrule
+\end{tabular}

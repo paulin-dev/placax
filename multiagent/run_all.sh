@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Re-runs every experiment report.html is built from, into the directory names build_report.py
-# reads, then rebuilds the report.
+# Re-runs every experiment the paper is built from, into the directory names multiagent/results.py
+# reads, then rebuilds multiagent/paper/paper.pdf.
 #
 #     bash multiagent/run_all.sh            # from the repository root; ~45 min on a laptop GPU
 #     PY=python bash multiagent/run_all.sh  # choose the interpreter (default: venv/bin/python)
@@ -135,7 +135,7 @@ for view in m1 m1all; do
   done
 done
 
-# --- Pictures the report embeds ---
+# --- Animations for the supplement (SUPPLEMENTARY.md) ---
 [ -f "$R/sweep/m1-s0/viz/before_after.png" ] || { say "visualize sweep/m1-s0";
   "$PY" -m multiagent.visualize --run=$R/sweep/m1-s0 --only before_after >> "$LOG" 2>&1; }
 [ -f "$R/sweep2/m1all-s0/viz/episode.gif" ] || { say "visualize sweep2/m1all-s0";
@@ -152,7 +152,7 @@ gif adaptec1-all-at-once.gif --benchmark_dir=benchmarks/adaptec1 --k=0
 gif adaptec1-resolve.gif --benchmark_dir=benchmarks/adaptec1 --k=0 --resolve
 gif adaptec1-nudge-then-swap.gif --policy=$R/sweep2/m1-s0 --benchmark_dir=benchmarks/adaptec1 --k=0 --resolve --nudge_first
 
-# --- The report: re-score everything under the final legalizer, then fill the template ---
-say "build_report --recompute"
-"$PY" -m multiagent.build_report --recompute 2>&1 | tee -a "$LOG"
+# --- The paper: re-score everything under the final legalizer, then figures, tables, LaTeX ---
+say "paper build --recompute"
+"$PY" -m multiagent.paper.build --recompute 2>&1 | tee -a "$LOG"
 say "done"

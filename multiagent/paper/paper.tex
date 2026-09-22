@@ -1,0 +1,366 @@
+\documentclass[10pt]{article}
+% Layout follows the NeurIPS single-column format (5.5in x 9in text block, Times).
+\usepackage[letterpaper,textwidth=5.5in,textheight=9in,top=1in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext,newtxmath}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{booktabs,multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage[font=small,labelfont=bf,skip=4pt]{caption}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{enumitem}
+\usepackage[section]{placeins}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit}
+\usepackage[colorlinks=true,linkcolor=black!70!blue,citecolor=black!70!blue,urlcolor=black!70!blue]{hyperref}
+
+\setlist{itemsep=1pt,topsep=3pt}
+% Standard float tuning: let pages hold more figures, avoid half-empty float pages.
+\renewcommand{\topfraction}{0.9}
+\renewcommand{\bottomfraction}{0.8}
+\renewcommand{\textfraction}{0.07}
+\renewcommand{\floatpagefraction}{0.75}
+\setcounter{topnumber}{3}
+\setcounter{totalnumber}{5}
+\definecolor{agents}{HTML}{2A78D6}
+\definecolor{adam}{HTML}{EB6834}
+\definecolor{swapc}{HTML}{8E5C84}
+\definecolor{block}{HTML}{C9D3DA}
+\definecolor{overlapc}{HTML}{E34948}
+\newcommand{\hpwl}{\mathrm{HPWL}}
+\newcommand{\impr}{\mathrm{Impr}}
+
+\input{numbers}
+
+\begin{document}
+
+\begin{center}
+\rule{\textwidth}{3pt}\\[0.7em]
+{\LARGE\bfseries Can Macros Place Themselves?\\[0.2em] Decentralized Agents and Leaderless Swaps\\[0.2em] for Macro Placement Refinement\par}
+\vspace{0.5em}
+\rule{\textwidth}{1pt}\\[1.2em]
+{\large Paulin Renault}\\[0.2em]
+{\small Code and data: the \texttt{multiagent/} directory of the \texttt{placax} repository}
+\end{center}
+\vspace{0.5em}
+
+\begin{abstract}
+\noindent
+Learning-based macro placement usually trains a single policy that places or moves one macro at a time. We test the opposite design. Every macro is an agent, all agents run the same small network on their own local view, all macros move at the same time, and they are scored only on the wirelength and overlap of the whole design. This score is differentiable, so each agent's move gets its exact share of the credit by back-propagation. We refine a greedy placement of 128 macros on three benchmarks. On the design they train on, the agents improve wirelength by \nAgentsHome{}, more than gradient descent on the same objective (\nAdamThreeHome{}), but less than gradient descent with its best setting (\nAdamZeroHome{}) and less than a one-second search that swaps pairs of macros (\nSwapHome{}). They do not transfer to unseen designs. We then let the agents swap: two macros of the same size trade places when each picks the other, and a swap that shares wires with a better one waits. This swap swarm has no coordinator and matches the central swap search, slightly exceeding it on the densest design (\nSwarmAriane{} vs.\ \nSwapAriane{}). A swap rule learned from the agents' view does not transfer. The best result on the training design, \nNudgeSwapHome{}, uses the agents' moves followed by swaps. Two evaluation pitfalls, agents that exploit the legalizer and a legalizer that fails on dense designs, had to be fixed before these comparisons were meaningful.
+\end{abstract}
+
+% ------------------------------------------------------------------------------------------------
+\section{Introduction}
+
+Macro placement decides where the large blocks of a chip (memories, IP cores) go, so that the wires between them are short and no two blocks overlap. Reinforcement-learning approaches~\citep{mirhoseini2021graph,lai2022maskplace,lai2023chipformer} train one policy that places the macros one after another. Their advantage over simple heuristics is disputed. Placing each macro greedily where it adds the least wire, then searching over the result, does better on standard benchmarks~\citep{shi2023wiremask}, and an independent evaluation found learned placement no better than established methods~\citep{cheng2023assessment}.
+
+We study a decentralized alternative. At each step every macro looks at its surroundings and picks a small displacement, and all macros move together. They share one objective, the wirelength of the whole design plus an overlap penalty, and no macro is rewarded for its own wires. All macros use the same small network, so the rule works for any number of macros and could be applied to a design it was not trained on. We ask four questions.
+
+\begin{enumerate}[label=\textbf{Q\arabic*},leftmargin=2.4em]
+\item Can agents that act on local information, with one shared policy and one shared objective, improve a placement?
+\item How much does each macro need to see: itself, its most connected macros, or a summary of all connected macros?
+\item Do the agents beat gradient descent run directly on the macro positions with the same objective?
+\item Does a policy trained on one design improve another design without retraining?
+\end{enumerate}
+
+\paragraph{Contributions.}
+\begin{itemize}[leftmargin=1.2em]
+\item A decentralized refinement method: one policy shared by all macros, simultaneous bounded moves, trained by differentiating the placement objective through the episode (\S\ref{sec:method}).
+\item An evaluation protocol with controls: a random-noise band, an untrained rule, a swap search, and results over several seeds. It exposed two legalization problems, and we give a legalizer that fixes the second one (\S\ref{sec:setup}, \S\ref{sec:measure}, \S\ref{sec:dense}).
+\item Answers to Q1--Q4 on three designs (\S\ref{sec:results}).
+\item A swap swarm, in which same-size macros exchange positions by mutual consent with a local conflict rule, and which matches a central swap search (\S\ref{sec:swarm}).
+\end{itemize}
+
+% ------------------------------------------------------------------------------------------------
+\section{Related Work}
+
+\paragraph{Learning-based macro placement.} \citet{mirhoseini2021graph} place macros one at a time with a graph neural network trained by reinforcement learning. MaskPlace~\citep{lai2022maskplace} gives the policy pixel maps of legal positions and of the wirelength each position would add. ChiPFormer~\citep{lai2023chipformer} pre-trains a policy offline on several designs to transfer it. \citet{shi2023wiremask} use MaskPlace's wirelength map greedily and optimize over it with black-box search, which beats these policies. \citet{cheng2023assessment} compared learned macro placement with simulated annealing and commercial tools in an open evaluation and found no advantage. All of these methods move one macro per step.
+
+\paragraph{Analytical and force-directed placement.} Force-directed placers~\citep{eisenmann1998generic,spindler2008kraftwerk2} treat nets as springs that pull connected cells together and density as a force that spreads them. ePlace~\citep{lu2015eplace} and DREAMPlace~\citep{lin2019dreamplace} minimize a smoothed wirelength plus a density term with gradient methods and legalize afterwards. Our Adam baseline is a simple method of this kind.
+
+\paragraph{Swaps.} Exchanging two cells is a standard move in placement, for example in simulated annealing~\citep{sechen1985timberwolf}. We use a greedy swap search as a baseline and then as the move the agents make.
+
+\paragraph{Multi-agent learning and differentiable simulation.} When agents share one reward, it is hard to tell which agent caused a change, the credit assignment problem~\citep{foerster2018coma}. A differentiable simulator avoids it, because the gradient of the objective gives each agent's contribution directly. We use the short-horizon training window of SHAC~\citep{xu2022shac} without its value function. A network applied to every parameter with shared weights also resembles a learned optimizer~\citep{andrychowicz2016learning}, except that our agents see positions, not gradients.
+
+\paragraph{Swarms.} Boids~\citep{reynolds1987flocks} produce flocking from three local rules: separation, alignment and cohesion. Neural cellular automata~\citep{mordvintsev2020growing} train a local update rule shared by identical cells by back-propagating through the dynamics, as we do. Our conflict rule for swaps is the local-maximum step of Luby's parallel independent-set algorithm~\citep{luby1986simple}, with swap scores as priorities.
+
+% ------------------------------------------------------------------------------------------------
+\section{Method}\label{sec:method}
+
+\begin{figure}[tbp]
+\centering
+\begin{tikzpicture}[font=\footnotesize, >={Stealth[length=4pt]}]
+  % (a) decentralized nudging agents
+  \begin{scope}
+    \node[font=\small\bfseries, anchor=west] at (-0.1,3.55) {(a) Nudging agents};
+    \draw[line width=0.5pt] (0,0) rectangle (3.0,2.7);
+    \foreach \x/\y/\w/\h in {0.2/0.25/0.7/0.5, 1.2/0.3/0.5/0.8, 2.05/0.2/0.75/0.55, 0.3/1.3/0.6/0.9, 1.2/1.55/0.85/0.45, 2.2/1.2/0.6/1.1}
+      \draw[fill=block, draw=black!60] (\x,\y) rectangle ++(\w,\h);
+    \foreach \x/\y/\dx/\dy in {0.55/0.5/0.22/0.12, 1.45/0.7/0.18/-0.16, 2.43/0.47/-0.2/0.13, 0.6/1.75/0.2/-0.18, 1.62/1.77/-0.16/-0.17, 2.5/1.75/-0.22/-0.05}
+      \draw[->, agents, line width=0.9pt] (\x,\y) -- ++(\dx,\dy);
+    \node[draw=agents, line width=0.9pt, fill=white, rounded corners=2pt, align=center, inner sep=3pt] (net) at (5.0,2.2) {shared\\network $\pi_\theta$};
+    \node[draw=black!60, fill=white, rounded corners=2pt, align=center, inner sep=3pt] (J) at (5.0,0.35) {chip score\\$J(x^{t})$};
+    \draw[->, black!70] (3.05,2.2) -- node[above, font=\scriptsize]{views $o_i$} (net.west);
+    \draw[->, black!70] (net.south) -- node[left, font=\scriptsize, align=right]{moves $\Delta_i$,\\all at once} (J.north);
+    \draw[->, agents, dashed, line width=0.8pt] (J.east) -- ++(0.45,0) |- (net.east);
+    \node[font=\scriptsize, text=agents, align=left, anchor=west] at (6.2,1.27) {exact\\$\partial J/\partial \Delta_i$};
+  \end{scope}
+  % (b) swap swarm
+  \begin{scope}[xshift=7.9cm]
+    \node[font=\small\bfseries, anchor=west] at (-0.1,3.55) {(b) One swap-swarm round};
+    \tikzset{m/.style={circle, draw=black!60, fill=block, minimum size=0.55cm, inner sep=0pt}}
+    \node[m, fill=swapc!80, text=white] (A) at (0.3,2.3) {A};
+    \node[m, fill=swapc!80, text=white] (B) at (1.6,2.3) {B};
+    \node[m] (C) at (2.9,2.3) {C};
+    \node[m] (D) at (4.2,2.3) {D};
+    \node[m] (E) at (0.3,0.6) {E};
+    \node[m] (F) at (1.6,0.6) {F};
+    \node[m] (G) at (2.9,0.6) {G};
+    \draw[swapc, line width=1pt, ->] (A) to[bend left=35] (B);
+    \draw[swapc, line width=1pt, ->] (B) to[bend left=35] (A);
+    \draw[black!50, line width=0.8pt, dashed, ->] (C) to[bend left=35] (D);
+    \draw[black!50, line width=0.8pt, dashed, ->] (D) to[bend left=35] (C);
+    \draw[black!35, line width=2pt] (B) -- (C);
+    \draw[black!60, ->] (E) -- (F); \draw[black!60, ->] (F) -- (G);
+    \node[font=\scriptsize, align=center] at (0.95,1.45) {mutual:\\swap};
+    \node[font=\scriptsize, align=center] at (3.55,1.45) {mutual, but wired to a\\better swap: wait};
+    \node[font=\scriptsize, align=center] at (1.6,-0.05) {one-sided: no swap};
+  \end{scope}
+\end{tikzpicture}
+\caption{\textbf{(a)} Each macro reads its local view $o_i$, the shared network turns it into a small move $\Delta_i$, and all macros move at once. The design is scored by one differentiable objective $J$, and its gradient tells each macro how its own move changed the score. \textbf{(b)} In a round of the swap swarm, each macro names the same-size macro it would most like to swap with. A and B name each other and swap. C and D also agree, but C is wired to B, whose swap scores higher, so C and D wait. E names F but F names G, so nothing happens.}
+\label{fig:overview}
+\end{figure}
+
+\subsection{Problem}
+A design has $n$ macros with lower-left positions $x_i\in\mathbb{R}^2$, measured in grid cells, and fixed sizes. Each net connects pins at fixed offsets on several macros. The half-perimeter wirelength sums, over nets, the width and height of the box around the net's pins:
+\begin{equation}
+\hpwl(x) \;=\; \sum_{e\in E}\Big(\max_{p\in e} p_x-\min_{p\in e} p_x\Big) + \Big(\max_{p\in e} p_y-\min_{p\in e} p_y\Big).
+\label{eq:hpwl}
+\end{equation}
+A placement is \emph{legal} if no two macros overlap and all lie on the canvas. Every method starts from the same legal greedy placement $x^0$, in which macros are placed one at a time on the free grid cell that adds the least wirelength (MaskPlace's wire mask used greedily~\citep{lai2022maskplace,shi2023wiremask}). We report the improvement
+\begin{equation}
+\impr(x) \;=\; 1-\frac{\hpwl(\mathcal{L}(x))}{\hpwl(x^0)},
+\label{eq:impr}
+\end{equation}
+where $\mathcal{L}$ is the legalizer of \S\ref{sec:legalize}. Higher is better. The greedy start has improvement $0$, and a negative value means the method made the placement worse.
+
+\subsection{Agents}
+An episode has $T=32$ steps. At each step every macro $i$ computes its view $o_i(x^t)$ and all macros move together:
+\begin{equation}
+x_i^{t+1} = \mathrm{clip}\big(x_i^t + \Delta_i^t\big),\qquad \Delta_i^t = s\,\tanh\!\big(\mu_\theta(o_i(x^t)) + \sigma_\theta\,\epsilon_i^t\big),\quad \epsilon_i^t\sim\mathcal{N}(0,I).
+\label{eq:move}
+\end{equation}
+$\mu_\theta$ is a two-layer network (64 tanh units per layer) shared by all macros, $s=1$ grid cell limits each move, and the clip keeps macros on the canvas. The noise $\epsilon$ is used in training only. We compare three views, all given relative to the macro and scaled by the canvas size so that one network can run on any design:
+\textbf{m0}, the macro's position, size and distance to each canvas edge (8 numbers);
+\textbf{m1}, m0 plus the relative position, size and connection weight of its 4 most strongly connected macros (32 numbers);
+\textbf{m1all}, m1 plus the weighted mean and spread of the directions to \emph{all} connected macros, their total connection weight and their count (38 numbers).
+
+\subsection{Objective and training}
+All agents share the objective
+\begin{equation}
+J(x) \;=\; \frac{W_\gamma(x)}{W_\gamma(x^0)} \;+\; \lambda_d\,\frac{D(x)}{A} \;+\; \lambda_o\,\frac{\sum_{i<j}\mathrm{area}(i\cap j)}{A},
+\label{eq:objective}
+\end{equation}
+where $W_\gamma$ is a smooth (log-sum-exp) version of~\eqref{eq:hpwl} with $\gamma=1$ cell, $D$ is the area by which grid bins exceed 95\% density plus the area outside the canvas, $A$ is the total macro area, $\lambda_d=1$, and $\lambda_o$ weights the overlap between pairs of macros. The training loss is the mean of $J$ over the $T{+}1$ placements of an episode. We back-propagate it through~\eqref{eq:move} and cut the gradient every $H=8$ steps, as in SHAC~\citep{xu2022shac} but without a value function. Each $\Delta_i$ receives the exact derivative of the shared objective. A training run has 100 episodes, uses Adam~\citep{kingma2015adam} with learning rate $10^{-3}$, and takes about 30\,s on a laptop GPU.
+
+\subsection{Legalization}\label{sec:legalize}
+Gradient-based methods can end with overlapping macros, so every result goes through the same legalizer $\mathcal{L}$ before it is scored. The \emph{repair} step rounds positions to the grid, then takes macros from largest to smallest and moves each overlapping one to the free position, among its 256 nearest, that adds the least wirelength. The \emph{spread} step runs 300 steps of gradient descent on the overlap area alone, moving each macro at most 0.25 cells per step, so that neighbours make room instead of one macro jumping far. $\mathcal{L}$ runs the repair once with and once without spreading and keeps the legal result with the lower HPWL. A placement that is already legal is not changed. Section~\ref{sec:dense} explains why the spread step is needed.
+
+\subsection{Swap swarm}\label{sec:swarm-method}
+Exchanging two macros of the same size keeps a placement legal. Algorithm~\ref{alg:swarm} describes one round. Each macro scores a swap with each of its $k$ nearest same-size macros and names the best. A swap is agreed when two macros name each other. Two agreed swaps that share a wire were each scored as if the other did not happen, so a swap only goes ahead if its score is higher than that of every agreed swap it shares a wire with. Every decision uses only a macro's candidates and the macros it is wired to. We test two ways to score a swap. The \emph{exact} score $g_{ij}$ is the change in HPWL of the nets on $i$ and $j$. The \emph{learned} score $\hat g_\phi(o_i,o_j,x_j-x_i)$ comes from a network the size of the policy that sees only the agents' view. It is trained on adaptec1 to predict $g_{ij}$ (Appendix~\ref{app:judge}).
+
+\begin{algorithm}[t]
+\caption{One round of the swap swarm. Every step runs on all macros in parallel.}\label{alg:swarm}
+\begin{algorithmic}[1]
+\Require placement $x$; candidates per macro $k$; judge $g$; threshold $\tau$
+\For{each macro $i$ \textbf{in parallel}}
+  \State $C_i \gets$ the $k$ nearest macros with the same footprint as $i$
+  \State $j_i^\star \gets \arg\max_{j\in C_i} g_{ij}(x)$; \ \textbf{if} $g_{ij_i^\star}(x)\le\tau$ \textbf{then} $j_i^\star\gets\varnothing$
+\EndFor
+\State $P\gets\{(i,j): j_i^\star=j \wedge j_j^\star=i\}$ \Comment{mutual consent}
+\For{each $(i,j)\in P$ \textbf{in parallel}}
+  \State keep $(i,j)$ unless an $(a,b)\in P$ wired to $\{i,j\}$ has a higher score $g_{ab}{+}g_{ba}$ \Comment{ties by index}
+\EndFor
+\State exchange the positions of every kept pair, simultaneously
+\end{algorithmic}
+\end{algorithm}
+
+% ------------------------------------------------------------------------------------------------
+\section{Experimental Setup}\label{sec:setup}
+
+\begin{table}[tbp]
+\centering
+\caption{Designs. On each design, the first 128 macros are placed on a $224\times224$ grid. Policies are trained on adaptec1. bigblue1 and ariane133 are used only to test transfer.}
+\label{tab:benchmarks}
+\small
+\input{tables/benchmarks}
+\end{table}
+
+\paragraph{Designs.} Table~\ref{tab:benchmarks} lists the three designs. The main difference between them is how full the canvas is: bigblue1 is almost empty, and identical SRAM blocks cover half of ariane133.
+
+\paragraph{Baselines and controls.}
+\textbf{Adam}~\citep{kingma2015adam} minimizes~\eqref{eq:objective} directly over the 256 coordinates for 2000 steps (learning rate 0.05), with the same clip and legalizer. It answers Q3.
+The \textbf{pull rule} has no learning: every step, each macro moves one cell toward the weighted centre of its 4 most connected macros. It shows what an obvious local rule achieves.
+The \textbf{swap search} repeatedly makes the single same-size swap that reduces HPWL the most, until no swap helps. It shows what small continuous moves cannot reach.
+\textbf{Random jitter} adds Gaussian noise with a standard deviation of one cell to the greedy start and legalizes it. It shows how much the legalizer alone can change the result.
+
+\paragraph{Reporting.} Every number in this paper is the improvement~\eqref{eq:impr} of a legalized placement over the greedy start of the same design, in percent. Methods without randomness (pull rule, swap search, swap swarm with the exact score) are run once. Adam is run once and evaluated every 100 steps. Each learned policy is trained with 3 seeds and evaluated every 5 episodes. For Adam and for each seed, we report the median of the last 5 evaluations, never the best one, and tables give the mean and standard deviation over the 3 seeds. Random jitter uses 5 noise seeds. \emph{Transfer} runs the adaptec1 policy for one episode, without noise or retraining, on another design. All values are computed from the stored runs by one script (Appendix~\ref{app:repro}).
+
+% ------------------------------------------------------------------------------------------------
+\section{Results}\label{sec:results}
+
+\begin{table}[tbp]
+\centering
+\caption{Main results: improvement~\eqref{eq:impr} in \%, higher is better. Learned methods: mean\,$\pm$\,std over 3 seeds. Jitter: mean\,$\pm$\,std over 5 noise seeds. Other methods are single runs. Best value per design in bold. $^\dagger$On bigblue1 and ariane133, the policy trained on adaptec1 is applied without retraining. $^\ast$One policy seed.}
+\label{tab:main}
+\small
+\input{tables/main}
+\end{table}
+
+Table~\ref{tab:main} gives the main results. The rest of this section explains them.
+
+\subsection{Agents exploit the legalizer unless overlap is penalized}\label{sec:measure}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/placements.pdf}
+\caption{adaptec1, placements produced by the best evaluation of seed 0 (so the top-right value is higher than the median reported in the text). Red macros overlap at least one other macro, even slightly; dashed outlines show the greedy start. \textbf{Top:} m1 view without an overlap penalty; the agents pile macros on top of each other and the legalizer rebuilds the placement. \textbf{Bottom:} m1all view with $\lambda_o=3$; the agents make small moves that the legalizer barely changes.}
+\label{fig:placements}
+\end{figure}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/dynamics.pdf}
+\caption{Training on adaptec1 (seed 0, evaluated every 5 episodes; m1 view for $\lambda_o=0$, m1all view for $\lambda_o=3$). \textbf{(a)} Share of macro area that overlaps before legalization. \textbf{(b)} Improvement after legalization. Without the overlap penalty, overlap keeps growing and the result jumps between consecutive evaluations.}
+\label{fig:dynamics}
+\end{figure}
+
+We first trained the agents with the density term only ($\lambda_o=0$). They learned to push macros onto each other and let the legalizer find legal positions (Fig.~\ref{fig:placements}, top). One evaluation of one seed reached \nFirstRunBest{}, but the median over the last evaluations, averaged over three seeds, is \nFirstRunMedian{}, and the three seeds differ by up to \nNoPenaltySpreadPts{} points. The legalized result also jumps from one evaluation to the next (Fig.~\ref{fig:dynamics}b), so a single best evaluation says little. With an overlap weight of $\lambda_o=3$, overlap stays near 3\%, the result is stable, and the three seeds give \nPenaltyThree{} with a standard deviation of \nPenaltyThreeSdPts{} points (Table~\ref{tab:ablation}). A weight of 10 stops the agents from moving. We use $\lambda_o=3$ from here on.
+
+\subsection{Q1, Q2 and Q4: what a macro needs to see, and transfer}\label{sec:sight}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/sight.pdf}
+\caption{Improvement per view ($\lambda_o=3$; dots are seeds, bars are means). The orange line is Adam run directly on that design. The grey band is the range of the random-jitter control. A transferred result inside it cannot be told apart from noise.}
+\label{fig:sight}
+\end{figure}
+
+\textbf{Q1.} The agents improve their training design by \nAgentsHome{} with the m1all view, and the three seeds agree to within a fraction of a point.
+
+\textbf{Q2.} On adaptec1 the view hardly matters: m0 reaches \nAgentsHomeMzero{} and m1 \nAgentsHomeMone{} (Fig.~\ref{fig:sight}). A macro that knows only its own position can still learn where to move on the one design it is trained on. The views differ on other designs. On bigblue1, m0 gives \nTransferMzeroBigblue{} and m1 gives \nTransferMoneBigblue{}, so what carries over is knowing where one's connected macros are.
+
+\textbf{Q4.} That transfer is not larger than noise. Random jitter alone gives up to \nJitterBigblueMax{} on bigblue1, and on ariane133 every transferred policy makes the placement worse (\nTransferWorstAriane{} to \nTransferBestAriane{}). Two methods from neural cellular automata~\citep{mordvintsev2020growing}, moving a random half of the macros each step and training from noisy starting placements, reduce overfitting to adaptec1 but do not change this conclusion (Table~\ref{tab:ablation}).
+
+\begin{table}[tbp]
+\centering
+\caption{Ablations: improvement in \%, mean\,$\pm$\,std over 3 seeds. $^\ddagger$Share of macro area overlapping before legalization. $^\S$bigblue1 is also a training design here. Policies in the first block were transferred to bigblue1 only.}
+\label{tab:ablation}
+\small
+\input{tables/ablation}
+\end{table}
+
+\subsection{Alignment from swarm models removes the gain}
+Our objective already contains two of the three boids rules~\citep{reynolds1987flocks}. The wirelength term pulls connected macros together (cohesion) and the overlap penalty keeps them apart (separation). We added the third, alignment: a macro's move becomes $(1-a)\Delta_i$ plus $a$ times the weighted mean of its connected macros' moves. With $a=0.9$ the improvement on adaptec1 drops to about zero (\nAlignHome{}, Table~\ref{tab:ablation}). Wirelength only falls when connected macros move \emph{relative} to each other, and alignment makes them move together, so the wires inside a group keep their length. Alignment could help a group travel far across the canvas, but moves of at most one cell per step do not allow that.
+
+\subsection{Why the dense design defeated every method}\label{sec:dense}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.6\textwidth]{figures/jitter.pdf}
+\caption{Random-jitter control: the greedy start plus noise of one cell, legalized (5 noise seeds; bars are means). With the repair alone, ariane133 loses about 10\%. Spreading first reduces the loss to about 2\%. bigblue1 is unchanged, because there the final legalizer always keeps the repair-only result.}
+\label{fig:jitter}
+\end{figure}
+
+With the repair-only legalizer, every method made ariane133 worse, including Adam, whose placement before legalization was \nAdamRawAriane{} better than the start. Identical blocks cover half of ariane133, so the nearest free space is usually far away. After one cell of noise, the repair moved macros \nMoveOldAriane{} cells on average and lost \nJitterArianeOld{} (Fig.~\ref{fig:jitter}). Adding the spread step reduces this to \nMoveNewAriane{} cells and \nJitterArianeNew{}, and Adam on ariane133 then reaches \nAdamZeroAriane{}. All results in this paper use the final legalizer. Even with it, gradient-based methods gain almost nothing on ariane133, while the swap search gains \nSwapAriane{}.
+
+\subsection{Q3: agents against direct optimization}\label{sec:q3}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=0.78\textwidth]{figures/q3.pdf}
+\caption{adaptec1: each method alone (hollow circle) and followed by the swap search (filled circle). Learned methods are means over 3 seeds; the swap search is applied to the last evaluated placement of each seed.}
+\label{fig:q3}
+\end{figure}
+
+With the same objective ($\lambda_o=3$), the agents do better than Adam: \nAgentsHome{} against \nAdamThreeHome{}. Adam with $\lambda_o=0$ reaches \nAdamZeroHome{}, however, and the swap search reaches \nSwapHome{}, both more than the agents. Most of the slack in the greedy start is in \emph{which} macro sits in which slot. Fixing that requires two blocks to trade places, and small continuous moves cannot do so without passing through an overlap that the penalty forbids. The agents' moves and the swaps do combine on the training design. Running the swap search after the agents gives \nAgentsPlusSwaps{} (m1), more than any other method followed by swaps (at most \nAdamPlusSwapsBest{}; Fig.~\ref{fig:q3}). On unseen designs, the swap search alone does better than any transferred policy, with or without swaps afterwards.
+
+\subsection{Agents that swap}\label{sec:swarm}
+
+\begin{figure}[tbp]
+\centering
+\includegraphics[width=\textwidth]{figures/swarm_frames.pdf}\\[2pt]
+{\small (a) Rounds of the swap swarm on ariane133 (exact score, all same-size candidates). Purple macros swapped in that round and are linked to their partner.}\\[6pt]
+\includegraphics[width=\textwidth]{figures/swarm_trace.pdf}\\[2pt]
+{\small (b) Improvement after each round. The dotted line is the central swap search.}
+\caption{The swap swarm. On ariane133 it stops after \nSwarmRoundsAriane{} rounds and \nSwarmSwapsAriane{} swaps. Without the conflict rule, adaptec1's four large macros, which share wires, swap back and forth, and the design ends at \nSwarmAtOnceHome{}. Animations are in the supplementary material.}
+\label{fig:swarm}
+\end{figure}
+
+\begin{table}[tbp]
+\centering
+\caption{Swap swarm variants: improvement in \%. Exact-score rows are single runs. Learned rows: mean\,$\pm$\,std over 3 seeds; the last learned row pools 6 runs (m1 and m1all).}
+\label{tab:swarm}
+\small
+\input{tables/swarm}
+\end{table}
+
+With the exact score and the conflict rule, the swap swarm matches the central swap search on adaptec1 and bigblue1 and does slightly better on ariane133, \nSwarmAriane{} against \nSwapAriane{} (Table~\ref{tab:swarm}). It also needs fewer rounds (\nSwarmRoundsAriane{}) than the central search needs sequential swaps. The conflict rule is necessary: without it, swaps that share wires undo each other and adaptec1 ends at \nSwarmAtOnceHome{} (Fig.~\ref{fig:swarm}b). Candidates must also be chosen widely. With only the 8 nearest same-size macros as candidates, ariane133 reaches \nSwarmKeightAriane{}, because the best exchange partner is rarely next door.
+
+Learning the swap score gives the same picture as learning the moves. With the m0 view, the learned score never produces a useful swap. With m1 or m1all it finds the three swaps that matter on adaptec1 for some seeds, but it does not help on the other designs, even when trained on two of them (ariane133: \nLearnedTwoChipsAriane{}). The best result on adaptec1, \nNudgeSwapHome{}, comes from running the agents' moves first and the swap swarm second. On the other designs the agents' moves lower the final result.
+
+% ------------------------------------------------------------------------------------------------
+\section{Discussion}
+
+\paragraph{What the agents learned.} On the design they train on, the agents learn a small, repeatable improvement. The view barely matters there, because even m0 can learn the one design. Seeing connected macros is needed for any transfer, but the transfer we measured is no larger than noise. The agents are most useful before a swap search, and less useful as a rule for new designs.
+
+\paragraph{Why swaps work and learned swap scores do not.} Each macro can compute the exact effect of a swap from its own nets, and the conflict rule stops wired neighbours from acting on conflicting plans. The learned score only approximates a value that the macro can compute exactly. That it does not transfer matches the result for moves: features learned on one design do not describe another well.
+
+\paragraph{Evaluation.} Two early conclusions were wrong because of the legalizer: a first result of \nFirstRunBest{}, and the impression that ariane133 could not be improved. Any placer evaluated after legalization can be misled in the same way. We suggest reporting a random-jitter range, a swap-search baseline, and medians over several seeds and evaluations.
+
+\paragraph{Limitations.} We use three designs and 128 macros per design, and measure only wirelength, because the benchmarks include no timing data. Adam is a weaker baseline than a full analytical placer such as DREAMPlace~\citep{lin2019dreamplace}. Swaps are limited to macros of the same size. The agents are trained without a value function. Natural next steps are swaps between macros of different sizes, using the agents and swaps after a stronger initial placer, and a comparison with DREAMPlace on more designs.
+
+% ------------------------------------------------------------------------------------------------
+\section{Conclusion}
+Macros acting as identical agents with local information can improve a placement. Through small moves the gain is modest and does not transfer to other designs. Through swaps agreed between pairs, with a local rule for conflicts, they do as well as a central swap search. In both cases, learned decisions did not generalize, while exactly computed ones did. Controls for the legalizer were needed to reach these conclusions.
+
+\small
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\normalsize
+
+% ------------------------------------------------------------------------------------------------
+\clearpage
+\appendix
+\section{Hyperparameters}\label{app:hyper}
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value \\
+\midrule
+Grid, macros, canvas & $224\times224$; first 128 macros; core area (whole die for ariane133) \\
+Episode & $T=32$ simultaneous steps, $|\Delta_i|\le1$ cell per axis \\
+Policy & 2 hidden layers of 64 tanh units; initial $\log\sigma=-1.5$ \\
+Objective & $\gamma=1$ cell, target density 0.95, $\lambda_d=1$, $\lambda_o=3$ unless stated \\
+Training & 100 episodes, Adam, learning rate $10^{-3}$, gradient-norm clip 1, window $H=8$ \\
+Evaluation & every 5 episodes, no noise; median of the last 5 \\
+Legalizer & repair over the 256 nearest free positions; spread: 300 steps of $\le0.25$ cells \\
+Adam baseline & 2000 steps, learning rate 0.05, evaluated every 100 steps \\
+Swap swarm & $k=8$ or all same-size macros as candidates; learned-score threshold $\tau=0.3$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Learned swap score}\label{app:judge}
+The learned score $\hat g_\phi$ is a network with two layers of 64 tanh units. Its input is the view of both macros and their relative position. Its target is the exact gain divided by the mean HPWL per macro of the placement, clipped to $[-5,5]$. Training placements are the greedy start, the greedy start after 3 to 60 random same-size swaps, and the placements visited by the exact swap swarm from these starts. This gives \nScorerSamples{} candidate pairs on adaptec1, of which 3 to 4\% reduce HPWL. We train for 30 epochs with Adam and a Huber loss. At run time a macro proposes a swap only if the predicted gain exceeds $\tau=0.3$, because most candidate swaps change nothing and small positive predictions for them are noise.
+
+\section{Reproducibility}\label{app:repro}
+\texttt{bash multiagent/run\_all.sh} reruns every experiment in about 45 minutes on a laptop GPU. \texttt{python -m multiagent.paper.build} then recomputes every figure, table and number in this paper from the stored runs and compiles it. GPU computations are not bit-for-bit deterministic, so a rerun reproduces the conclusions but not every digit. Animations of the agents and the swap swarm are in \texttt{multiagent/paper/SUPPLEMENTARY.md}.
+
+\end{document}
