@@ -163,6 +163,20 @@ for chip in adaptec1 bigblue1 ariane133; do
 done
 once "$R/timing" summary.json multiagent.timing --out=$R/timing
 
+# --- The parallel annealer: the swap swarm with a temperature, at the same budgets ---
+# Two hours on its own, and every number is a wall clock, so run it on an idle machine: a busy
+# GPU halves the rounds a run fits into its budget and the result drops with them.
+for chip in adaptec1 bigblue1 ariane133; do
+  for sec in 30 120 600; do
+    for seed in 0 1 2; do
+      once "$R/swarmanneal/warm-$chip-${sec}s-s$seed" summary.json multiagent.swarm_swap run \
+        --benchmark_dir=benchmarks/$chip --canvas=$(canvas_of $chip) --k=0 --resolve \
+        --anneal_seconds=$sec --descend_first --proposal=random --seed=$seed \
+        --out=$R/swarmanneal/warm-$chip-${sec}s-s$seed
+    done
+  done
+done
+
 # --- The paper: re-score everything under the final legalizer, then figures, tables, LaTeX ---
 say "paper build --recompute"
 "$PY" -m multiagent.paper.build --recompute 2>&1 | tee -a "$LOG"

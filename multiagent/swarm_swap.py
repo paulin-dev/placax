@@ -636,6 +636,9 @@ def run(args) -> None:
             "anneal_seconds": args.anneal_seconds, "seed": args.seed,
             "proposal": args.proposal, "descend_first": args.descend_first,
             "descent_s": result.get("descent_s"), "elapsed_s": round(elapsed, 2),
+            # Rounds dropped because their simultaneous moves would have overlapped. The paper
+            # quotes this rate, so it has to be in the run rather than in someone's memory.
+            "reverted_rounds": result.get("reverted_rounds"),
             "policy": str(args.policy) if args.policy else None, "cycles": args.cycles,
             "nudge_first": args.nudge_first,
             "rounds": len(result["swaps_per_round"]), "swaps_per_round": result["swaps_per_round"],

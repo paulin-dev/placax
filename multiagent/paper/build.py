@@ -309,6 +309,17 @@ def fig_time(data, out):
         hi = [max(anneal[chip][b]["seeds"]) for b in budgets]
         ax.fill_between(xs, lo, hi, color="black", alpha=0.10, linewidth=0)
         ax.plot(xs, ys, "-o", color="black", markersize=2.5, label="simulated annealing")
+        # The parallel annealer has a time budget too, so it is a curve, not a point. Drawn on the
+        # same axes the sequential annealer uses, its flattening is the saturation the text reports.
+        ours = data["swarm_anneal"].get(chip, {})
+        if ours:
+            budgets = sorted(ours, key=float)
+            bx = [float(b) for b in budgets]
+            ax.fill_between(bx, [min(ours[b]["seeds"]) for b in budgets],
+                            [max(ours[b]["seeds"]) for b in budgets],
+                            color=COLOR["swap"], alpha=0.15, linewidth=0)
+            ax.plot(bx, [ours[b]["mean"] for b in budgets], "-o", color=COLOR["swap"],
+                    markersize=2.5, label="parallel annealer (ours)")
         for key, name, color, marker in marks:
             if key in timing[chip]:
                 entry = timing[chip][key]
@@ -568,6 +579,11 @@ def numbers(data, frames):
     last = [line for line in adam_log if "eval_real_hpwl_snapped" in line][-1]
     warm = json.loads((RUNS / "sweep2/adam-ov0-ariane133/manifest.json").read_text())["warm_start"]["real_hpwl_snapped"]
     lines.append(f"\\newcommand{{\\nAdamRawAriane}}{{{tex_pct(1 - last['eval_real_hpwl_snapped'] / warm)}}}")
+    verify = data["swarm_anneal_verify"]
+    if verify:
+        lines.append("\\newcommand{\\nRevertedRounds}{$%d$}" % sum(v["reverted"] for v in verify.values()))
+        total = sum(v["rounds"] for v in verify.values())
+        lines.append(("\\newcommand{\\nVerifiedRounds}{$%s$}" % f"{total:,}").replace(",", "{,}"))
     scorer = json.loads((RUNS / "swarmswap/net-m1all-s0/scorer.json").read_text())
     # How many candidate moves each method scores, so speed can be read independently of hardware.
     from multiagent import swarm_swap

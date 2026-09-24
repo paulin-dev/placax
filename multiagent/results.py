@@ -273,6 +273,16 @@ def collect(recompute: bool) -> dict:
                     "legal": all(x["is_legal"] for x in seeds),
                 }
 
+    # Instrumented runs that count the rounds dropped for would-be overlap. The paper quotes that
+    # rate, and the matrix above predates the counter being written to disk.
+    verify = {}
+    for chip in CHIPS:
+        path = RUNS / "swarmanneal" / f"verify-{chip}-120s-s0"
+        if (path / "summary.json").exists():
+            run = summary(path)
+            verify[chip] = {"rounds": run["rounds"], "reverted": run["reverted_rounds"]}
+
     return {"sweep1": sweep1, "sweep2": sweep2, "baselines": baselines, "curves": curves,
+            "swarm_anneal_verify": verify,
             "pull": pull, "jitter": jit, "q3": q3, "unseen": unseen, "swarm": swarm,
             "anneal": anneal, "swarm_anneal": swarm_anneal, "timing": timing}

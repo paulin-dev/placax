@@ -136,7 +136,8 @@ python -m multiagent.visualize --run=multiagent/runs/<run> --against multiagent/
 # All runs as one table
 python -m multiagent.compare multiagent/runs/*
 
-# Re-run every experiment the paper is built from (~45 min), then rebuild it
+# Re-run every experiment the paper is built from (~45 min, plus ~2 h of fixed annealing
+# budgets that want an idle machine, since what they measure is wall clock), then rebuild it
 bash multiagent/run_all.sh
 
 # Rebuild the paper from the runs: figures, tables, quoted numbers, then LaTeX (--recompute after new runs)
