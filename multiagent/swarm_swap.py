@@ -84,6 +84,26 @@ class ExactGain:
 
         self._gains = gains
 
+        @jax.jit
+        def moves(pos, macros, targets):
+            batch = jnp.repeat(pos[None], macros.shape[0], axis=0)
+            batch = batch.at[jnp.arange(macros.shape[0]), macros].set(targets)
+            return total(pos) - jax.vmap(total)(batch)
+
+        self._moves = moves
+
+    def for_moves(self, positions: np.ndarray, macros: np.ndarray, targets: np.ndarray) -> np.ndarray:
+        """The HPWL reduction of moving each `macros[p]` to `targets[p]`, in one call."""
+        if not len(macros):
+            return np.zeros(0)
+        return np.asarray(self._moves(jnp.asarray(positions, dtype=jnp.float32),
+                                      jnp.asarray(macros), jnp.asarray(targets, dtype=jnp.float32)))
+
+    def for_pairs(self, positions: np.ndarray, first: np.ndarray, second: np.ndarray) -> np.ndarray:
+        """The HPWL reduction of each proposed swap `(first[p], second[p])`, in one call."""
+        return np.asarray(self._gains(jnp.asarray(positions, dtype=jnp.float32),
+                                      jnp.asarray(first), jnp.asarray(second)))
+
     def __call__(self, positions: np.ndarray, idx: np.ndarray, valid: np.ndarray) -> np.ndarray:
         n, k = idx.shape
         first = np.repeat(np.arange(n), k)
@@ -316,6 +336,182 @@ def train(args) -> None:
     }, indent=2))
 
 
+def anneal_swarm(ctx, positions: np.ndarray, seconds: float, rng, k: int = 0,
+                 accept0: float = 0.3, greedy_tail: float = 0.1, resolve: bool = True,
+                 shift_prob: float = 0.5, proposal: str = "random",
+                 exact: ExactGain | None = None) -> dict:
+    """The swap swarm with a temperature: a parallel annealer instead of a parallel descent.
+
+    `swarm` stops as soon as no macro can improve, which is a local optimum of the exchange move.
+    Simulated annealing passes it given enough time precisely because it accepts a worse placement
+    now and then. This keeps every decision local and adds that one ability:
+
+    1. each macro proposes either a swap (with `proposal="random"`, a random same-size candidate;
+       with `proposal="best"`, its best one, which is what the greedy swarm always does) or, with probability
+       `shift_prob`, a move of itself into free space within a shrinking window - the same two
+       moves `anneal.py` uses;
+    2. it accepts its own proposal by the Metropolis rule - always if the move shortens wires,
+       otherwise with probability `exp(gain / T)`;
+    3. proposals that touch the same macro, or whose source and target areas overlap another
+       accepted move, are resolved by keeping the better one, so a round stays legal;
+    4. `resolve` then applies the same wired-conflict rule as `swarm`.
+
+    The temperature follows the schedule `anneal.py` uses, so the two are comparable: steered
+    toward an acceptance rate falling from `accept0` to 1%, with the last `greedy_tail` of the
+    budget at zero temperature, returning the best placement seen.
+    """
+    from placax_agents.policy.scale import to_grid_units
+    exact = exact or ExactGain(ctx)
+    wired = np.asarray(ctx.connection_weights) > 0
+    footprints = np.asarray(to_grid_units(ctx.benchmark.sizes_array, ctx.benchmark.cell_size))
+    grid = (int(ctx.params.grid_x), int(ctx.params.effective_grid_y))
+    window0 = max(grid) // 2
+    pos = np.asarray(positions, dtype=np.float32).copy()
+    n = len(pos)
+
+    def overlapping(positions):
+        """Any two macros sharing area, checked directly rather than trusted.
+
+        The round applies many moves at once after local checks. Those checks are conservative, but
+        a placement that is wrong is worse than one that is slow, so every round is verified and a
+        round that would break legality is dropped (`reverted` counts them; it should stay 0).
+        """
+        lo = positions.astype(int)
+        hi = lo + footprints
+        w = np.minimum(hi[:, None, 0], hi[None, :, 0]) - np.maximum(lo[:, None, 0], lo[None, :, 0])
+        h = np.minimum(hi[:, None, 1], hi[None, :, 1]) - np.maximum(lo[:, None, 1], lo[None, :, 1])
+        hit = (w > 0) & (h > 0)
+        np.fill_diagonal(hit, False)
+        return bool(hit.any()) or bool((lo < 0).any()) or bool((hi > np.asarray(grid)).any())
+
+    def occupancy(positions):
+        occupied = np.zeros(grid, dtype=np.int16)
+        for m, (x, y) in enumerate(positions.astype(int)):
+            w, h = footprints[m]
+            occupied[x:x + w, y:y + h] += 1
+        return occupied
+
+    def free_targets(positions, window):
+        """A random in-window target for every macro, and whether it is free right now."""
+        occupied = occupancy(positions)
+        offsets = rng.integers(-window, window + 1, size=(n, 2))
+        targets = positions.astype(int) + offsets
+        ok = np.zeros(n, dtype=bool)
+        for m, (x, y) in enumerate(targets):
+            w, h = footprints[m]
+            if x < 0 or y < 0 or x + w > grid[0] or y + h > grid[1]:
+                continue
+            px, py = positions[m].astype(int)
+            patch = occupied[x:x + w, y:y + h].copy()
+            occupied[px:px + w, py:py + h] -= 1          # ignore the macro's own cells
+            ok[m] = not occupied[x:x + w, y:y + h].any()
+            occupied[px:px + w, py:py + h] += 1
+            del patch
+        return targets, ok
+    total = float(exact.total(jnp.asarray(pos)))
+    best, best_pos = total, pos.copy()
+    hpwls, swaps_per_round = [total], []
+    t0 = None
+    reverted = 0
+    started = time.perf_counter()
+
+    while True:
+        elapsed = time.perf_counter() - started
+        if elapsed >= seconds:
+            break
+        cooling = min((elapsed / seconds) / max(1.0 - greedy_tail, 1e-9), 1.0)
+
+        window = max(1, int(round(window0 * (0.02 ** cooling))))
+        idx, valid = candidates(ctx, pos, k)
+        counts = valid.sum(axis=1)
+        movable = counts > 0
+        first = np.arange(n)[movable]
+        if proposal == "best":
+            scored = exact(pos, idx, valid)                       # every candidate, then take the best
+            chosen = idx[np.arange(n), scored.argmax(axis=1)]
+            second = chosen[movable]
+            gains = scored.max(axis=1)[movable]
+        else:
+            pick = (rng.random(n) * np.maximum(counts, 1)).astype(int)
+            order = np.argsort(~valid, axis=1, kind="stable")     # valid slots first
+            chosen = np.take_along_axis(idx, np.take_along_axis(order, pick[:, None], axis=1), axis=1)[:, 0]
+            second = chosen[movable]
+            gains = exact.for_pairs(pos, first, second)
+
+        # Shifts: some macros propose moving into free space instead of trading.
+        shifting = movable & (rng.random(n) < shift_prob)
+        targets, free = free_targets(pos, window)
+        shifting &= free
+        shift_macros = np.arange(n)[shifting]
+        shift_gains = exact.for_moves(pos, shift_macros, targets[shifting])
+
+        if t0 is None:                                            # calibrate on the first round
+            uphill = np.concatenate([-gains[gains < 0], -shift_gains[shift_gains < 0]])
+            t0 = float(uphill.mean() / -np.log(accept0)) if uphill.size else 1.0
+        temperature = 0.0 if cooling >= 1.0 else t0 * (1e-3 ** cooling)
+        if cooling >= 1.0 and best < total:                       # descend from the best seen
+            pos, total = best_pos.copy(), best
+
+        def metropolis(values):
+            with np.errstate(over="ignore"):
+                if temperature <= 0:
+                    return values >= 0
+                return (values >= 0) | (rng.random(len(values)) < np.exp(np.minimum(values / temperature, 0.0)))
+
+        keep = metropolis(gains)
+        proposals = [(int(i), int(j), float(g)) for i, j, g, take in zip(first, second, gains, keep)
+                     if take and i != j]
+        shifts = [(int(m), targets[m].astype(int), float(g))
+                  for m, g, take in zip(shift_macros, shift_gains, metropolis(shift_gains)) if take]
+        # A macro may take part in one swap per round: keep the best proposal touching it.
+        best_for = {}
+        for i, j, g in proposals:
+            for m in (i, j):
+                if m not in best_for or g > best_for[m][2]:
+                    best_for[m] = (i, j, g)
+        pairs = sorted({(min(i, j), max(i, j)) for i, j, g in proposals
+                        if best_for[i] == (i, j, g) and best_for[j] == (i, j, g)})
+        if resolve:
+            scores = [next(g for a, b, g in proposals if (min(a, b), max(a, b)) == pair) for pair in pairs]
+            pairs = _independent(pairs, scores, wired)
+        # Shifts are applied too, unless their area clashes with an accepted swap or a better shift.
+        claimed = np.zeros(grid, dtype=bool)
+        for i, j in pairs:
+            for m in (i, j):
+                x, y = pos[m].astype(int)
+                w, h = footprints[m]
+                claimed[x:x + w, y:y + h] = True
+        applied_shifts = []
+        for m, target, gain in sorted(shifts, key=lambda item: -item[2]):
+            w, h = footprints[m]
+            x, y = pos[m].astype(int)
+            tx, ty = target
+            if claimed[x:x + w, y:y + h].any() or claimed[tx:tx + w, ty:ty + h].any():
+                continue
+            claimed[x:x + w, y:y + h] = True
+            claimed[tx:tx + w, ty:ty + h] = True
+            applied_shifts.append((m, target))
+
+        if pairs or applied_shifts:
+            new = pos.copy()
+            for i, j in pairs:
+                new[i], new[j] = pos[j], pos[i]
+            for m, target in applied_shifts:
+                new[m] = target
+            if overlapping(new):
+                reverted += 1
+            else:
+                pos = new
+                total = float(exact.total(jnp.asarray(pos)))
+                if total < best:
+                    best, best_pos = total, pos.copy()
+        swaps_per_round.append(len(pairs) + len(applied_shifts))
+        hpwls.append(total)
+
+    return {"positions": best_pos, "hpwl": best, "hpwl_trace": hpwls, "reverted_rounds": reverted,
+            "swaps_per_round": swaps_per_round, "rounds": len(swaps_per_round), "seconds": seconds}
+
+
 # ----------------------------------------------------------------------------------------------
 # Nudges and swaps together
 
@@ -368,7 +564,23 @@ def run(args) -> None:
              else np.asarray(jnp.round(ctx.warm_start), dtype=np.float32))
     judge = exact if args.scorer is None else LearnedGain(ctx, args.scorer)
     started = time.perf_counter()
-    if args.policy is None:
+    if args.anneal_seconds is not None:
+        descent, down = None, None
+        if args.descend_first:
+            # Spend the first part of the budget on the greedy swarm, then heat what it found.
+            # The annealer gets what is left, so the total wall clock is still `--anneal_seconds`.
+            down = swarm(ctx, start, judge, k=args.k, max_rounds=args.max_rounds, exact=exact,
+                         resolve=args.resolve, threshold=args.threshold)
+            start = down["positions"]
+            descent = time.perf_counter() - started
+        budget = max(args.anneal_seconds - (descent or 0.0), 1.0)
+        result = anneal_swarm(ctx, start, budget, np.random.default_rng(args.seed),
+                              k=args.k, resolve=args.resolve, proposal=args.proposal, exact=exact)
+        result["hpwl"] = (down["hpwl"] + result["hpwl_trace"]) if down else result["hpwl_trace"]
+        result["descent_s"] = descent
+        if down:
+            result["swaps_per_round"] = down["swaps_per_round"] + result["swaps_per_round"]
+    elif args.policy is None:
         result = swarm(ctx, start, judge, k=args.k, max_rounds=args.max_rounds, exact=exact,
                        resolve=args.resolve, threshold=args.threshold)
     else:
@@ -394,6 +606,7 @@ def run(args) -> None:
             if not args.nudge_first:
                 pos = do_nudge(pos)
         result = {"positions": pos, "hpwl": trace, "swaps_per_round": swaps, "frames": frames}
+    elapsed = time.perf_counter() - started
     final = objective_mod.report(ctx, objective, jnp.asarray(result["positions"]))
     improvement = 1.0 - final["real_hpwl_snapped"] / warm
     best = 1.0 - min(result["hpwl"]) / warm
@@ -401,7 +614,9 @@ def run(args) -> None:
           f"{'wired swaps wait' if args.resolve else 'all at once'}: "
           f"{len(result['swaps_per_round'])} rounds, {sum(result['swaps_per_round'])} swaps -> "
           f"{improvement:+.2%} vs greedy (best round {best:+.2%})  legal={final['is_legal']}  "
-          f"[{time.perf_counter() - started:.1f}s]")
+          f"[{elapsed:.1f}s]")
+    if args.gif is not None and args.anneal_seconds is not None:
+        raise SystemExit("--gif animates the greedy swarm's rounds; it is not wired to --anneal_seconds")
     if args.gif is not None:
         from multiagent.visualize import save_swap_gif
         frames = result.get("frames") or [
@@ -418,6 +633,9 @@ def run(args) -> None:
             "kind": "multiagent.swarm_swap", "benchmark_dir": str(args.benchmark_dir),
             "judge": "exact" if args.scorer is None else str(args.scorer), "k": args.k,
             "resolve": args.resolve, "threshold": args.threshold,
+            "anneal_seconds": args.anneal_seconds, "seed": args.seed,
+            "proposal": args.proposal, "descend_first": args.descend_first,
+            "descent_s": result.get("descent_s"), "elapsed_s": round(elapsed, 2),
             "policy": str(args.policy) if args.policy else None, "cycles": args.cycles,
             "nudge_first": args.nudge_first,
             "rounds": len(result["swaps_per_round"]), "swaps_per_round": result["swaps_per_round"],
@@ -442,6 +660,15 @@ def parse_args(argv=None):
     r.add_argument("--positions", type=pathlib.Path, default=None,
                    help="A legal .npy placement to start from; default greedy.")
     r.add_argument("--max_rounds", type=int, default=60)
+    r.add_argument("--proposal", default="random", choices=("random", "best"),
+                   help="With --anneal_seconds: propose a random same-size candidate, or the best one.")
+    r.add_argument("--anneal_seconds", type=float, default=None,
+                   help="Run the parallel annealer (temperature, random proposals) for this long "
+                        "instead of the greedy swarm.")
+    r.add_argument("--descend_first", action="store_true",
+                   help="With --anneal_seconds: run the greedy swarm to its local optimum first "
+                        "and anneal from there, inside the same total budget.")
+    r.add_argument("--seed", type=int, default=0)
     r.add_argument("--policy", type=pathlib.Path, default=None,
                    help="A trained multiagent.train run: alternate its nudges with swap rounds.")
     r.add_argument("--cycles", type=int, default=1)

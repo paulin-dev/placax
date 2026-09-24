@@ -255,7 +255,24 @@ def collect(recompute: bool) -> dict:
                 }
     timing = json.loads((RUNS / "timing/summary.json").read_text())["designs"] \
         if (RUNS / "timing/summary.json").exists() else {}
+    # The parallel annealer: the swap swarm run to its local optimum, then heated. Same budgets as
+    # the sequential annealer, so the two can be read off one row.
+    swarm_anneal = {}
+    for chip in CHIPS:
+        for budget in (30, 120, 600):
+            seeds = [summary(p) for s in range(3)
+                     if (p := RUNS / "swarmanneal" / f"warm-{chip}-{budget}s-s{s}").exists()]
+            if seeds:
+                swarm_anneal.setdefault(chip, {})[str(budget)] = {
+                    "mean": statistics.mean(x["hpwl_improvement"] for x in seeds),
+                    "seeds": [x["hpwl_improvement"] for x in seeds],
+                    "rounds": statistics.mean(x["rounds"] for x in seeds),
+                    # Rounds per second, so a run slowed by a busy machine is visible rather than
+                    # silently averaged into the mean.
+                    "rounds_per_s": [x["rounds"] / x.get("elapsed_s", budget) for x in seeds],
+                    "legal": all(x["is_legal"] for x in seeds),
+                }
 
     return {"sweep1": sweep1, "sweep2": sweep2, "baselines": baselines, "curves": curves,
             "pull": pull, "jitter": jit, "q3": q3, "unseen": unseen, "swarm": swarm,
-            "anneal": anneal, "timing": timing}
+            "anneal": anneal, "swarm_anneal": swarm_anneal, "timing": timing}

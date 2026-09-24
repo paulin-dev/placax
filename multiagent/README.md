@@ -11,7 +11,9 @@ score through the episode.
 
 **The full write-up is the paper, [`paper/paper.pdf`](paper/paper.pdf)** (NeurIPS-style, 14 pages),
 with its animations in [`paper/SUPPLEMENTARY.md`](paper/SUPPLEMENTARY.md). This README is the short
-version and the how-to.
+version and the how-to. For the same results explained from zero, with every figure and animation
+described in words, open [`explainer/macro-swarm-explained.html`](explainer/macro-swarm-explained.html)
+in a browser.
 
 ## Results in one table
 
@@ -89,6 +91,13 @@ when two macros pick each other, and all agreed swaps in a round happen at once.
   baseline the swarm has to answer. At one second the swarm wins everywhere; at 600 s annealing
   wins on the dense design (+45.4% vs +35.3%). Our timing is implementation-bound: the swarm is
   GPU-batched, the annealer a single-threaded NumPy loop.
+- **A temperature, once annealing had shown what was missing.** The swarm stops at the local
+  optimum of its move set; annealing does not. `--anneal_seconds --descend_first` keeps consent and
+  the conflict rule and lets each macro accept its own proposal by the Metropolis rule, starting
+  from the swarm's own answer. From 120 s upward it is ahead of the sequential annealer on all
+  three designs. It must propose a *random* same-size partner, not its best one, and every round is
+  verified against the grid because simultaneous moves can otherwise overlap (one or two rounds a
+  run are dropped).
 
 ## Quick start
 
@@ -114,6 +123,10 @@ python -m multiagent.swarm_swap train --view=m1all --seed=0 --out=multiagent/run
 python -m multiagent.swarm_swap run --scorer=multiagent/runs/<scorer> --benchmark_dir=benchmarks/bigblue1 --k=0 --resolve --threshold=0.3
 python -m multiagent.swarm_swap run --policy=multiagent/runs/<policy run> --k=0 --resolve --nudge_first
 
+# The parallel annealer: the swap swarm with a temperature, started from the swarm's own answer
+python -m multiagent.swarm_swap run --benchmark_dir=benchmarks/adaptec1 --k=0 --resolve \
+  --anneal_seconds=120 --descend_first --proposal=random --seed=0 --out=multiagent/runs/swarmanneal/<name>
+
 # A trained policy on a design it never saw (ariane133 has no rows: --canvas=die)
 python -m multiagent.transfer --run=multiagent/runs/<run> --benchmark_dir=benchmarks/bigblue1
 
@@ -130,6 +143,9 @@ bash multiagent/run_all.sh
 # (needs Tectonic, a self-contained LaTeX engine, once: the static build in ~/.local/bin, e.g.
 #  curl -fsSL https://github.com/tectonic-typesetting/tectonic/releases/download/tectonic%400.17.0/tectonic-0.17.0-x86_64-unknown-linux-musl.tar.gz | tar -xz -C ~/.local/bin)
 python -m multiagent.paper.build
+
+# The plain-language version of the same results, as one self-contained HTML file
+python -m multiagent.explainer.build
 
 # Smoke tests (8 macros on a 32 grid), after every change
 python -m pytest multiagent/test_multiagent.py -q
@@ -170,6 +186,7 @@ python -m pytest multiagent/test_multiagent.py -q
 | `compare.py` | runs as one table, with an environment-mismatch warning |
 | `results.py` | every number the paper reports, read from `runs/`; caches the three derived measurements in `runs/q3/` |
 | `paper/` | `paper.tex` + `refs.bib` (the paper), `build.py` (figures, tables, `numbers.tex`, then Tectonic), `SUPPLEMENTARY.md` + `media/` (animations) |
+| `explainer/` | `build.py` writes `macro-swarm-explained.html`: the same results explained from zero, one self-contained file with the animations embedded |
 | `run_all.sh` | every experiment the paper reads, in order; skips runs that already exist |
 
 Every run directory holds `manifest.json` (written before training), `log.jsonl`, `summary.json`,

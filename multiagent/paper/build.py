@@ -446,6 +446,16 @@ def table_anneal(data):
         seconds = timing[chip]["swap_swarm"]["first_s"] + timing[chip]["policy_episode"]["first_s"]
         nudge_cells.append(f"{ms(w['nudge_swap'][chip])} \\small ({seconds:.1f}\\,s)")
     lines.append("\\quad agents, then swap swarm & " + " & ".join(nudge_cells) + " \\\\")
+    if data["swarm_anneal"]:
+        lines.append("\\midrule")
+        lines.append("\\multicolumn{4}{@{}l}{\\emph{Parallel annealer, warm-started from the swarm, "
+                     "3 seeds}} \\\\")
+        for budget in ("30", "120", "600"):
+            cells = []
+            for chip in CHIPS:
+                entry = data["swarm_anneal"].get(chip, {}).get(budget)
+                cells.append(ms(entry["seeds"]) if entry else "---")
+            lines.append(f"\\quad {budget}\\,s & " + " & ".join(cells) + " \\\\")
     lines += ["\\bottomrule", "\\end{tabular}"]
     return "\n".join(lines)
 
@@ -538,6 +548,14 @@ def numbers(data, frames):
         "AnnealArianeLong": data["anneal"]["ariane133"]["600"]["mean"],
         "AnnealArianeMid": data["anneal"]["ariane133"]["120"]["mean"],
         "AnnealHomeThirty": data["anneal"]["adaptec1"]["30"]["mean"],
+        "AnnealHomeMid": data["anneal"]["adaptec1"]["120"]["mean"],
+        "AnnealBigblueMid": data["anneal"]["bigblue1"]["120"]["mean"],
+        # LaTeX macro names cannot carry digits, so the budget becomes a suffix: 120 s is the
+        # plain name (the budget the prose compares at), 600 s is "Long".
+        **{f"Parallel{tag}{suffix}": data["swarm_anneal"][chip][budget]["mean"]
+           for chip, tag in zip(CHIPS, ("Home", "Bigblue", "Ariane"))
+           for budget, suffix in (("120", ""), ("600", "Long"))
+           if data["swarm_anneal"].get(chip, {}).get(budget)},
     }
     lines = [f"\\newcommand{{\\n{k}}}{{{tex_pct(v)}}}" for k, v in n.items()]
     lines.append(f"\\newcommand{{\\nPenaltyThreeSdPts}}{{${100 * n['PenaltyThreeSd']:.1f}$}}")

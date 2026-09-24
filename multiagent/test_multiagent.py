@@ -396,3 +396,34 @@ def test_annealing_refuses_an_overlapping_start(ctx):
     stacked = np.zeros((ctx.n_macros, 2), dtype=np.int64)
     with pytest.raises(SystemExit):
         Placement(ctx, stacked)
+
+
+def test_parallel_annealer_warm_started_never_undoes_the_swarm(ctx, objective):
+    """The configuration we report: descend to the swarm's optimum, then heat it.
+
+    Warm starting is the whole reason the parallel annealer is usable - cold, it can end below the
+    greedy start on a sparse design. Because it keeps the best placement it has seen, annealing
+    from the swarm's answer can only hold or improve it, and this pins that down.
+    """
+    from multiagent.swarm_swap import ExactGain, anneal_swarm, swarm
+    start = np.asarray(jnp.round(ctx.warm_start), dtype=np.float32)
+    exact = ExactGain(ctx)
+    down = swarm(ctx, start, exact, k=0, max_rounds=200, exact=exact, resolve=True)
+    run = anneal_swarm(ctx, down["positions"], seconds=3.0, rng=np.random.default_rng(0), k=0,
+                       exact=exact)
+    after = objective_mod.report(ctx, objective, jnp.asarray(run["positions"], dtype=jnp.float32))
+    assert after["is_legal"]
+    assert after["real_hpwl_snapped"] <= down["hpwl"][-1] + 1e-6
+    assert run["reverted_rounds"] <= run["rounds"], "a dropped round must still be counted as one"
+
+
+def test_parallel_annealer_stays_legal_and_keeps_its_best(ctx, objective):
+    """Swaps and shifts applied in the same round must not overlap or leave the canvas."""
+    from multiagent.swarm_swap import anneal_swarm
+    start = np.asarray(jnp.round(ctx.warm_start), dtype=np.float32)
+    before = objective_mod.report(ctx, objective, jnp.asarray(start))
+    run = anneal_swarm(ctx, start, seconds=3.0, rng=np.random.default_rng(0), k=0)
+    after = objective_mod.report(ctx, objective, jnp.asarray(run["positions"], dtype=jnp.float32))
+    assert after["is_legal"], "a round applied moves that overlap"
+    assert after["real_hpwl_snapped"] <= before["real_hpwl_snapped"] + 1e-6
+    assert run["rounds"] >= 1
